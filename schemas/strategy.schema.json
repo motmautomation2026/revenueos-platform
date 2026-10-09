@@ -1,0 +1,354 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Strategy agent output",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "customer_name",
+    "title",
+    "engagement_period",
+    "offer_reframe",
+    "positioning",
+    "market_map",
+    "prioritisation_criteria",
+    "priorities",
+    "geography",
+    "buying_behaviour",
+    "personas",
+    "problem_solution",
+    "demand_triggers",
+    "account_selection"
+  ],
+  "properties": {
+    "customer_name": {
+      "type": "string"
+    },
+    "title": {
+      "type": "string"
+    },
+    "engagement_period": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "offer_reframe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "to",
+        "why_it_matters",
+        "from"
+      ],
+      "properties": {
+        "to": {
+          "type": "string"
+        },
+        "why_it_matters": {
+          "type": "string"
+        },
+        "from": {
+          "type": "string"
+        }
+      }
+    },
+    "positioning": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "territory",
+        "pillars",
+        "customer_should_remember",
+        "claim_caveat"
+      ],
+      "properties": {
+        "territory": {
+          "type": "string"
+        },
+        "pillars": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "customer_should_remember": {
+          "type": "string"
+        },
+        "claim_caveat": {
+          "type": "string"
+        }
+      }
+    },
+    "market_map": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "industries",
+        "equipment_or_products",
+        "requirements",
+        "customer_types",
+        "example_targets"
+      ],
+      "properties": {
+        "industries": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "equipment_or_products": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "requirements": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "customer_types": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "example_targets": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "prioritisation_criteria": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "priorities": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "tier",
+          "segment",
+          "rationale",
+          "evidence"
+        ],
+        "properties": {
+          "tier": {
+            "type": "string",
+            "enum": [
+              "P1",
+              "P2",
+              "P3"
+            ]
+          },
+          "segment": {
+            "type": "string"
+          },
+          "rationale": {
+            "type": "string"
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "geography": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "region",
+          "priority",
+          "clusters_public_data",
+          "relevant_demand",
+          "why",
+          "applies_to"
+        ],
+        "properties": {
+          "region": {
+            "type": "string"
+          },
+          "priority": {
+            "type": "string"
+          },
+          "clusters_public_data": {
+            "type": "string"
+          },
+          "relevant_demand": {
+            "type": "string"
+          },
+          "why": {
+            "type": "string"
+          },
+          "applies_to": {
+            "type": "string",
+            "enum": [
+              "services",
+              "products_spares",
+              "both"
+            ]
+          }
+        }
+      }
+    },
+    "buying_behaviour": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "company_type",
+          "how_they_buy",
+          "what_they_care_about",
+          "typical_barrier",
+          "best_way_in"
+        ],
+        "properties": {
+          "company_type": {
+            "type": "string"
+          },
+          "how_they_buy": {
+            "type": "string"
+          },
+          "what_they_care_about": {
+            "type": "string"
+          },
+          "typical_barrier": {
+            "type": "string"
+          },
+          "best_way_in": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "personas": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "persona",
+          "role_in_buying",
+          "main_concern",
+          "what_motm_says",
+          "proof_to_show"
+        ],
+        "properties": {
+          "persona": {
+            "type": "string"
+          },
+          "role_in_buying": {
+            "type": "string"
+          },
+          "main_concern": {
+            "type": "string"
+          },
+          "what_motm_says": {
+            "type": "string"
+          },
+          "proof_to_show": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "problem_solution": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "buyer_problem",
+          "customer_solution"
+        ],
+        "properties": {
+          "buyer_problem": {
+            "type": "string"
+          },
+          "customer_solution": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "demand_triggers": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "visible",
+        "hidden_early",
+        "principle"
+      ],
+      "properties": {
+        "visible": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "hidden_early": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "principle": {
+          "type": "string"
+        }
+      }
+    },
+    "account_selection": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "tier",
+          "account_profile",
+          "illustrative_examples",
+          "examples_are"
+        ],
+        "properties": {
+          "tier": {
+            "type": "string",
+            "enum": [
+              "P1",
+              "P2",
+              "P3"
+            ]
+          },
+          "account_profile": {
+            "type": "string"
+          },
+          "illustrative_examples": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "examples_are": {
+            "type": "string",
+            "enum": [
+              "public_data_to_verify",
+              "customer_provided",
+              "none"
+            ]
+          }
+        }
+      }
+    }
+  }
+}

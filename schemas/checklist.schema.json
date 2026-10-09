@@ -1,0 +1,64 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Checklist agent output",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["customer_name", "known_facts", "flags", "checklist_items", "cam_notes"],
+  "properties": {
+    "customer_name": { "type": "string" },
+    "known_facts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["topic", "fact", "source", "source_quote"],
+        "properties": {
+          "topic": { "type": "string" },
+          "fact": { "type": "string" },
+          "source": { "type": "string", "enum": ["handover", "proposal"] },
+          "source_quote": { "type": "string" }
+        }
+      }
+    },
+    "flags": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "flag_type",
+          "field",
+          "detail",
+          "handover_says",
+          "proposal_says",
+          "blocks_targets"
+        ],
+        "properties": {
+          "flag_type": { "type": "string", "enum": ["missing", "vague", "conflict", "risk"] },
+          "field": { "type": "string" },
+          "detail": { "type": "string" },
+          "handover_says": { "type": ["string", "null"] },
+          "proposal_says": { "type": ["string", "null"] },
+          "blocks_targets": { "type": "boolean" }
+        }
+      }
+    },
+    "checklist_items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "category", "question", "options", "prefilled_answer", "reason"],
+        "properties": {
+          "id": { "type": "string" },
+          "category": { "type": "string" },
+          "question": { "type": "string" },
+          "options": { "type": "array", "items": { "type": "string" } },
+          "prefilled_answer": { "type": ["string", "null"] },
+          "reason": { "type": "string" }
+        }
+      }
+    },
+    "cam_notes": { "type": "array", "items": { "type": "string" } }
+  }
+}

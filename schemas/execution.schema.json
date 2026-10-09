@@ -1,0 +1,296 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Execution agent output",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "channels",
+    "process",
+    "qualification",
+    "conversion_support",
+    "price_objection_playbook",
+    "roadmap",
+    "roadmap_guardrail",
+    "accountability",
+    "prerequisites",
+    "next_steps",
+    "cam_notes_applied",
+    "out_of_scope_recommendations",
+    "open_research"
+  ],
+  "properties": {
+    "channels": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "channel",
+          "scope_item",
+          "job",
+          "audience"
+        ],
+        "properties": {
+          "channel": {
+            "type": "string"
+          },
+          "scope_item": {
+            "type": "string"
+          },
+          "job": {
+            "type": "string"
+          },
+          "audience": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "process": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "motm_steps",
+        "customer_steps",
+        "handoff_rule"
+      ],
+      "properties": {
+        "motm_steps": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "customer_steps": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "handoff_rule": {
+          "type": "string"
+        }
+      }
+    },
+    "qualification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "questions",
+        "grade_a",
+        "grade_b",
+        "grade_c"
+      ],
+      "properties": {
+        "questions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "grade_a": {
+          "type": "string"
+        },
+        "grade_b": {
+          "type": "string"
+        },
+        "grade_c": {
+          "type": "string"
+        }
+      }
+    },
+    "conversion_support": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "stage",
+          "motm_sets_up",
+          "customer_delivers"
+        ],
+        "properties": {
+          "stage": {
+            "type": "string"
+          },
+          "motm_sets_up": {
+            "type": "string"
+          },
+          "customer_delivers": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "price_objection_playbook": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "roadmap": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "phase",
+          "months",
+          "activities",
+          "milestones"
+        ],
+        "properties": {
+          "phase": {
+            "type": "string"
+          },
+          "months": {
+            "type": "string"
+          },
+          "activities": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "milestones": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "milestone",
+                "metric",
+                "value_low",
+                "value_high",
+                "basis"
+              ],
+              "properties": {
+                "milestone": {
+                  "type": "string"
+                },
+                "metric": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "value_low": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "value_high": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "basis": {
+                  "type": "string",
+                  "enum": [
+                    "customer_data",
+                    "cam_notes",
+                    "motm_proposal",
+                    "qualitative"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "roadmap_guardrail": {
+      "type": "string"
+    },
+    "accountability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "motm",
+        "customer"
+      ],
+      "properties": {
+        "motm": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "customer": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "prerequisites": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "proof_assets",
+        "operational_support",
+        "governance_inputs"
+      ],
+      "properties": {
+        "proof_assets": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "operational_support": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "governance_inputs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "next_steps": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "cam_notes_applied": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "note",
+          "effect"
+        ],
+        "properties": {
+          "note": {
+            "type": "string"
+          },
+          "effect": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "out_of_scope_recommendations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "open_research": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

@@ -1,0 +1,471 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Diagnosis agent output",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "customer_name",
+    "readiness",
+    "conflicts",
+    "business_understanding",
+    "key_numbers",
+    "where_they_win",
+    "how_they_sell_today",
+    "gap",
+    "market_conditions",
+    "competition",
+    "funnel_facts",
+    "capacity",
+    "data_gaps"
+  ],
+  "properties": {
+    "customer_name": {
+      "type": "string"
+    },
+    "readiness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "can_proceed_to_strategy",
+        "blockers"
+      ],
+      "properties": {
+        "can_proceed_to_strategy": {
+          "type": "boolean"
+        },
+        "blockers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "blocker",
+              "question_to_resolve"
+            ],
+            "properties": {
+              "blocker": {
+                "type": "string"
+              },
+              "question_to_resolve": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "conflicts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "field",
+          "bd_or_proposal_value",
+          "customer_value",
+          "conflict_type",
+          "blocking",
+          "suggested_question",
+          "evidence"
+        ],
+        "properties": {
+          "field": {
+            "type": "string"
+          },
+          "bd_or_proposal_value": {
+            "type": "string"
+          },
+          "customer_value": {
+            "type": "string"
+          },
+          "conflict_type": {
+            "type": "string",
+            "enum": [
+              "commitment",
+              "estimate",
+              "aspiration"
+            ]
+          },
+          "blocking": {
+            "type": "boolean"
+          },
+          "suggested_question": {
+            "type": "string"
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "business_understanding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "summary",
+        "value_chain",
+        "offerings"
+      ],
+      "properties": {
+        "summary": {
+          "type": "string"
+        },
+        "value_chain": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "products_or_equipment",
+            "buyer_risk",
+            "need_created",
+            "customer_solution"
+          ],
+          "properties": {
+            "products_or_equipment": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "buyer_risk": {
+              "type": "string"
+            },
+            "need_created": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "customer_solution": {
+              "type": "string"
+            }
+          }
+        },
+        "offerings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "type",
+              "notes"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "service",
+                  "product",
+                  "aftermarket",
+                  "other"
+                ]
+              },
+              "notes": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "key_numbers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "label",
+          "value",
+          "source_ref"
+        ],
+        "properties": {
+          "label": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          },
+          "source_ref": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "where_they_win": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "label",
+          "answer",
+          "source_ref"
+        ],
+        "properties": {
+          "label": {
+            "type": "string"
+          },
+          "answer": {
+            "type": "string"
+          },
+          "source_ref": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "how_they_sell_today": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "label",
+          "answer",
+          "source_ref"
+        ],
+        "properties": {
+          "label": {
+            "type": "string"
+          },
+          "answer": {
+            "type": "string"
+          },
+          "source_ref": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "gap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "today",
+        "target",
+        "core_message"
+      ],
+      "properties": {
+        "today": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "target": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "core_message": {
+          "type": "string"
+        }
+      }
+    },
+    "market_conditions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "insight",
+          "detail",
+          "implication_for_customer",
+          "basis"
+        ],
+        "properties": {
+          "insight": {
+            "type": "string"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "implication_for_customer": {
+            "type": "string"
+          },
+          "basis": {
+            "type": "string",
+            "enum": [
+              "customer",
+              "public_knowledge",
+              "inference"
+            ]
+          }
+        }
+      }
+    },
+    "competition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "named_competitors",
+        "competitor_categories",
+        "summary"
+      ],
+      "properties": {
+        "named_competitors": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "where_they_win",
+              "where_customer_wins",
+              "public_profile_verify",
+              "evidence"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "where_they_win": {
+                "type": "string"
+              },
+              "where_customer_wins": {
+                "type": "string"
+              },
+              "public_profile_verify": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "evidence": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "competitor_categories": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "summary": {
+          "type": "string"
+        }
+      }
+    },
+    "funnel_facts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "metric",
+          "value_low",
+          "value_high",
+          "unit",
+          "source",
+          "confidence",
+          "reasoning",
+          "evidence"
+        ],
+        "properties": {
+          "metric": {
+            "type": "string"
+          },
+          "value_low": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "value_high": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "unit": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "customer",
+              "handover",
+              "proposal",
+              "assumption"
+            ]
+          },
+          "confidence": {
+            "type": "string",
+            "enum": [
+              "high",
+              "medium",
+              "low"
+            ]
+          },
+          "reasoning": {
+            "type": "string"
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "capacity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "summary",
+        "limits_volume_targets",
+        "evidence"
+      ],
+      "properties": {
+        "summary": {
+          "type": "string"
+        },
+        "limits_volume_targets": {
+          "type": "boolean"
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "data_gaps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "item",
+          "why_it_matters",
+          "source_ref"
+        ],
+        "properties": {
+          "item": {
+            "type": "string"
+          },
+          "why_it_matters": {
+            "type": "string"
+          },
+          "source_ref": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}
