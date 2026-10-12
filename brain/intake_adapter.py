@@ -489,6 +489,28 @@ def selftest() -> bool:
                and master_agent.choose_document(["master_agent.py", "--intake"]) == "data/intake_document.txt")
         expect("master_agent: --intake with no intake document -> STOPPED before planning",
                raises(lambda: master_agent.check_document(os.path.join(folder, "missing.txt"))))
+        from types import SimpleNamespace
+        from state_store import target_number
+
+        def planned(task_id, agent, output, target):
+            return SimpleNamespace(task_id=task_id, agent=agent, output_type=output, target=target)
+        tasks = [planned("T3", "QuickICP", "accounts", "150-200 large enterprises"),
+                 planned("T4", "QuickICP", "contacts", "Complete contact list for all target accounts"),
+                 planned("T5", "Email Agent", "emails", "Email campaigns launched to all validated contacts"),
+                 planned("T6", "Quickhowl", "calls", "Calls to 250-350 contacts"),
+                 planned("T7", "Quickhowl", "calls", "no numeric target"),
+                 planned("T1", "CAM", "coordination", "no numeric target"),
+                 planned("T8", "Human Tele Calling", "qualified_leads", "contributes to enquiries over the month")]
+        errors = master_agent.target_number_errors(tasks)
+        flagged = [error.split(" ")[0] for error in errors]
+        expect("plan rule: QuickICP accounts/contacts, emails, calls without a number -> T4, T5, T7 flagged; "
+               "with a number (T3, T6) and non-tool tasks (CAM, tele-calling) are fine",
+               flagged == ["T4", "T5", "T7"]
+               and "T4 (QuickICP / contacts) target 'Complete contact list for all target accounts' has no number"
+               in errors[0])
+        expect("plan rule reads numbers like the runners: flagged <-> target_number() is None",
+               all((t.task_id in flagged) == (target_number(t.target) is None)
+                   for t in tasks if (t.agent, t.output_type) in master_agent.COUNTED_TOOL_TASKS))
     finally:
         shutil.rmtree(folder, ignore_errors=True)
         if saved is None:
