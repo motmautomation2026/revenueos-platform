@@ -42,6 +42,9 @@ DEBUGGING
     "STOPPED: PLAN_APPROVER is missing"   -> add PLAN_APPROVER=<your name> to .env
     "N plan rule(s) are still broken"     -> give changes, or type 'override' on purpose
     Validation errors are printed per attempt ("Validation attempt N: ...").
+    "T4 (QuickICP / contacts) target '...' has no number" -> a QuickICP accounts/contacts, Email Agent emails
+        or Quickhowl calls task needs a count in its target (the runners stop without one); the brain
+        gets the error and fixes the plan before approval (up to 3 attempts)
     Next step after approval: python orchestrator.py load <YYYY-MM>
 """
 
@@ -617,6 +620,20 @@ CHANNEL_AGENTS = {
 }
 
 
+# Tool tasks the orchestrator runs by a COUNT: their target needs a number (the runners read the largest
+# number in it, e.g. '150-200 accounts' -> 200). Without one the run stops at that task.
+COUNTED_TOOL_TASKS = {("QuickICP", "accounts"), ("QuickICP", "contacts"), ("Email Agent", "emails"),
+                      ("Quickhowl", "calls")}
+
+
+def target_number_errors(tasks) -> list[str]:
+    """Every counted tool task whose target has no number (code; same reading as the runners)."""
+    return [f"{task.task_id} ({task.agent} / {task.output_type}) target '{task.target}' has no number. "
+            "Tool tasks run by a count: give one from the document, e.g. '150-200 accounts' or '250-350 contacts'."
+            for task in tasks
+            if (task.agent, task.output_type) in COUNTED_TOOL_TASKS and not re.search(r"\d", task.target or "")]
+
+
 def validate_plan(state: MasterState) -> dict:
     plan = state["month_plan"]
     enabled = enabled_agents(state["engagement_settings"])
@@ -657,6 +674,8 @@ def validate_plan(state: MasterState) -> dict:
             if not depends_on(task, lambda t: t.agent == "QuickICP" and t.output_type == "contacts",
                               tasks_by_id, set()):
                 errors.append(f"{task.task_id} contacts prospects but no earlier QuickICP task outputs 'contacts'.")
+
+    errors += target_number_errors(plan.tasks)
 
     planned_agents = {task.agent for task in plan.tasks}
     lead_engine = " ".join(state["understanding"].motm_channels).lower()
