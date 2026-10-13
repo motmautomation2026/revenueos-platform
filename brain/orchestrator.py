@@ -161,7 +161,7 @@ from state_store import (
     now_iso, open_decision, ready_tasks, record_decision, release_run_lock, renew_run_lock, take_run_lock, update_run,
     update_task,
 )
-from runner_kit import RunnerContext, RunnerResult
+from runner_kit import RunnerContext, RunnerResult, run_understanding
 from runner_quickicp_accounts import RealAccountsTools, run_quickicp_accounts
 from runner_quickicp_contacts import RealContactsTools, run_quickicp_contacts
 from runner_email import RealEmailTools, run_email
@@ -503,11 +503,16 @@ TOOL_ROUTES = {
 }
 # Wired runners: name -> (runner function, toolset factory). The selftest swaps the factory for fakes.
 WIRED_RUNNERS: dict = {
-    "quickicp_accounts": (run_quickicp_accounts, lambda ctx: RealAccountsTools(ctx.run["run_key"], ctx.task["task_id"])),
-    "quickicp_contacts": (run_quickicp_contacts, lambda ctx: RealContactsTools(ctx.run["run_key"], ctx.task["task_id"])),
-    "email": (run_email, lambda ctx: RealEmailTools()),
-    "calls": (run_calls, lambda ctx: RealCallTools(ctx.run["run_key"], ctx.task["task_id"])),
+    "quickicp_accounts": (run_quickicp_accounts, lambda ctx: RealAccountsTools(
+        ctx.run["run_key"], ctx.task["task_id"], run_understanding(ctx.run), ctx.task["work_order"])),
+    "quickicp_contacts": (run_quickicp_contacts, lambda ctx: RealContactsTools(
+        ctx.run["run_key"], ctx.task["task_id"], run_understanding(ctx.run), ctx.task["work_order"])),
+    "email": (run_email, lambda ctx: RealEmailTools(run_understanding(ctx.run), ctx.task["work_order"])),
+    "calls": (run_calls, lambda ctx: RealCallTools(
+        ctx.run["run_key"], ctx.task["task_id"], run_understanding(ctx.run), ctx.task["work_order"])),
 }
+# Every real toolset gets the run's understanding (brain_customer_runs) and THIS task's work order:
+# a run never reads data/understanding.json or data/work_orders.json (they belong to the latest plan).
 # Decisions a tool task can wait for; the runner itself reads and acts on the answer.
 TOOL_DECISION_KINDS = {"goal_check", "goal_check_final", "paid_call_unknown", "email_approve", "call_start"}
 
@@ -1046,7 +1051,8 @@ def selftest() -> bool:
     try:
         with network_guard() as blocked:
             results = [selftest_load(), selftest_run(), selftest_tools(), selftest_contacts(),
-                       selftest_email(), selftest_calls(), selftest_5a(), selftest_5b(), selftest_close()]
+                       selftest_email(), selftest_calls(), selftest_5a(), selftest_5b(), selftest_close(),
+                       selftest_run_data()]
         print(f"\nNetwork guard: {len(blocked)} call(s) outside Supabase attempted (blocked): {blocked}")
         return all(results) and not blocked
     finally:
@@ -1991,6 +1997,54 @@ def selftest_email() -> bool:
         expect("E8b our 4 fixed phrases come FIRST and are never cut (10 max, 'Cheapest' once)",
                kept[:4] == email_tool.NEVER_SAY_DEFAULTS and len(kept) == email_tool.MAX_PHRASES
                and [p.lower() for p in kept].count("cheapest") == 1)
+
+        # E8c. email 3 is a calm follow-up; the rewrite names every hit field and says ALL fields count
+        def three(subject3="A last idea for {{company}}", preheader3="One more thought", body3="Happy to help later."):
+            def mail(subject, preheader, body, wait):
+                return ReferenceEmail(subject=subject, preheader=preheader, wait_days_before=wait,
+                                      body_html=f"<p>Hi {{{{first_name}}}},</p><p>{body}</p><p>Would a short demo help?</p>")
+            return CampaignContent(
+                campaign_name="x", campaign_description="x",
+                objective=Objective(objective="Book a demo", offer="AI automation", cta="Would a short demo help?",
+                                    target="Ops leaders", problem_solved="manual work", tone="direct",
+                                    must_mention=[], never_say=["guaranteed"]),
+                emails=[mail("Hello {{company}}", "Quick intro", "Intro.", 0),
+                        mail("An idea for {{company}}", "How teams save time", "Value.", 3),
+                        mail(subject3, preheader3, body3, 4)])
+        import json
+        schema_text = json.dumps(CampaignContent.model_json_schema())
+        asked = []
+        write([three(), three()], asked)
+        expect("E8c the first prompt has the email 3 rule (calm, never 'last chance' in subject, preheader or body); "
+               "the emails format says 'polite final follow-up', no longer 'final note'",
+               email_tool.EMAIL3_RULE in asked[0] and "polite final follow-up (calm, no urgency)" in schema_text
+               and "short final note" not in schema_text and len(asked) == 1)
+        asked, message = [], ""
+        try:
+            write([three(subject3="Last chance to automate at {{company}}"),
+                   three(preheader3="Your last chance to save hours")], asked)
+        except ToolError as error:
+            message = str(error)
+        expect("E8c the r5 case: 'last chance' in the email 3 SUBJECT -> the rewrite names 'email 3 subject', says ALL "
+               "fields (subject, preheader AND body) must be free of EVERY phrase, lists them, repeats the email 3 rule",
+               len(asked) == 2 and "- email 3 subject: 'last chance'" in asked[1]
+               and "ALL fields of ALL emails (subject, preheader AND body)" in asked[1]
+               and all(f'"{p}"' in asked[1] for p in email_tool.NEVER_SAY_DEFAULTS)
+               and "Moving a phrase to another field still fails" in asked[1]
+               and asked[1].rstrip().endswith(email_tool.EMAIL3_RULE))
+        expect("E8c ... moved to the email 3 PREHEADER after the rewrite -> the SAME STOPPED as before, naming the field",
+               message.startswith("STOPPED: the reference emails still contain never_say phrases ['last chance'] after one rewrite")
+               and "'last chance' in email 3 preheader:" in message)
+        asked = []
+        fixed = write([three(subject3="Last chance to automate at {{company}}"), three()], asked)
+        expect("E8c a clean rewrite -> the content is used (one rewrite, signature added, no 'last chance' left)",
+               len(asked) == 2 and fixed.emails[2].subject == "A last idea for {{company}}"
+               and fixed.emails[2].body_html.endswith("<p>Regards,<br>Team Anvixa</p>")
+               and not email_tool.never_say_hits(fixed))
+        asked = []
+        write([three(subject3="Last chance for {{company}}", body3="Guaranteed results, act today."), three()], asked)
+        expect("E8c hits in two fields (subject + body) -> both listed in the rewrite request",
+               "- email 3 body: 'guaranteed'" in asked[1] and "- email 3 subject: 'last chance'" in asked[1])
         expect("E8 no file in data/ was read", files_read == [])
         os.environ.pop("CUSTOMER_DISPLAY_NAME")
         expect("E8 CUSTOMER_DISPLAY_NAME missing -> STOPPED", raises(email_tool.display_name))
@@ -2699,6 +2753,242 @@ def selftest_close() -> bool:
         print(f"  {'FAIL' if left else 'PASS'}  cleanup: {deleted} test rows deleted, {'SOME' if left else 'none'} left")
         ok = ok and not left
     print("ORCHESTRATOR SELFTEST (close) OK" if ok else "ORCHESTRATOR SELFTEST (close) FAILED")
+    return ok
+
+
+def selftest_run_data() -> bool:
+    """
+    The REAL toolsets (LLM and paid parts faked) use the run's understanding + the task's own work order,
+    never data/understanding.json / data/work_orders.json; the company judge uses the task's LEDGER payload,
+    never data/quickicp_payload.json, also after a dry run and after a crash. No LLM, no paid call, no file written.
+    """
+    import company_loop
+    import email_tool
+    import quickhowl
+    import quickicp
+    import runner_quickicp_accounts as accounts_module
+    import validator
+    from email_tool import CampaignContent, Objective, ReferenceEmail
+    from quickicp import CompanyPayload
+    from runner_calls import RealCallTools
+    from runner_email import RealEmailTools
+    from runner_quickicp_accounts import RealAccountsTools, SimulatedCrash
+    from runner_quickicp_contacts import RealContactsTools
+    from state_store import get_steps
+
+    customer = "selftest-" + datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
+    print(f"\nOrchestrator RUN DATA selftest (real toolsets, LLM + paid parts faked): customer '{customer}'")
+    plan_files = {"data/understanding.json", "data/work_orders.json", "data/quickicp_payload.json"}
+    changed = {"data/understanding.json": {"customer_name": "CHANGED Corp", "business_summary": "CHANGED"},
+               "data/work_orders.json": [{"agent": "QuickICP", "output_type": "accounts", "tier": "CHANGED"},
+                                         {"agent": "QuickICP", "output_type": "contacts", "instructions": ["CHANGED"]},
+                                         {"agent": "Email Agent", "output_type": "emails", "target": "CHANGED"},
+                                         {"agent": "Quickhowl", "output_type": "calls", "target": "CHANGED"}],
+               "data/quickicp_payload.json": {"locations": ["Delhi, India"], "company_size": ["5001-10000"]}}
+    run_understanding_ = {"customer_name": "Run Customer", "business_summary": "browser automation"}
+    accounts_wo = {"work_order_id": "WO-T1", "task_id": "T1", "agent": "QuickICP", "output_type": "accounts",
+                   "task_type": "data_build", "week": 1, "depends_on": [], "target": "2 accounts", "tier": "P1-RUN",
+                   "instructions": ["run"]}
+    contacts_wo = {"task_id": "T2", "agent": "QuickICP", "output_type": "contacts", "instructions": ["RUN roles"],
+                   "target": "6 contacts"}
+    email_wo = {"task_id": "T3", "agent": "Email Agent", "output_type": "emails", "target": "RUN 3 emails"}
+    calls_wo = {"task_id": "T4", "agent": "Quickhowl", "output_type": "calls", "target": "RUN 2 calls"}
+    proof = {"approved_at": "2026-10-12T08:00:00+00:00", "approved_by": "Test Person", "answer": "yes",
+             "overridden": False, "override_reason": None, "validation_errors_at_approval": [],
+             "work_orders_count": 1, "work_orders_sha256": "x" * 64, "month_plan_sha256": "y" * 64,
+             "revenue_analysis_sha256": "z" * 64}
+
+    # ---- swaps (all restored in finally) ----
+    reads, writes, contexts = [], [], []
+    real = {"quickicp.load_json": quickicp.load_json, "validator.load_json": validator.load_json,
+            "email_tool.load_json": email_tool.load_json, "quickhowl.load_json": quickhowl.load_json,
+            "company_loop.load_json": company_loop.load_json, "quickicp.save_json": quickicp.save_json,
+            "validator.load_map": validator.load_map, "validator.fill_map": validator.fill_map}
+    patched_methods = {name: getattr(RealAccountsTools, name)
+                       for name in ("build_payload", "existing_companies", "search", "save_companies", "save_log")}
+    other = {"email_tool.write_content": email_tool.write_content, "email_tool.check_settings": email_tool.check_settings,
+             "email_tool.test_inboxes": email_tool.test_inboxes, "quickhowl.check_settings": quickhowl.check_settings,
+             "quickhowl.make_profile": quickhowl.make_profile, "quickhowl.assert_safe": quickhowl.assert_safe}
+    saved_ref = os.environ.get("CLIENT_REFERENCE")
+
+    def reader(module_load):
+        def load(path, *args, **kwargs):
+            if path in plan_files:
+                reads.append(path)
+                return changed[path]
+            return module_load(path, *args, **kwargs)
+        return load
+
+    def recorder(path, *args, **kwargs):
+        if path in plan_files:
+            writes.append(path)
+        return real["quickicp.save_json"](path, *args, **kwargs)
+
+    maps = {"industry": {"items": {"good": {"score": 90, "source": "llm", "reason": "fits"}}, "company_overrides": {}},
+            "title": {"items": {"head procurement": {"function": "procurement", "function_relevant": True,
+                                                       "source": "llm"}}, "company_overrides": {}}}
+    payload_file = "data/quickicp_payload.json"
+    file_before = open(payload_file, "rb").read() if os.path.exists(payload_file) else None
+
+    def company(domain):
+        return {"COMPANY": domain, "WEBSITE": domain, "LOCATION": "Surat, Gujarat, India", "INDUSTRY": "good",
+                "HEADCOUNT": 500}
+
+    built, searched, judge_crash = [], [], {"armed": False}
+    payload_locations = ["Pune, India", "Surat Metropolitan Area, India"]    # 1st build: the dry run; 2nd: the real run
+
+    def build_payload(self, work_order):
+        built.append({"understanding": self.understanding, "work_order": work_order})
+        return CompanyPayload(industries=["good"], locations=[payload_locations[min(len(built), 2) - 1]],
+                              company_size=["201-500"], company_count=0, coveredpages=0)
+
+    def search(self, payload):
+        searched.append(payload.model_dump())
+        return [company("s1.test"), company("s2.test")]
+
+    real_judge = RealAccountsTools.judge
+
+    def judge(self, companies):
+        if judge_crash["armed"] and companies:
+            judge_crash["armed"] = False
+            raise SimulatedCrash("crash after the paid search, before the judge")
+        return real_judge(self, companies)
+
+    def toolset(ctx):
+        return RealAccountsTools(ctx.run["run_key"], ctx.task["task_id"], run_understanding(ctx.run), ctx.task["work_order"])
+
+    real_entry = WIRED_RUNNERS["quickicp_accounts"]
+    ok = False
+    try:
+        for module, name in ((quickicp, "quickicp"), (validator, "validator"), (email_tool, "email_tool"),
+                             (quickhowl, "quickhowl"), (company_loop, "company_loop")):
+            module.load_json = reader(real[f"{name}.load_json"])
+        quickicp.save_json = recorder
+        accounts_module.save_json = recorder
+        validator.load_map = lambda kind: {**maps[kind], "items": dict(maps[kind]["items"])}
+        validator.fill_map = lambda kind, data, labels, context: contexts.append((kind, context))
+        RealAccountsTools.build_payload = build_payload
+        RealAccountsTools.existing_companies = lambda self, c: []
+        RealAccountsTools.search = search
+        RealAccountsTools.save_companies = lambda self, cs, c: {d["WEBSITE"]: 700000 + i for i, d in enumerate(cs)}
+        RealAccountsTools.save_log = lambda self, log: None
+        RealAccountsTools.judge = judge
+        WIRED_RUNNERS["quickicp_accounts"] = (run_quickicp_accounts, toolset)
+
+        run, _ = load_run(customer, "2026-10", [accounts_wo], {"month": "Month 1", "revenue_analysis": {}},
+                          run_understanding_, True, proof)
+        t1 = get_tasks(run["id"])[0]
+
+        # 1. A dry run first (payload Pune): records nothing, writes no file
+        dry = invoke_runner(run, t1, None, dry=True)
+        expect("D1 dry run: own payload (Pune), nothing in the ledger, no file written",
+               dry.kind == "dry" and get_steps(t1["id"]) == [] and writes == [])
+
+        # 2. The real run: payload Surat (ledger); crash after the paid search, before the judge
+        judge_crash["armed"] = True
+        crashed = False
+        try:
+            invoke_runner(run, t1, None)
+        except SimulatedCrash:
+            crashed = True
+        steps = {s["step"]: s for s in get_steps(t1["id"])}
+        expect("D2 real run: payload Surat saved in the ledger, the paid search done, then a crash before the judge",
+               crashed and steps["payload"]["output"]["locations"] == ["Surat Metropolitan Area, India"]
+               and steps["search"]["status"] == "done" and len(searched) == 1)
+
+        # 3. Restart (a new toolset = a new process; the 'changed' file still says Delhi)
+        result = invoke_runner(run, t1, None)
+        judged = (([s for s in get_steps(t1["id"]) if s["step"] == "state"][-1]["output"] or {}).get("loop") or {}).get("all_judged", [])
+        expect("D3 restart: the payload comes back from the LEDGER (no new build, no new search); "
+               "the same Surat companies still pass",
+               result.kind == "done" and result.achieved == 2 and len(built) == 2 and len(searched) == 1
+               and [c["validation"]["status"] for c in judged] == ["pass", "pass"])
+        expect("D4 the dry run (Pune) and the changed file (Delhi) never reached the judge",
+               all("Outside target geography" not in c["validation"]["reason"] for c in judged))
+        expect("D5 build_payload got the RUN's understanding and THIS task's work order",
+               built[-1] == {"understanding": run_understanding_, "work_order": t1["work_order"]})
+        industry_ctx = [c for kind, c in contexts if kind == "industry"]
+        expect("D6 the industry judge's context: the run's customer + this task's tier (not 'CHANGED')",
+               industry_ctx and all(c["customer"] == "Run Customer" and c["target_tier"] == "P1-RUN" for c in industry_ctx))
+        tools = RealAccountsTools(run["run_key"], "T1", run_understanding_, accounts_wo)
+        expect("D7 the judge without a ledger payload -> STOPPED (never the file)",
+               raises(lambda: real_judge(tools, [company("x.test")])))
+
+        # 4. Contacts: the title judge's context
+        people = RealContactsTools(run["run_key"], "T2", run_understanding_, contacts_wo)
+        people.company_keys = {"s1.test"}
+        verdicts = people.judge([{"FULL NAME": "A", "JOB POSITION": "Head Procurement", "COMPANY URL": "s1.test"}])
+        title_ctx = [c for kind, c in contexts if kind == "title"]
+        expect("D8 contacts judge: the run's customer + THIS task's roles; the person passes",
+               verdicts[0]["validation"]["status"] == "pass" and title_ctx[-1]["customer"] == "Run Customer"
+               and title_ctx[-1]["target_roles_work_order"]["instructions"] == ["RUN roles"])
+
+        # 5. Email: content from the run's understanding + this task's work order
+        given = {}
+
+        def write_content(ask=None, understanding=None, work_order=None):
+            given.update(understanding=understanding, work_order=work_order)
+            return CampaignContent(campaign_name="x", campaign_description="x",
+                                   objective=Objective(objective="o", offer="o", cta="Demo?", target="t",
+                                                       problem_solved="p", tone="t", must_mention=[], never_say=[]),
+                                   emails=[ReferenceEmail(subject="s", preheader="p", body_html="<p>b</p>",
+                                                          wait_days_before=0)])
+        email_tool.write_content = write_content
+        email_tool.check_settings = lambda *names: None
+        email_tool.test_inboxes = lambda: ["team@test.example"]
+        os.environ["CLIENT_REFERENCE"] = saved_ref or "selftest-reference"
+        request = RealEmailTools(run_understanding_, email_wo).build_request(
+            [{"id": 1, "customer": customer, "full_name": "Asha Rao", "email": "a@prospect.test", "company": {}}])
+        expect("D9 email: write_content got the run's understanding + THIS task's work order; reference 'RUN-CUSTOMER'",
+               given == {"understanding": run_understanding_, "work_order": email_wo}
+               and "MOTM-RUN-CUSTOMER-HYPER-" in request["body"]["reference"])
+
+        # 6. Calls: the profile from the run's understanding + this task's work order
+        profiled = {}
+
+        def make_profile(understanding, work_order):
+            profiled.update(understanding=understanding, work_order=work_order)
+            return {"profile": {"company_name": "Run Customer"}}
+        quickhowl.make_profile, quickhowl.check_settings = make_profile, lambda *names: None
+        quickhowl.assert_safe = lambda request_: None
+        RealCallTools(run["run_key"], "T4", run_understanding_, calls_wo).build_request(
+            [{"name": "Asha", "phone": "+919000000001", "company": "C"}])
+        expect("D10 calls: make_profile got the run's understanding + THIS task's work order",
+               profiled == {"understanding": run_understanding_, "work_order": calls_wo})
+
+        expect("D11 not one read of data/understanding.json, data/work_orders.json or data/quickicp_payload.json "
+               "on the run path; nothing written to them", reads == [] and writes == [])
+        expect("D12 data/quickicp_payload.json is byte-for-byte unchanged",
+               (open(payload_file, "rb").read() if os.path.exists(payload_file) else None) == file_before)
+        expect("D13 a run without a saved understanding -> STOPPED (no fallback to the file)",
+               raises(lambda: run_understanding({"run_key": "x", "understanding": None})))
+        expect("D14 the CLI default still reads the files (company_context() with no arguments)",
+               validator.company_context()["customer"] == "CHANGED Corp" and "data/understanding.json" in reads)
+        ok = True
+    except AssertionError as error:
+        print(f"  FAIL  {error}")
+    finally:
+        for module, name in ((quickicp, "quickicp"), (validator, "validator"), (email_tool, "email_tool"),
+                             (quickhowl, "quickhowl"), (company_loop, "company_loop")):
+            module.load_json = real[f"{name}.load_json"]
+        quickicp.save_json = real["quickicp.save_json"]
+        accounts_module.save_json = real["quickicp.save_json"]
+        validator.load_map, validator.fill_map = real["validator.load_map"], real["validator.fill_map"]
+        for name, method in patched_methods.items():
+            setattr(RealAccountsTools, name, method)
+        RealAccountsTools.judge = real_judge
+        for key, value in other.items():
+            module_name, attr = key.split(".")
+            setattr({"email_tool": email_tool, "quickhowl": quickhowl}[module_name], attr, value)
+        if saved_ref is None:
+            os.environ.pop("CLIENT_REFERENCE", None)
+        else:
+            os.environ["CLIENT_REFERENCE"] = saved_ref
+        WIRED_RUNNERS["quickicp_accounts"] = real_entry
+        deleted, left = sweep_selftest_runs(customer)
+        print(f"  {'FAIL' if left else 'PASS'}  cleanup: {deleted} test rows deleted, {'SOME' if left else 'none'} left")
+        ok = ok and not left
+    print("ORCHESTRATOR SELFTEST (run data) OK" if ok else "ORCHESTRATOR SELFTEST (run data) FAILED")
     return ok
 
 

@@ -31,6 +31,7 @@ CRASH SAFETY
                                                      never repeated automatically
     after the search, before the judge            -> the SAVED reply is judged; no new search
     during the rounds                             -> continue from the last state snapshot
+    the judge's payload after a crash             -> read back from the ledger (never a file); none -> STOPPED
 
 TARGET (code)
 ------
@@ -42,7 +43,11 @@ READS / WRITES
 --------------
     Supabase quickicp_revenueos_client_company_data (this customer): read for reuse; new passed companies saved
     brain_tool_calls / brain_decisions via runner_kit + orchestrator
-    data/quickicp_payload.json   written (the judge reads it); the old file is moved to data/archive/ first
+    brain_customer_runs.understanding + THIS task's work order (never data/understanding.json or
+                                 data/work_orders.json): keywords, the judge's context, the brain's adjustment
+    the judge's cities + minimum size: the payload of the round being judged, from this task's ledger
+                                 ('payload' / 'adjust' step, saved 'search' request, 'state' snapshot), kept
+                                 in memory; data/quickicp_payload.json is never read or written by a run
     data/runs/<run_key>/<task>_company_loop_log.json   round log (backup)
     data/maps/*_industry_map.json   the judge may ADD industries it has not seen (never removes)
 
@@ -50,16 +55,16 @@ DEBUGGING
 ---------
     "STOPPED: <task> target has no number"     -> the work order target has no number; fix the plan
     "STOPPED: TEST_TARGET_OVERRIDE ..."         -> must be a whole number > 0, and only in TEST_MODE
+    "STOPPED: no search payload from this task's ledger" -> the judge ran before any ledger payload (bug)
+    "STOPPED: run ... has no understanding saved" -> load the plan again so the run carries it
     Rounds and reasons: brain_tool_calls rows step 'state' (output.loop.log), and the log file above.
 """
 
-import json
 import os
-from datetime import datetime
 
 from company_loop import (MAX_EXTRA_ROUNDS, MAX_USER_RETRIES, TEST_TARGET, LoopState, LoopTools,
                           count_passed, rejection_summary, request_size, run_extra_rounds, run_round)
-from quickicp import PAGE_SIZE, TEST_MODE, CompanyPayload, ToolError, clean_domain, load_json, save_json
+from quickicp import PAGE_SIZE, TEST_MODE, CompanyPayload, ToolError, clean_domain, save_json
 from runner_kit import RunnerContext, RunnerResult, target_for
 from state_store import finish_step, mark_unknown, owned_rows_output
 
@@ -78,13 +83,21 @@ def runner_target(task: dict) -> int:
 class RealAccountsTools(LoopTools):
     """The real calls: company_loop's search / judge / adjust, plus payload, Supabase read and save."""
 
-    def __init__(self, run_key: str, task_id: str):
+    def __init__(self, run_key: str, task_id: str, understanding: dict, work_order: dict):
+        """understanding: the run's (runner_kit.run_understanding); work_order: THIS task's. Never data/ files."""
         self.log_file = os.path.join("data", "runs", run_key, f"{task_id}_company_loop_log.json")
+        self.understanding, self.work_order = understanding, work_order
+        self.payload: dict | None = None          # the payload of the round being judged (from the ledger)
+
+    def context(self) -> dict:
+        """What the industry judge and the brain's adjustment know: the run's customer + this task's tier."""
+        from validator import company_context
+        return company_context(self.understanding, self.work_order)
 
     def build_payload(self, work_order: dict) -> CompanyPayload:
         """Keywords (LLM) -> Prospeo suggestions -> exact names (LLM) -> payload."""
         from quickicp import build_company_payload
-        return build_company_payload(work_order, load_json("data/understanding.json"))
+        return build_company_payload(work_order, self.understanding)
 
     def existing_companies(self, customer: str) -> list[dict]:
         """This customer's companies in Supabase, in QuickICP field names (+ '_id' = row id)."""
@@ -96,17 +109,26 @@ class RealAccountsTools(LoopTools):
                  "LINKEDIN": r["linkedin"]} for r in rows]
 
     def save_payload(self, payload: CompanyPayload) -> None:
-        """Write data/quickicp_payload.json (the judge reads it); an older, different file is archived first."""
-        path = "data/quickicp_payload.json"
-        if os.path.exists(path) and load_json(path) != payload.model_dump():
-            folder = os.path.join("data", "archive", datetime.now().strftime("%Y%m%d-%H%M%S") + "-payload")
-            number, base = 1, folder
-            while os.path.exists(folder):
-                number += 1
-                folder = f"{base}-{number}"
-            os.makedirs(folder)
-            os.replace(path, os.path.join(folder, "quickicp_payload.json"))
-        save_json(path, payload.model_dump())
+        """
+        Keep the round's payload IN MEMORY for the judge. It always comes from this task's ledger (the
+        'payload' step, an 'adjust' step, a saved 'search' request or a 'state' snapshot), also after a
+        crash. No file is written: a dry run (its own toolset) can never change what the real judge uses.
+        """
+        self.payload = payload.model_dump()
+
+    def judge(self, companies: list[dict]) -> list[dict]:
+        """The company judge with THIS round's ledger payload (cities, size) and the run's context."""
+        from validator import judge_companies
+        if self.payload is None:
+            raise ToolError("STOPPED: no search payload from this task's ledger (payload / adjust step) for the "
+                            "company judge. data/quickicp_payload.json is never used by a run.")
+        return judge_companies(companies, payload=self.payload, context=self.context())
+
+    def adjust(self, work_order: dict, log: list[dict], summary: dict, shortfall: int) -> tuple[str, CompanyPayload]:
+        """New filters from the brain (LLM, with the run's context) + Prospeo exact names."""
+        from company_loop import brain_adjust, resolve_payload
+        adjust = brain_adjust(work_order, log, summary, shortfall, context=self.context())
+        return adjust.explanation, resolve_payload(adjust, work_order, shortfall)
 
     def save_log(self, log: list[dict]) -> None:
         """Round log as a backup file for this run and task."""

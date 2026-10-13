@@ -145,7 +145,6 @@ from datetime import datetime, timezone
 from typing import Literal
 
 from dotenv import load_dotenv
-from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 
 from quickicp import ToolError, check_settings, clean_domain, load_json, load_quickicp_work_order, save_json
@@ -296,8 +295,8 @@ def judge_in_batches(schema, prompts: list[str]) -> list:
     Send all prompts in parallel. Returns one item per prompt:
     the parsed answer, or the Exception if that batch failed (so other batches still count).
     """
-    llm = ChatOpenAI(model=os.getenv("OPENAI_MODEL"), temperature=0, max_retries=3, timeout=120)
-    return llm.with_structured_output(schema).batch(
+    from quickicp import llm      # the one LLM factory: OPENAI_MODEL, temperature 0, timeout + 2 retries
+    return llm().with_structured_output(schema).batch(
         prompts, config={"max_concurrency": 5}, return_exceptions=True
     )
 
@@ -348,7 +347,7 @@ def load_map(kind: str) -> dict:
     """Load this customer's map, or start an empty one. Stops clearly on a broken hand-edit."""
     path = map_path(kind)
     if not os.path.exists(path):
-        return {"customer": customer_name(), "kind": kind, "items": {}, "company_overrides": {}}
+        return {"customer": None, "kind": kind, "items": {}, "company_overrides": {}}   # name set by fill_map
     try:
         with open(path, encoding="utf-8") as file:
             data = json.load(file)
@@ -509,7 +508,7 @@ def fill_map(kind: str, data: dict, labels: dict[str, str], context: dict) -> No
         data["items"] = {key: entry for key, entry in data["items"].items()
                          if not needs_judging(kind, entry)}
     data["items"].update(new_entries)
-    data["customer"] = customer_name()
+    data["customer"] = context.get("customer") or customer_name()   # the run's name; CLI: data/understanding.json
     data["kind"] = kind
     save_map(kind, data)
     print(f"  Added {len(new_entries)} to {map_path(kind)}")
@@ -531,9 +530,13 @@ def city_word(location: str) -> str:
     return " ".join(LOCATION_NOISE.sub(" ", name).split()).lower()
 
 
-def target_city_words() -> list[str]:
-    """Searched locations as words to find in addresses: 'Delhi, India' -> 'delhi' (+ aliases)."""
-    payload = load_json("data/quickicp_payload.json")
+def target_city_words(payload: dict | None = None) -> list[str]:
+    """
+    Searched locations as words to find in addresses: 'Delhi, India' -> 'delhi' (+ aliases).
+    payload: the searched payload (the orchestrator passes the task's ledger payload); None = the CLI's
+    data/quickicp_payload.json.
+    """
+    payload = load_json("data/quickicp_payload.json") if payload is None else payload
     words = []
     for location in payload.get("locations", []):
         city = city_word(location)
@@ -541,13 +544,14 @@ def target_city_words() -> list[str]:
             words.append(city)
             words.extend(CITY_ALIASES.get(city, []))
     if not words:
-        raise ToolError("No target locations in data/quickicp_payload.json. Run 'python quickicp.py companies'.")
+        raise ToolError("No target locations in the search payload (CLI: data/quickicp_payload.json; "
+                        "run 'python quickicp.py companies').")
     return words
 
 
-def min_headcount() -> int:
-    """Smallest size searched for: ['201-500', '501-1000'] -> 201."""
-    payload = load_json("data/quickicp_payload.json")
+def min_headcount(payload: dict | None = None) -> int:
+    """Smallest size searched for: ['201-500', '501-1000'] -> 201. payload: as in target_city_words."""
+    payload = load_json("data/quickicp_payload.json") if payload is None else payload
     lows = [int(re.findall(r"\d+", size)[0]) for size in payload.get("company_size", []) if re.findall(r"\d+", size)]
     return min(lows) if lows else 0
 
@@ -571,10 +575,14 @@ def hard_check(company: dict, city_words: list[str], minimum: int) -> str | None
     return None
 
 
-def company_context() -> dict:
-    """What the industry judge needs to know about the customer and its product."""
-    understanding = load_json("data/understanding.json")
-    work_order = load_quickicp_work_order("accounts")
+def company_context(understanding: dict | None = None, work_order: dict | None = None) -> dict:
+    """
+    What the industry judge needs to know about the customer and its product.
+    The orchestrator passes the run's understanding and the task's own work order; None = the CLI's
+    data/understanding.json and the first accounts work order in data/work_orders.json.
+    """
+    understanding = load_json("data/understanding.json") if understanding is None else understanding
+    work_order = load_quickicp_work_order("accounts") if work_order is None else work_order
     return {
         "customer": understanding.get("customer_name"),
         "what_they_sell": understanding.get("business_summary"),
@@ -596,10 +604,14 @@ def company_verdict(entry: dict, label: str | None = None) -> dict:
             "reason": reason, "checked_by": source}
 
 
-def judge_companies(companies: list[dict]) -> list[dict]:
-    """Judge every company; each gets a 'validation' block: status, score, reason, checked_by."""
-    city_words = target_city_words()
-    minimum = min_headcount()
+def judge_companies(companies: list[dict], payload: dict | None = None, context: dict | None = None) -> list[dict]:
+    """
+    Judge every company; each gets a 'validation' block: status, score, reason, checked_by.
+    payload / context: given by the orchestrator (the task's ledger payload, company_context of the run);
+    None = the CLI files.
+    """
+    city_words = target_city_words(payload)
+    minimum = min_headcount(payload)
     print(f"Target city words: {city_words} | Minimum headcount: {minimum}")
 
     data = load_map("industry")
@@ -623,7 +635,7 @@ def judge_companies(companies: list[dict]) -> list[dict]:
         labels.setdefault(key, company.get("INDUSTRY").strip())
 
     if labels:
-        fill_map("industry", data, labels, company_context())
+        fill_map("industry", data, labels, context if context is not None else company_context())
     print()
 
     for index, key in company_keys.items():
@@ -674,10 +686,13 @@ def passed_company_keys() -> set[str]:
     return keys
 
 
-def people_context() -> dict:
-    """What the title judge needs: the customer's product and the target roles."""
-    understanding = load_json("data/understanding.json")
-    work_order = load_quickicp_work_order("contacts")
+def people_context(understanding: dict | None = None, work_order: dict | None = None) -> dict:
+    """
+    What the title judge needs: the customer's product and the target roles.
+    understanding / work_order: as in company_context (the run's, or the CLI files when None).
+    """
+    understanding = load_json("data/understanding.json") if understanding is None else understanding
+    work_order = load_quickicp_work_order("contacts") if work_order is None else work_order
     return {
         "customer": understanding.get("customer_name"),
         "what_they_sell": understanding.get("business_summary"),
@@ -717,11 +732,12 @@ def person_verdict(key: str, entry: dict) -> dict:
             "reason": reason, "checked_by": source}
 
 
-def judge_people(people: list[dict], company_keys: set[str] | None = None) -> list[dict]:
+def judge_people(people: list[dict], company_keys: set[str] | None = None, context: dict | None = None) -> list[dict]:
     """
     Judge every person; each gets a 'validation' block: status, score, buying_role, reason, checked_by.
     company_keys: domains / company LinkedIn pages allowed (the orchestrator passes T3's companies
     for this run); default: data/companies_passed.json.
+    context: people_context of the run (orchestrator); None = the CLI files.
     """
     company_keys = passed_company_keys() if company_keys is None else company_keys
     data = load_map("title")
@@ -743,7 +759,7 @@ def judge_people(people: list[dict], company_keys: set[str] | None = None) -> li
         labels.setdefault(key, title)
 
     if labels:
-        fill_map("title", data, labels, people_context())
+        fill_map("title", data, labels, context if context is not None else people_context())
     print()
 
     for index, key in person_keys.items():

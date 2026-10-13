@@ -45,6 +45,11 @@ OUTPUT (brain_tool_calls 'save' + the task result)
     company_ids, people_ids (owned_rows_output: customer + run_key), achieved, target, reused, bought,
     with_email, with_phone, mobile, landline, unknown_phone, phone_types {person_id: mobile|landline|unknown}
 
+PLAN DATA
+---------
+    brain_customer_runs.understanding (runner_kit.run_understanding) + THIS task's work order.
+    Never data/understanding.json or data/work_orders.json: those belong to the latest plan.
+
 DEBUGGING
 ---------
     "STOPPED: ... needs the company ids of a done QuickICP accounts task"  -> run T3 first
@@ -89,7 +94,9 @@ def enrich_cap(count: int) -> int:
 class RealContactsTools(PeopleLoopTools):
     """The real calls: people search, people judge, email / phone finders, Supabase reads and save."""
 
-    def __init__(self, run_key: str, task_id: str):
+    def __init__(self, run_key: str, task_id: str, understanding: dict, work_order: dict):
+        """understanding: the run's (runner_kit.run_understanding); work_order: THIS task's. Never data/ files."""
+        self.understanding, self.work_order = understanding, work_order
         folder = os.path.join("data", "runs", run_key)
         self.raw_file = os.path.join(folder, f"{task_id}_people_raw.json")
         self.log_file = os.path.join(folder, f"{task_id}_people_loop_log.json")
@@ -134,9 +141,9 @@ class RealContactsTools(PeopleLoopTools):
         return people
 
     def judge(self, people: list[dict]) -> list[dict]:
-        """People judge, with THIS run's T3 companies as the allowed companies."""
-        from validator import judge_people
-        return judge_people(people, self.company_keys)
+        """People judge, with THIS run's T3 companies as the allowed companies and the run's context."""
+        from validator import judge_people, people_context
+        return judge_people(people, self.company_keys, context=people_context(self.understanding, self.work_order))
 
     def enrich(self, kind: str, people: list[dict]) -> list[dict]:
         """PAID email or phone finder for one batch."""

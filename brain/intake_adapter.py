@@ -375,6 +375,129 @@ class FakeClient:
         return Query()
 
 
+def llm_selftest(expect, raises) -> None:
+    """
+    The one LLM factory (quickicp.llm) against a FAKE SLOW LLM server on 127.0.0.1: the real OpenAI client
+    times out for real, retries LLM_MAX_RETRIES times, and the caller gets one STOPPED line. Every client
+    here points at the local server with a dummy key: no real LLM call is possible.
+    master_agent.main() with a timeout: nothing archived, nothing written.
+    """
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from pydantic import BaseModel
+    import master_agent
+    import quickicp
+    import validator
+
+    seen = {"requests": 0, "bodies": [], "slow": True}
+
+    class FakeLLM(BaseHTTPRequestHandler):
+        """POST /v1/chat/completions: slow mode sleeps past the client timeout; fast mode answers at once."""
+
+        def do_POST(self):
+            seen["requests"] += 1
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+            seen["bodies"].append(body)
+            if seen["slow"]:
+                threading.Event().wait(1.5)          # longer than the test timeout (0.3 s)
+            reply = json.dumps({"id": "x", "object": "chat.completion", "created": 0, "model": body.get("model"),
+                                "choices": [{"index": 0, "finish_reason": "stop",
+                                             "message": {"role": "assistant", "content": json.dumps({"value": "ok"})}}],
+                                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}).encode()
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(reply)))
+                self.end_headers()
+                self.wfile.write(reply)
+            except OSError:
+                pass                                 # the client already gave up (timeout)
+
+        def log_message(self, *args):
+            pass
+
+    class Answer(BaseModel):
+        value: str
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), FakeLLM)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    real_llm = quickicp.llm
+    quickicp.llm = lambda timeout=quickicp.LLM_TIMEOUT_SECONDS, **options: real_llm(
+        timeout=min(timeout, 0.3), base_url=f"http://127.0.0.1:{server.server_port}/v1", api_key="selftest", **options)
+    saved_model = os.environ.get("OPENAI_MODEL")
+    os.environ["OPENAI_MODEL"] = saved_model or "selftest-model"
+    real_main_parts = {name: getattr(master_agent, name)
+                       for name in ("graph", "plan_approver", "check_document", "archive_plan_files", "write_proof")}
+    try:
+        client = real_llm()
+        expect("LLM factory: OPENAI_MODEL, temperature 0, 2 retries, 120 s; 300 s for the month plan + work orders",
+               client.model_name == os.environ["OPENAI_MODEL"] and client.temperature == 0
+               and client.max_retries == quickicp.LLM_MAX_RETRIES == 2 and client.request_timeout == 120
+               and real_llm(quickicp.LLM_TIMEOUT_LONG).request_timeout == 300)
+
+        message = ""
+        try:
+            quickicp.ask_llm(Answer, "hello", "Fake step")
+        except ToolError as error:
+            message = str(error)
+        expect("slow LLM: 1 try + 2 retries, then ONE line 'STOPPED: Fake step: the LLM did not answer within ...'",
+               seen["requests"] == 1 + quickicp.LLM_MAX_RETRIES
+               and message.startswith("STOPPED: Fake step: the LLM did not answer within")
+               and "Nothing was saved for this step; run it again." in message)
+        expect("slow LLM in a batch (work orders): STOPPED, nothing returned",
+               raises(lambda: quickicp.ask_llm_batch(Answer, ["a", "b"], "Work orders")))
+        judged = validator.judge_in_batches(Answer, ["a"])
+        expect("slow LLM in the judge: the failed batch comes back as an error (-> 'review', map not half-saved)",
+               len(judged) == 1 and isinstance(judged[0], Exception))
+
+        seen["slow"], seen["bodies"] = False, []
+        answer = quickicp.ask_llm(Answer, "hello", "Fake step")
+        expect("fast fake LLM: the answer parses; the request has OPENAI_MODEL and temperature 0",
+               answer.value == "ok" and seen["bodies"][-1].get("model") == os.environ["OPENAI_MODEL"]
+               and seen["bodies"][-1].get("temperature") == 0)
+
+        # master_agent.main(): the plan step times out -> STOPPED; nothing archived, nothing written
+        seen["slow"] = True
+        archived, proofs = [], []
+        plan_files = [os.path.join("data", n) for n in ("understanding.json", "revenue_analysis.json",
+                                                         "month_plan.json", "work_orders.json", "plan_approval.json")]
+        before = {p: os.path.getmtime(p) for p in plan_files if os.path.exists(p)}
+
+        class SlowGraph:
+            def invoke(self, *args, **kwargs):
+                return master_agent.understand_document({"document_text": "test"})   # the real node -> slow LLM
+        master_agent.graph = SlowGraph()
+        master_agent.plan_approver = lambda: "Test Person"
+        master_agent.check_document = lambda path: None
+        master_agent.archive_plan_files = lambda *a, **k: archived.append(1)
+        master_agent.write_proof = lambda *a, **k: proofs.append(1)
+        message = ""
+        try:
+            master_agent.main("data/intake_document.txt")
+        except ToolError as error:
+            message = str(error)
+        after = {p: os.path.getmtime(p) for p in plan_files if os.path.exists(p)}
+        expect("master_agent: an LLM timeout -> 'STOPPED: Understanding: ...'; NOTHING archived or written "
+               "(the old plan files stay in place)",
+               message.startswith("STOPPED: Understanding: the LLM did not answer within")
+               and archived == [] and proofs == [] and after == before)
+        source = open(master_agent.__file__, encoding="utf-8").read()
+        main_body = source[source.index("def main("):]
+        expect("master_agent: the archive step comes AFTER approval (the resume loop), right before saving",
+               main_body.index("archive_plan_files()") > main_body.index("ask_approval(errors)")
+               and main_body.index("archive_plan_files()") < main_body.index("Saved {key} to {path}"))
+    finally:
+        quickicp.llm = real_llm
+        for name, value in real_main_parts.items():
+            setattr(master_agent, name, value)
+        if saved_model is None:
+            os.environ.pop("OPENAI_MODEL", None)
+        else:
+            os.environ["OPENAI_MODEL"] = saved_model
+        server.shutdown()
+        server.server_close()
+
+
 def selftest() -> bool:
     """Fake platform data; no network, no LLM; files only in a throwaway folder."""
     project = "60d91130-c1fd-4d9f-b955-b121eb46480e"
@@ -511,6 +634,7 @@ def selftest() -> bool:
         expect("plan rule reads numbers like the runners: flagged <-> target_number() is None",
                all((t.task_id in flagged) == (target_number(t.target) is None)
                    for t in tasks if (t.agent, t.output_type) in master_agent.COUNTED_TOOL_TASKS))
+        llm_selftest(expect, raises)
     finally:
         shutil.rmtree(folder, ignore_errors=True)
         if saved is None:

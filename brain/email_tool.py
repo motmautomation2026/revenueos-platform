@@ -95,6 +95,10 @@ ENRICHED_FILE = "data/quickicp_phones_raw.json"
 STATE_FILE = "data/email_campaign_state.json"
 SAMPLES_FILE = "data/email_samples.json"
 NEVER_SAY_DEFAULTS = ["guaranteed", "cheapest", "100%", "last chance"]
+# Email 3 used to pull the LLM towards 'last chance': it is a calm follow-up (prompt guidance, not the guard).
+EMAIL3_RULE = ("Email 3 is a polite final follow-up: calm and helpful (e.g. a last useful idea, or an easy way to "
+               "reply later). It must never use urgency or deadline wording ('last chance', 'final chance', "
+               "'act now', 'hurry', 'don't miss out', 'limited time') in its subject, preheader or body.")
 
 
 # ================= WHAT THE LLM WRITES =================
@@ -124,7 +128,8 @@ class CampaignContent(BaseModel):
     campaign_name: str = Field(description="'<Customer> - <Target role> - <Month Year>'")
     campaign_description: str
     objective: Objective
-    emails: list[ReferenceEmail] = Field(description="3 reference emails: intro, value follow-up, short final note")
+    emails: list[ReferenceEmail] = Field(
+        description="3 reference emails: intro, value follow-up, polite final follow-up (calm, no urgency)")
 
 
 # ================= CONTENT (LLM) =================
@@ -178,6 +183,7 @@ def write_content(ask=ask_llm, understanding: dict | None = None, work_order: di
         "preheader or body. You may add a few more.\n"
         "- Every phrase in YOUR never_say list must not appear in YOUR OWN emails either (whole words, any case): "
         "only ban a word you do not use, e.g. if you ban 'free', also avoid 'feel free' and 'free demo'.\n"
+        f"- {EMAIL3_RULE}\n"
         "- Each email: max 90 words, <p> paragraphs only, first paragraph 'Hi {{first_name}},'. "
         "Subjects may use {{company}}. No other variables.\n"
         "- Do NOT add any sign-off, name or signature: it is added automatically.\n"
@@ -198,10 +204,7 @@ def write_content(ask=ask_llm, understanding: dict | None = None, work_order: di
         print(f"  Reference emails use never_say phrases {hit_phrases(hits)}: asking for one rewrite.")
         for line in hit_lines(hits):
             print(f"    {line}")
-        feedback = ("\n\nYOUR PREVIOUS EMAILS USED THESE FORBIDDEN PHRASES (whole words, any case):\n"
-                    + "\n".join(f"- {line}" for line in hit_lines(hits))
-                    + "\nRewrite every subject, preheader and body without them (whole words, any case: "
-                    "'free' also forbids 'feel free' and 'hassle-free').")
+        feedback = rewrite_request(hits, content.objective.never_say)
     raise ToolError(f"STOPPED: the reference emails still contain never_say phrases {hit_phrases(hits)} after one "
                     "rewrite:\n  " + "\n  ".join(hit_lines(hits)))
 
@@ -240,6 +243,23 @@ def never_say_hits(content: CampaignContent) -> list[dict]:
                     snippet = ("…" if start else "") + around + ("…" if end < len(text) else "")
                     hits.append({"phrase": phrase, "email": number, "field": field, "snippet": snippet})
     return hits
+
+
+def rewrite_request(hits: list[dict], never_say: list[str]) -> str:
+    """
+    The ONE rewrite request: every field that had a hit (by email and field), then the rule that ALL
+    fields of ALL emails must be free of EVERY never_say phrase (moving a phrase to another field still
+    fails), then the email 3 rule again.
+    """
+    fields: dict[tuple[int, str], list[str]] = {}
+    for hit in hits:
+        fields.setdefault((hit["email"], hit["field"]), []).append(f"'{hit['phrase']}' ('{hit['snippet']}')")
+    return ("\n\nYOUR PREVIOUS EMAILS USED FORBIDDEN PHRASES IN THESE FIELDS (whole words, any case):\n"
+            + "\n".join(f"- email {email} {field}: {'; '.join(found)}" for (email, field), found in sorted(fields.items()))
+            + "\nALL fields of ALL emails (subject, preheader AND body) must be free of EVERY never_say phrase: "
+            + json.dumps(never_say, ensure_ascii=False)
+            + ". Moving a phrase to another field still fails ('free' also forbids 'feel free' and 'hassle-free')."
+            + f"\n{EMAIL3_RULE}")
 
 
 def hit_phrases(hits: list[dict]) -> list[str]:
@@ -463,13 +483,20 @@ def build_launch_body(rows: list[dict] | None = None, write=None) -> dict:
     return build_launch_request(rows, write)[0]
 
 
-def build_launch_request(rows: list[dict] | None = None, write=None) -> tuple[dict, list]:
-    """(launch request, person row id of each recipient). Used by the CLI and the orchestrator's runner."""
+def build_launch_request(rows: list[dict] | None = None, write=None, understanding: dict | None = None,
+                         work_order: dict | None = None) -> tuple[dict, list]:
+    """
+    (launch request, person row id of each recipient). Used by the CLI and the orchestrator's runner.
+    understanding / work_order: the runner passes the run's understanding and THIS task's work order;
+    None (the CLI) = data/understanding.json and the first Email Agent work order in data/work_orders.json.
+    """
     check_settings("EMAIL_TOOL_USER_EMAIL")
-    customer = load_json("data/understanding.json").get("customer_name", "Customer")
+    if understanding is None:
+        understanding = load_json("data/understanding.json")
+    customer = understanding.get("customer_name", "Customer")
     workspace = (os.getenv("TEST_WORKSPACE_NAME") or customer) if TEST_MODE else customer
     reference, run_tag = campaign_reference(customer)
-    content = (write or write_content)()
+    content = write() if write else write_content(understanding=understanding, work_order=work_order)
     pairs = recipients_for(rows if rows is not None else fetch_people(validated_people_links()), run_tag)
 
     body = {

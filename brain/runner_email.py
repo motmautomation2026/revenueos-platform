@@ -27,6 +27,11 @@ REQUIRED IN .env
     EMAIL_TOOL_URL, EMAIL_TOOL_KEY, EMAIL_TOOL_USER_EMAIL, CLIENT_REFERENCE (existing account: the
     request then never holds a mailbox password), CUSTOMER_DISPLAY_NAME; TEST_RECIPIENTS in test mode
 
+PLAN DATA
+---------
+    brain_customer_runs.understanding (runner_kit.run_understanding) + THIS task's work order.
+    Never data/understanding.json or data/work_orders.json: those belong to the latest plan.
+
 DEBUGGING
 ---------
     "STOPPED: ... needs the people ids of a done QuickICP contacts task"  -> run T4 first
@@ -48,6 +53,10 @@ from state_store import owned_rows_output
 class RealEmailTools:
     """The real calls: Supabase people, email_tool content + launch + samples + approve."""
 
+    def __init__(self, understanding: dict, work_order: dict):
+        """understanding: the run's (runner_kit.run_understanding); work_order: THIS task's. Never data/ files."""
+        self.understanding, self.work_order = understanding, work_order
+
     def people(self, customer: str, ids: list[int]) -> list[dict]:
         """T4's people for THIS customer, each with its company joined (email_tool's row format)."""
         from supabase_store import COMPANY_TABLE, PEOPLE_TABLE, db
@@ -63,7 +72,8 @@ class RealEmailTools:
         import email_tool
         if not os.getenv("CLIENT_REFERENCE"):
             raise ToolError("STOPPED: CLIENT_REFERENCE is missing in .env; the runner only uses an existing account.")
-        body, person_ids = email_tool.build_launch_request(rows)
+        body, person_ids = email_tool.build_launch_request(rows, understanding=self.understanding,
+                                                           work_order=self.work_order)
         return {"body": body, "person_ids": person_ids}
 
     def launch(self, body: dict) -> dict:

@@ -432,18 +432,21 @@ def make_profile(understanding: dict, work_order: dict) -> dict:
 
 # ================= REQUEST: BUILD, SECRETS, SAFETY =================
 
-def build_request(contacts: list[dict] | None = None) -> dict:
+def build_request(contacts: list[dict] | None = None, understanding: dict | None = None,
+                  work_order: dict | None = None) -> dict:
     """
     The full request WITHOUT secrets. Saved to disk; 'start' resends exactly this.
     contacts: given by the orchestrator's calls runner; default: the latest pipeline run's people.
+    understanding / work_order: the runner passes the run's understanding and THIS task's work order;
+    None (the CLI) = data/understanding.json and the first calls work order in data/work_orders.json.
     """
     check_settings("OPENAI_MODEL", *REQUIRED_KEYS)
     reason = real_calls_block_reason()
     if reason:
         raise ToolError(reason)
 
-    understanding = load_json("data/understanding.json")
-    work_order = calls_work_order()
+    understanding = load_json("data/understanding.json") if understanding is None else understanding
+    work_order = calls_work_order() if work_order is None else work_order
     contacts = build_contacts() if contacts is None else contacts
     made = make_profile(understanding, work_order)
     company = customer_display_name(understanding)

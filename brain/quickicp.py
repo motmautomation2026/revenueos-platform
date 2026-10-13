@@ -41,7 +41,9 @@ PAGINATION (company search)
 RELIABILITY
 -----------
     - Every web call goes through post_json(): timeout + 3 retries (5s, 15s, 45s).
-    - Every LLM call goes through ask_llm(): OpenAI retries + timeout, clear error on failure.
+    - Every LLM client comes from llm() (OPENAI_MODEL, temperature 0, LLM_MAX_RETRIES = 2, 120 s per attempt;
+      300 s for the month plan + work orders). ask_llm / ask_llm_batch turn a failure into ONE line:
+      "STOPPED: <step>: the LLM did not answer within N s (2 retries). Nothing was saved for this step; run it again."
     - Every step saves its result to a file, so a failure never loses earlier work.
     - Failed batches are saved to *_failed.json and the remaining batches continue.
 
@@ -142,17 +144,43 @@ def post_json(name: str, url: str, payload: dict, timeout: int, headers: dict | 
 
 # ================= RELIABLE LLM CALL =================
 
-def llm() -> ChatOpenAI:
-    """OpenAI chat model with built-in retries and a timeout."""
-    return ChatOpenAI(model=os.getenv("OPENAI_MODEL"), temperature=0, max_retries=3, timeout=120)
+# The ONE place LLM clients are made (master_agent, runners, judges, review, check_system).
+LLM_TIMEOUT_SECONDS = 120       # per attempt
+LLM_TIMEOUT_LONG = 300          # per attempt: the big outputs (month plan, work orders)
+LLM_MAX_RETRIES = 2             # after the first attempt; then STOPPED
 
 
-def ask_llm(schema, prompt: str, name: str):
-    """Ask the LLM for a structured answer; turn any failure into a clear ToolError."""
+def llm(timeout: float = LLM_TIMEOUT_SECONDS, **options) -> ChatOpenAI:
+    """OpenAI chat model: OPENAI_MODEL, temperature 0, a timeout per attempt and LLM_MAX_RETRIES retries."""
+    return ChatOpenAI(model=os.getenv("OPENAI_MODEL"), temperature=0, max_retries=LLM_MAX_RETRIES,
+                      timeout=timeout, **options)
+
+
+def llm_failure(name: str, error: Exception, timeout: float) -> ToolError:
+    """One clear STOPPED line for a failed LLM call (after the client's own retries)."""
+    import httpx
+    import openai
+    if isinstance(error, (openai.APITimeoutError, httpx.TimeoutException, TimeoutError)):
+        return ToolError(f"STOPPED: {name}: the LLM did not answer within {timeout:g} s ({LLM_MAX_RETRIES} retries). "
+                         "Nothing was saved for this step; run it again.")
+    return ToolError(f"STOPPED: {name}: LLM call failed after {LLM_MAX_RETRIES} retries: {str(error)[:300]}")
+
+
+def ask_llm(schema, prompt: str, name: str, timeout: float = LLM_TIMEOUT_SECONDS):
+    """Ask the LLM for a structured answer; any failure (after the retries) -> one clear STOPPED ToolError."""
     try:
-        return llm().with_structured_output(schema).invoke(prompt)
+        return llm(timeout).with_structured_output(schema).invoke(prompt)
     except Exception as error:
-        raise ToolError(f"{name}: LLM call failed: {error}") from error
+        raise llm_failure(name, error, timeout) from error
+
+
+def ask_llm_batch(schema, prompts: list[str], name: str, timeout: float = LLM_TIMEOUT_SECONDS,
+                  max_concurrency: int = 5) -> list:
+    """Several structured answers in parallel, ALL or nothing: one failure -> STOPPED (nothing is returned)."""
+    try:
+        return llm(timeout).with_structured_output(schema).batch(prompts, config={"max_concurrency": max_concurrency})
+    except Exception as error:
+        raise llm_failure(name, error, timeout) from error
 
 
 # ================= FILES =================
