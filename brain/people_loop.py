@@ -105,7 +105,10 @@ MAX_EXTRA_ROUNDS = 2      # extra searches after round 0 (and per "try more")
 MAX_USER_RETRIES = 2      # how many times the human may choose "try more"
 OVERSAMPLE = 1.5          # ask for 1.5x the people needed, since some will fail the judge
 MAX_PER_COMPANY = 10      # upper limit for count_per_company
-TEST_PEOPLE_TARGET = 10   # test runs: small target to keep credits low
+# Test runs: a small target keeps credits low. The platform's Staging switch passes the person's
+# own number as STAGING_PEOPLE (run_for.py).
+from quickicp import staging_number
+TEST_PEOPLE_TARGET = staging_number("STAGING_PEOPLE", 10)
 
 
 # ================= LOOP STATE =================

@@ -1,5 +1,6 @@
 // User messages are always built from database rows. No customer-specific text lives in code.
 
+import { answerForSharing } from "@/lib/checklist-secrets";
 import type { DocType } from "@/lib/files/rules";
 
 const DOC_HEADINGS: Record<DocType, string> = {
@@ -38,7 +39,7 @@ export function buildDocumentBlock(project: InputProject, files: InputFile[]): s
 export function buildFilledChecklistBlock(items: InputChecklistItem[]): string {
   const lines = items.map(
     (item) =>
-      `${item.code} [${item.category}] ${item.question}\nAnswer: ${item.answer?.trim() || "(not answered)"}`
+      `${item.code} [${item.category}] ${item.question}\nAnswer: ${answerForSharing(item.question, item.answer)?.trim() || "(not answered)"}`
   );
   return ["=== FILLED CHECKLIST ===", ...lines].join("\n");
 }

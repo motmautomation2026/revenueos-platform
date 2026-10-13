@@ -1,3 +1,4 @@
+import { withFixedSenderQuestions } from "@/lib/checklist-sender";
 import "server-only";
 import { requireProject } from "@/lib/auth";
 import type { InputFile } from "@/lib/agents/build-inputs";
@@ -120,12 +121,13 @@ export async function generateChecklist(projectId: string): Promise<GenerateChec
     if (checklistError || !checklist) throw new AgentError("Could not save the checklist.");
 
     const { error: itemsError } = await supabase.from(TABLES.checklistItems).insert(
-      questionsOf(run.data).map((item, index) => {
+      // The agent decides whether to ask for sender details; their wording and codes are fixed.
+      withFixedSenderQuestions(questionsOf(run.data)).map((item, index) => {
         const prefilled = item.prefilled_answer?.trim() || null;
         return {
           checklist_id: checklist.id,
           position: index + 1,
-          code: `Q-${index + 1}`,
+          code: item.code,
           category: item.category.trim() || "General",
           question: item.question.trim(),
           options: item.options.map((o) => o.trim()).filter(Boolean),

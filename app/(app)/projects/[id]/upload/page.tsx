@@ -24,10 +24,10 @@ export default async function UploadPage({ params }: { params: Promise<{ id: str
   return (
     <div className="grid gap-4">
       <div>
-        <h2 className="text-lg font-semibold">Upload documents</h2>
+        <h2 className="text-lg font-semibold">Inputs</h2>
         <p className="text-sm text-muted-foreground">
-          Add this customer&apos;s documents and pick a type for each. The text is extracted on the
-          server and used to write the checklist.
+          The customer&apos;s documents. Pick a type for each one; the text is read from them and used
+          to write the checklist and the plan.
         </p>
       </div>
       <Uploader

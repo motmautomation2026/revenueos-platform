@@ -2,3 +2,7 @@
 .env
 __pycache__/
 data/
+# One working folder per customer (plans, results, logs): never committed, same as data/
+customers/
+# The worker's own output (install_worker.ps1)
+logs/

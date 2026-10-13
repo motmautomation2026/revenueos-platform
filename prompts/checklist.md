@@ -35,6 +35,7 @@ COVERAGE AREAS (what MOTM needs before diagnosis; cover every area)
 - Numbers for targets: the goal (revenue, orders or opportunities) and its period; whether revenue means orders booked or revenue recognised; average order value (a range per product or service is fine); enquiry-to-order rate; sales cycle; repeat frequency; how much new work the customer can deliver per month.
 - Customer-side inputs for each agreed scope item, only what the customer must provide: who at the customer receives hot leads and how fast they respond (tele-calling, email, WhatsApp); access to set up the customer's email sending domain if emails go from their domain; who from the customer attends field visits, and in which cities (field visits); website/CMS access, LinkedIn admin access, brand assets, content approver (digital); account lists they already hold (market research).
 - Content MOTM can use: brochures, product sheets, case studies, photos, approved claims, anything that must not be said.
+- Email sender setup, ONLY when email campaigns are part of the agreed scope: the details MOTM needs to send emails as the customer. Ask each of these as its own question, in the category "Email sender setup": the sender name prospects will see; the sender email address; the SMTP host; the SMTP security type; the SMTP password (or app password); the IMAP host used to read replies; whether each email should be personalised for its recipient or the same for everyone. If email campaigns are not in the agreed scope, ask none of these.
 
 QUESTION RULES
 - Write between 40 and 50 questions. Never fewer than 40, never more than 50.
@@ -43,6 +44,7 @@ QUESTION RULES
 - One fact per question, in plain English a founder or plant head understands. Avoid jargon like "ICP" or "ABM"; say "ideal customers" or "target accounts".
 - Every question has a one-line `reason` saying why MOTM needs it.
 - When the customer should pick from a fixed set (for example Premium / Mid / Budget, or Yes / No), list the choices in `options`; otherwise leave `options` empty.
+- For the SMTP security type, set `options` to STARTTLS (port 587) / SSL/TLS (port 465). Never prefill the SMTP password, even if a document contains one.
 - Ask for numbers where a number is needed (₹ amounts, %, days, counts) and say the unit in the question.
 - Order the questions by coverage area; put the category name in `category`.
 - Number questions "Q-1", "Q-2" and so on.

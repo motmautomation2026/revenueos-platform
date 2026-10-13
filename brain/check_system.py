@@ -59,6 +59,9 @@ QUICKHOWL_REQUIRED = ["QUICKHOWL_URL", "QUICKHOWL_KEY", "QUICKHOWL_CLIENT_REFERE
 VOBIZ_KEYS = ["QUICKHOWL_VOBIZ_AUTH_ID", "QUICKHOWL_VOBIZ_AUTH_TOKEN", "QUICKHOWL_DID"]
 REQUIRED_FILES = ["knowledge/motm_context.md", "data/understanding.json", "data/work_orders.json"]
 SKIP_FOLDERS = {".venv", ".git", "__pycache__", "node_modules"}
+# The settings file sits next to this script. The check itself may run in a customer's own folder
+# (run_for.py: customers/<key>/), where that customer's data/ is; .env is not copied there.
+ENV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 
 results = []
 
@@ -78,7 +81,7 @@ def check_env() -> None:
         report("PASS", ".env required settings", f"all {len(REQUIRED)} present")
 
     # The same key twice: only the LAST value is used, which is easy to get wrong. Names only, never values.
-    keys = [line.split("=", 1)[0].strip() for line in open(".env", encoding="utf-8")
+    keys = [line.split("=", 1)[0].strip() for line in open(ENV_FILE, encoding="utf-8")
             if "=" in line and not line.lstrip().startswith("#")]
     duplicates = sorted({key for key in keys if keys.count(key) > 1})
     if duplicates:
@@ -86,7 +89,7 @@ def check_env() -> None:
     else:
         report("PASS", ".env duplicate keys", "none")
 
-    leftover = [key for key in SHOULD_BE_REMOVED if key in dotenv_values(".env")]
+    leftover = [key for key in SHOULD_BE_REMOVED if key in dotenv_values(ENV_FILE)]
     if leftover:
         report("WARN", ".env test-only mailbox settings", "remove: " + ", ".join(leftover))
     else:
@@ -97,8 +100,8 @@ def check_env() -> None:
 
 def check_git() -> None:
     try:
-        ignored = subprocess.run(["git", "check-ignore", ".env"], capture_output=True, text=True).returncode == 0
-        tracked = subprocess.run(["git", "ls-files", ".env"], capture_output=True, text=True).stdout.strip()
+        ignored = subprocess.run(["git", "check-ignore", ENV_FILE], capture_output=True, text=True).returncode == 0
+        tracked = subprocess.run(["git", "ls-files", ENV_FILE], capture_output=True, text=True).stdout.strip()
     except FileNotFoundError:
         report("WARN", "Git safety", "git not found; check manually that .env is not committed")
         return
@@ -113,6 +116,10 @@ def check_git() -> None:
 def check_secret_leaks() -> None:
     """Look for the exact secret values from .env inside any project file."""
     secrets = {key: os.getenv(key) for key in SECRET_KEYS if os.getenv(key) and len(os.getenv(key)) >= 12}
+    if secrets.get("QUICKHOWL_USER_PASSWORD") == os.getenv("QUICKHOWL_USER_EMAIL"):
+        # A customer whose calling account was opened with its email (run_for.py): the first password IS
+        # that email, which is not a secret and is in the customer's own files. check_quickhowl WARNs about it.
+        del secrets["QUICKHOWL_USER_PASSWORD"]
     leaks = []
     for root, folders, files in os.walk("."):
         folders[:] = [f for f in folders if f not in SKIP_FOLDERS]

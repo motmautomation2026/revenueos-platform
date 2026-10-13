@@ -146,9 +146,20 @@ def read_platform(reader: ReadOnly, project: str) -> dict:
 
 # ================= THE FOUR FIELDS (code) =================
 
+# The checklist may ask for a secret (e.g. the SMTP password of the customer's sending mailbox).
+# Such an answer must never reach data/intake_document.txt or the LLM. Same wording rule as the
+# platform (lib/checklist-secrets.ts): keep the two in step.
+SECRET_QUESTION = re.compile(
+    r"\b(pass\s?word|pass\s?code|app\s?password|secret\s?key|api\s?key|auth(?:entication)?\s?token)\b", re.I)
+SECRET_PROVIDED = "(provided; kept hidden)"
+
+
 def answer_of(item: dict) -> str | None:
-    """The customer's answer, else the prefilled answer marked as not confirmed, else None."""
+    """The customer's answer, else the prefilled answer marked as not confirmed, else None.
+    A secret answer (see SECRET_QUESTION) is replaced by SECRET_PROVIDED and never returned."""
     answer = (item.get("answer") or "").strip()
+    if SECRET_QUESTION.search(item.get("question") or ""):
+        return SECRET_PROVIDED if answer else None
     if answer:
         return answer
     prefilled = (item.get("prefilled_answer") or "").strip()

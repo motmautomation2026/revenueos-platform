@@ -36,6 +36,9 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { isSecretQuestion } from "@/lib/checklist-secrets";
+import { SENDER_CATEGORY, SENDER_CODES } from "@/lib/checklist-sender";
+import { cn } from "@/lib/utils";
 import {
   generateChecklistAction,
   importChecklistExcel,
@@ -66,6 +69,7 @@ export function ChecklistForm({
   canReopen,
   canRegenerate,
   countWarning,
+  internalNotes,
 }: {
   projectId: string;
   items: ChecklistItemView[];
@@ -73,6 +77,8 @@ export function ChecklistForm({
   canReopen: boolean;
   canRegenerate: boolean;
   countWarning: string | null;
+  /** The MOTM-only notes panel, rendered between the summary and the questions. */
+  internalNotes?: React.ReactNode;
 }) {
   const router = useRouter();
   const [answers, setAnswers] = useState<Record<string, string>>(() =>
@@ -222,106 +228,172 @@ export function ChecklistForm({
     field?.focus({ preventScroll: true });
   };
 
+  const prefilledCount = items.filter((item) => item.prefilled_answer).length;
+  const toConfirm = items.filter(
+    (item) => item.prefilled_answer && answers[item.id] === item.prefilled_answer
+  ).length;
+
   return (
     <div className="grid gap-6">
-      <div className="grid gap-3">
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-          <h2 className="text-lg font-semibold">Discovery checklist</h2>
-          {submitted && <Badge>Submitted</Badge>}
-          {countWarning && (
-            <Badge variant="outline" className="border-amber-500/50 text-amber-700 dark:text-amber-400">
-              <AlertTriangle aria-hidden />
-              {countWarning}
-            </Badge>
-          )}
-          <SaveIndicator state={saveState} />
-        </div>
-
-        <div className="grid gap-1.5">
-          <div
-            className="h-2 overflow-hidden rounded-full bg-muted"
-            role="progressbar"
-            aria-valuemin={0}
-            aria-valuemax={items.length}
-            aria-valuenow={answered}
-            aria-label="Questions answered"
-          >
-            <div className="h-full bg-primary transition-[width]" style={{ width: `${percent}%` }} />
-          </div>
-          <p className="text-sm text-muted-foreground">
-            {answered} of {items.length} answered
-          </p>
-        </div>
-
-        <div className="flex flex-wrap gap-2">
-          <a
-            href={`/api/projects/${projectId}/checklist/export`}
-            className={buttonVariants({ variant: "outline", size: "sm" })}
-            onClick={() => void flush()}
-          >
-            <Download aria-hidden />
-            Download Excel
-          </a>
-          {!submitted && (
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={busy !== null}
-              onClick={() => fileInput.current?.click()}
-            >
-              {busy === "import" ? <Loader2 className="animate-spin" aria-hidden /> : <Upload aria-hidden />}
-              Upload filled Excel
-            </Button>
-          )}
-          <input
-            ref={fileInput}
-            type="file"
-            accept=".xlsx"
-            className="hidden"
-            onChange={(e) => {
-              const file = e.target.files?.[0];
-              e.target.value = "";
-              if (file) void doImport(file);
-            }}
-          />
-          {canRegenerate && (
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={busy !== null}
-              onClick={() => setDialog("regenerate")}
-            >
-              {busy === "regenerate" ? (
-                <Loader2 className="animate-spin" aria-hidden />
+      <div className="grid gap-4">
+        <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-3">
+          <div className="grid gap-1">
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+              <h2 className="text-lg font-semibold">Discovery checklist</h2>
+              {submitted ? (
+                <span className="rounded-full bg-emerald-500/15 px-2.5 py-0.5 text-xs font-semibold text-emerald-800">
+                  Submitted
+                </span>
               ) : (
-                <RefreshCw aria-hidden />
+                <span className="rounded-full bg-primary/10 px-2.5 py-0.5 text-xs font-semibold text-primary">
+                  Being filled in
+                </span>
               )}
-              {busy === "regenerate" ? "Writing new checklist…" : "Regenerate checklist"}
-            </Button>
-          )}
+              {countWarning && (
+                <Badge variant="outline" className="border-amber-500/50 text-amber-700 dark:text-amber-400">
+                  <AlertTriangle aria-hidden />
+                  {countWarning}
+                </Badge>
+              )}
+              <SaveIndicator state={saveState} />
+            </div>
+            <p className="text-sm text-muted-foreground">
+              {submitted
+                ? "These are the answers the plan was written from."
+                : "Answer each question, or download the Excel file, fill it in and upload it back. Answers save as you type."}
+            </p>
+          </div>
+
+          <div className="flex flex-wrap gap-2">
+            <a
+              href={`/api/projects/${projectId}/checklist/export`}
+              className={buttonVariants({ variant: "outline" })}
+              onClick={() => void flush()}
+            >
+              <Download aria-hidden />
+              Download Excel
+            </a>
+            {!submitted && (
+              <Button variant="outline" disabled={busy !== null} onClick={() => fileInput.current?.click()}>
+                {busy === "import" ? <Loader2 className="animate-spin" aria-hidden /> : <Upload aria-hidden />}
+                Upload filled Excel
+              </Button>
+            )}
+            <input
+              ref={fileInput}
+              type="file"
+              accept=".xlsx"
+              className="hidden"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                e.target.value = "";
+                if (file) void doImport(file);
+              }}
+            />
+            {canRegenerate && (
+              <Button variant="outline" disabled={busy !== null} onClick={() => setDialog("regenerate")}>
+                {busy === "regenerate" ? <Loader2 className="animate-spin" aria-hidden /> : <RefreshCw aria-hidden />}
+                {busy === "regenerate" ? "Writing new checklist…" : "Regenerate"}
+              </Button>
+            )}
+          </div>
         </div>
         {busy === "regenerate" && (
           <p className="text-sm text-muted-foreground">
             The AI is reading the documents again. This usually takes one to three minutes.
           </p>
         )}
+
+        <div className="grid gap-3 md:grid-cols-3">
+          <div className="grid content-start gap-2 rounded-xl border p-4">
+            <p className="text-sm text-muted-foreground">Answered</p>
+            <p className="text-2xl leading-none font-semibold tabular-nums">
+              {answered}
+              <span className="text-base font-normal text-muted-foreground"> / {items.length}</span>
+            </p>
+            <div
+              className="h-1.5 overflow-hidden rounded-full bg-muted"
+              role="progressbar"
+              aria-valuemin={0}
+              aria-valuemax={items.length}
+              aria-valuenow={answered}
+              aria-label="Questions answered"
+            >
+              <div
+                className={cn("h-full rounded-full transition-[width]", percent >= 100 ? "bg-emerald-600" : "bg-primary")}
+                style={{ width: `${percent}%` }}
+              />
+            </div>
+          </div>
+          <div className="grid content-start gap-2 rounded-xl border p-4">
+            <p className="text-sm text-muted-foreground">Prefilled from the documents</p>
+            <p className="text-2xl leading-none font-semibold tabular-nums">{prefilledCount}</p>
+            <p className="text-xs text-muted-foreground">
+              {submitted
+                ? `${prefilledCount - toConfirm} of them were changed before submitting`
+                : `${toConfirm} still as the AI wrote them; check each one`}
+            </p>
+          </div>
+          <div className="grid content-start gap-2 rounded-xl border p-4">
+            <p className="text-sm text-muted-foreground">Sections</p>
+            <p className="text-2xl leading-none font-semibold tabular-nums">
+              {groups.filter(([, list]) => list.every((item) => answers[item.id]?.trim())).length}
+              <span className="text-base font-normal text-muted-foreground"> / {groups.length} complete</span>
+            </p>
+          </div>
+        </div>
+
+        {internalNotes}
+
+        <nav aria-label="Checklist sections" className="flex flex-wrap gap-1.5">
+          {groups.map(([category, categoryItems], index) => {
+            const done = categoryItems.filter((item) => answers[item.id]?.trim()).length;
+            const complete = done === categoryItems.length;
+            return (
+              <a
+                key={category}
+                href={`#section-${index}`}
+                className="inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-sm outline-none hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50"
+              >
+                {complete ? (
+                  <Check className="size-3.5 text-emerald-700" aria-hidden />
+                ) : (
+                  <span className="size-2 rounded-full bg-amber-500" aria-hidden />
+                )}
+                <span className="font-medium">{category}</span>
+                <span className="text-xs text-muted-foreground tabular-nums">
+                  {done}/{categoryItems.length}
+                </span>
+              </a>
+            );
+          })}
+        </nav>
       </div>
 
-      {groups.map(([category, categoryItems]) => (
-        <section key={category} className="grid gap-3">
-          <h3 className="flex items-baseline justify-between gap-3 border-b pb-1.5 text-sm font-semibold tracking-wide text-muted-foreground uppercase">
-            <span>{category}</span>
-            <span className="text-xs font-normal tracking-normal normal-case tabular-nums">
-              {categoryItems.filter((item) => answers[item.id]?.trim()).length} of {categoryItems.length}
+      {groups.map(([category, categoryItems], index) => (
+        <section key={category} id={`section-${index}`} className="scroll-mt-20 overflow-hidden rounded-xl border">
+          <h3 className="flex items-baseline justify-between gap-3 border-b bg-muted/50 px-4 py-2.5 sm:px-5">
+            <span className="grid gap-0.5">
+              <span className="font-semibold">{category}</span>
+              {category === SENDER_CATEGORY && (
+                <span className="text-xs font-normal text-muted-foreground">
+                  The mailbox your emails will be sent from. These can also be changed later on the Email page.
+                </span>
+              )}
+            </span>
+            <span className="text-sm text-muted-foreground tabular-nums">
+              {categoryItems.filter((item) => answers[item.id]?.trim()).length} of {categoryItems.length} answered
             </span>
           </h3>
-          <ol className="grid gap-4">
+          <ol className="grid gap-x-8 gap-y-5 p-4 sm:p-5 xl:grid-cols-2">
             {categoryItems.map((item) => (
               <QuestionRow
                 key={item.id}
                 item={item}
+                number={items.indexOf(item) + 1}
                 value={answers[item.id] ?? ""}
                 disabled={locked}
+                readOnly={submitted}
                 onChange={(value) => setAnswer(item.id, value)}
               />
             ))}
@@ -329,7 +401,7 @@ export function ChecklistForm({
         </section>
       ))}
 
-      <div className="sticky bottom-0 z-10 -mx-4 -mb-4 flex flex-wrap items-center gap-3 rounded-b-xl border-t bg-background/95 px-4 py-3 backdrop-blur sm:-mx-6 sm:-mb-6 sm:px-6">
+      <div className="sticky bottom-0 z-10 -mx-4 -mb-4 flex flex-wrap items-center gap-3 rounded-b-xl border-t bg-background/95 px-4 py-3 backdrop-blur sm:-mx-6 sm:-mb-6 sm:px-6 xl:-mx-8 xl:-mb-8 xl:px-8">
         {submitted ? (
           <>
             <p className="flex-1 text-sm text-muted-foreground">
@@ -428,15 +500,29 @@ function SaveIndicator({ state }: { state: SaveState }) {
   );
 }
 
+/** How a sender question is typed in: one line, with an example, never free-form "Other". */
+const SENDER_FIELDS: Record<string, { type: string; placeholder: string; inputMode?: "email" | "url" }> = {
+  "SENDER-NAME": { type: "text", placeholder: "e.g. Durel Sales Team" },
+  "SENDER-EMAIL": { type: "email", placeholder: "e.g. sales@yourcompany.com", inputMode: "email" },
+  "SENDER-SMTP-HOST": { type: "text", placeholder: "e.g. smtp.gmail.com", inputMode: "url" },
+  "SENDER-IMAP-HOST": { type: "text", placeholder: "e.g. imap.gmail.com (optional)", inputMode: "url" },
+};
+
 function QuestionRow({
   item,
+  number,
   value,
   disabled,
+  readOnly,
   onChange,
 }: {
   item: ChecklistItemView;
+  /** The question's place in the whole checklist, shown beside it. */
+  number: number;
   value: string;
   disabled: boolean;
+  /** Submitted: show the answer as text instead of a greyed-out field. */
+  readOnly: boolean;
   onChange: (value: string) => void;
 }) {
   const hasOptions = item.options.length > 0;
@@ -444,23 +530,47 @@ function QuestionRow({
   // An Excel import can bring in an answer that is not one of the options.
   const showOther = other || (hasOptions && !!value && !item.options.includes(value));
   const fieldId = `answer-${item.id}`;
-  const prefilled = !!item.prefilled_answer && value === item.prefilled_answer;
+  const secret = isSecretQuestion(item.question);
+  const [revealed, setRevealed] = useState(false);
+  const prefilled = !secret && !!item.prefilled_answer && value === item.prefilled_answer;
+  const sender = SENDER_CODES.includes(item.code);
+  const senderField = SENDER_FIELDS[item.code];
 
   const selectItems = useMemo(
     () => [
       ...item.options.map((option) => ({ value: option, label: option })),
-      { value: OTHER, label: "Other…" },
+      // A sender setting must be one of the choices the email tool accepts.
+      ...(sender ? [] : [{ value: OTHER, label: "Other…" }]),
     ],
-    [item.options]
+    [item.options, sender]
   );
 
+  if (readOnly) {
+    return (
+      <li className="grid content-start gap-1.5">
+        <p className="flex gap-2 text-sm font-medium">
+          <span className="w-6 shrink-0 text-muted-foreground tabular-nums">{number}.</span>
+          <span>{item.question}</span>
+        </p>
+        <p
+          className={cn(
+            "ml-8 rounded-lg px-3 py-2 text-sm leading-relaxed whitespace-pre-line",
+            value.trim() ? "bg-muted/60" : "border border-dashed text-muted-foreground"
+          )}
+        >
+          {value.trim() ? (secret ? "•••••••• (kept hidden)" : value.trim()) : "Not answered"}
+        </p>
+      </li>
+    );
+  }
+
   return (
-    <li className="grid gap-1.5">
+    <li className="grid content-start gap-1.5">
       <label htmlFor={fieldId} className="flex gap-2 text-sm font-medium">
-        <span className="shrink-0 text-muted-foreground tabular-nums">{item.code.replace("Q-", "")}.</span>
+        <span className="w-6 shrink-0 text-muted-foreground tabular-nums">{number}.</span>
         <span>{item.question}</span>
       </label>
-      <div className="grid gap-1.5 pl-6">
+      <div className="grid gap-1.5 pl-8">
         {hasOptions ? (
           <>
             <Select
@@ -490,7 +600,7 @@ function QuestionRow({
             </Select>
             {showOther && (
               <Input
-                aria-label={`Other answer for question ${item.code}`}
+                aria-label={`Other answer for question ${number}`}
                 placeholder="Type your answer"
                 value={value}
                 disabled={disabled}
@@ -498,6 +608,43 @@ function QuestionRow({
               />
             )}
           </>
+        ) : secret ? (
+          <>
+            <div className="flex gap-2">
+              <Input
+                id={fieldId}
+                type={revealed ? "text" : "password"}
+                // "new-password" stops the browser filling in a saved login, which would be stored as the answer.
+                autoComplete="new-password"
+                data-1p-ignore
+                data-lpignore="true"
+                spellCheck={false}
+                value={value}
+                disabled={disabled}
+                className="sm:max-w-sm"
+                onChange={(e) => onChange(e.target.value)}
+              />
+              <Button type="button" variant="outline" disabled={disabled} onClick={() => setRevealed((shown) => !shown)}>
+                {revealed ? "Hide" : "Show"}
+              </Button>
+            </div>
+            <span className="text-xs text-muted-foreground">
+              Stored with this checklist. Not sent to the AI and not written into the Excel file.
+            </span>
+          </>
+        ) : senderField ? (
+          <Input
+            id={fieldId}
+            type={senderField.type}
+            inputMode={senderField.inputMode}
+            placeholder={senderField.placeholder}
+            autoComplete="off"
+            spellCheck={false}
+            value={value}
+            disabled={disabled}
+            className="sm:max-w-md"
+            onChange={(e) => onChange(e.target.value)}
+          />
         ) : (
           <Textarea
             id={fieldId}

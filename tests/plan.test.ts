@@ -105,3 +105,15 @@ test("agent inputs follow the document and checklist block formats", () => {
       "Q-2 [Buyers] Who decides?\nAnswer: (not answered)"
   );
 });
+
+test("a password answer is never sent to the AI", () => {
+  const block = buildFilledChecklistBlock([
+    { code: "Q-41", category: "Email sender setup", question: "What is the SMTP host?", answer: "smtp.example.com" },
+    { code: "Q-42", category: "Email sender setup", question: "What is the SMTP password (or app password)?", answer: "s3cret-value" },
+    { code: "Q-43", category: "Email sender setup", question: "What is the SMTP password for the backup mailbox?", answer: "" },
+  ]);
+  assert.ok(block.includes("Answer: smtp.example.com"));
+  assert.ok(!block.includes("s3cret-value"));
+  assert.ok(block.includes("Q-42 [Email sender setup] What is the SMTP password (or app password)?\nAnswer: (provided; kept hidden)"));
+  assert.ok(block.endsWith("Answer: (not answered)"));
+});

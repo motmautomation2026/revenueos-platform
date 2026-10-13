@@ -14,11 +14,14 @@ FLOW (each step recorded in brain_tool_calls)
                        Our reference is made ONCE here; the request is never rebuilt.
     2. launch    PAID  POST the SAVED request (key = our reference). 'pending' -> same request again.
                        Crash or failure -> the SAVED request is resent (the tool answers duplicate: true).
-    3. samples   FREE  read the sample emails; not ready yet -> 'running' (next run reads again)
+       TYPE      code (email_tool.choose_campaign_type): HYPER_PERSONALIZED, or STANDARD when that is the
+                       customer's email style or most recipients have too few details. Shown to the approver.
+    3. samples   FREE  HYPER: read the tool's sample emails; not ready yet -> 'running' (next run reads again)
+                       STANDARD: no call; the emails themselves are shown, filled in for the first recipient
     4. decision  email_approve shows every sample: yes -> approve | no -> task stopped
                        (the campaign stays a DRAFT, nothing is sent)
-    5. approve   PAID  POST approve. Crash -> sent again automatically (a second approve answers
-                       200 'already_started', developer guide step 3).
+    5. approve   PAID  HYPER: POST approve. STANDARD: POST start (the campaign was stored as a DRAFT).
+                       Crash -> sent again automatically (a second one answers 200 'already_started').
     6. done      when the campaign is RUNNING. achieved = recipients launched.
                  (Opens / replies need the developer's results endpoint: a later step.)
 
@@ -91,6 +94,22 @@ class RealEmailTools:
         import email_tool
         return email_tool.plain_text(body_html)
 
+    def campaign_kind(self, body: dict) -> dict:
+        import email_tool
+        return email_tool.campaign_kind(body)
+
+    def preview(self, body: dict) -> list[dict]:
+        import email_tool
+        return email_tool.preview(body)
+
+    def start(self, state: dict) -> dict:
+        """Start a STANDARD campaign that was stored as a draft (the tool's start route)."""
+        import email_tool
+        status, reply = email_tool.call_tool("POST", email_tool.campaign_url(state, "start"))
+        if status >= 400:
+            raise ToolError(f"Start rejected ({status}): {str(reply)[:300]}")
+        return reply
+
 
 # ================= FAKE TOOLS (selftest only: no network, no LLM) =================
 
@@ -101,11 +120,12 @@ class FakeEmailTools:
         crash_launch / crash_approve   crash INSIDE that call number
     """
 
-    def __init__(self, rows, samples_after=1, crash_launch=None, crash_approve=None):
+    def __init__(self, rows, samples_after=1, crash_launch=None, crash_approve=None, standard=False):
         self.rows = rows
+        self.standard = standard
         self.samples_after = samples_after
         self.crash_launch, self.crash_approve = crash_launch, crash_approve
-        self.calls = {"build": 0, "launch": 0, "samples": 0, "approve": 0}
+        self.calls = {"build": 0, "launch": 0, "samples": 0, "approve": 0, "start": 0}
         self.launch_bodies = []
 
     def people(self, customer, ids):
@@ -118,6 +138,8 @@ class FakeEmailTools:
                 "recipients": [{"email": f"team+hp{i}@test.example", "first_name": r["full_name"]}
                                for i, r in enumerate(chosen)],
                 "emails": [{"subject": "Hello", "body_html": "<p>Hi {{first_name}},</p><p>Regards,<br>Team Anvixa</p>"}]}
+        if not self.standard:
+            body["campaign_type"] = "HYPER_PERSONALIZED"
         return {"body": body, "person_ids": [r["id"] for r in chosen]}
 
     def launch(self, body):
@@ -147,6 +169,20 @@ class FakeEmailTools:
     def plain_text(self, body_html):
         return body_html.replace("<p>", "").replace("</p>", "\n").replace("<br>", "\n")
 
+    def campaign_kind(self, body):
+        standard = body.get("campaign_type") != "HYPER_PERSONALIZED"
+        return {"type": "STANDARD" if standard else "HYPER_PERSONALIZED",
+                "note": "This customer's email style is: the same email for everyone." if standard else ""}
+
+    def preview(self, body):
+        first = body["recipients"][0]
+        return [{"email": 1, "for": first["first_name"], "subject": body["emails"][0]["subject"],
+                 "text": self.plain_text(body["emails"][0]["body_html"].replace("{{first_name}}", first["first_name"]))}]
+
+    def start(self, state):
+        self.calls["start"] += 1
+        return {"status": "already_started" if self.calls["start"] > 1 else "started", "campaign_status": "RUNNING"}
+
 
 # ================= THE RUNNER =================
 
@@ -165,15 +201,19 @@ def run_email(ctx: RunnerContext, tools) -> RunnerResult:
     reference = body["reference"]
     if not body.get("recipients"):
         raise ToolError("STOPPED: no recipient with a valid email among T4's people.")
+    kind = tools.campaign_kind(body)            # read from the saved request: the same on every run
+    standard = kind["type"] == "STANDARD"
+    kind_words = "STANDARD (the same email for everyone)" if standard else "HYPER-PERSONALIZED (rewritten for each recipient)"
 
     if ctx.dry:
         subjects = [e.get("subject") for e in body.get("emails", [])]
         lines = [f"Recipients:             {len(body['recipients'])}"
                  + (" (TEST MODE: team '+' addresses only)" if TEST_MODE else ""),
-                 f"Reference emails:       {len(subjects)}: " + " | ".join(subjects),
+                 f"Type:                   {kind_words}" + (f" - {kind['note']}" if kind["note"] else ""),
+                 f"{'Emails' if standard else 'Reference emails'}:       {len(subjects)}: " + " | ".join(subjects),
                  "Would launch:           1 campaign (stored as DRAFT, samples, then your approval before any send)"]
         return RunnerResult("dry", output={"recipients": len(body["recipients"]), "reference_emails": len(subjects),
-                                           "lines": lines})
+                                           "campaign_type": kind["type"], "lines": lines})
 
     # 2. launch the SAVED request (PAID; the tool de-duplicates by our reference)
     reply = ctx.resendable_call("launch", reference, lambda: tools.launch(body), {"reference": reference},
@@ -189,7 +229,10 @@ def run_email(ctx: RunnerContext, tools) -> RunnerResult:
             return RunnerResult.stopped(f"samples not approved (decision #{decision['id']}): {decision['reason']}. "
                                         "The campaign stays a DRAFT; nothing is sent.")
         if not (decision and decision["status"] == "answered" and decision["answer"] == "yes"):
-            if decision is None:
+            if decision is None and standard:
+                # 3. STANDARD: the tool writes no samples; show the emails as the first recipient reads them
+                shown = tools.preview(body)
+            elif decision is None:
                 # 3. samples (FREE read); not ready yet -> try again on the next run
                 samples = ctx.free_call("samples", lambda: tools.samples(state), seq=ctx.next_seq("samples"),
                                         tool="email_tool")
@@ -203,12 +246,15 @@ def run_email(ctx: RunnerContext, tools) -> RunnerResult:
                 shown = decision["question"].get("samples", [])
             # 4. a human approves the samples
             return RunnerResult.waiting("email_approve", {
-                "text": f"{task['task_id']}: approve these sample emails and START sending to "
+                "text": f"{task['task_id']}: approve these {'emails' if standard else 'sample emails'} and START sending to "
                         f"{len(body['recipients'])} recipient(s)" + (" (TEST MODE: team inboxes only)" if TEST_MODE else "")
-                        + "? yes = start, no = stop (the campaign stays a draft).",
-                "reference": reference, "samples": shown})
+                        + f"? Type: {kind_words}. " + (kind["note"] + " " if kind["note"] else "")
+                        + "yes = start, no = stop (the campaign stays a draft).",
+                "reference": reference, "samples": shown,
+                "campaign_type": kind["type"], "type_note": kind["note"]})
         # 5. approve (PAID; a second approve answers 'already_started')
-        reply_approve = ctx.resendable_call("approve", f"{reference}:approve", lambda: tools.approve(state),
+        reply_approve = ctx.resendable_call("approve", f"{reference}:approve",
+                                            lambda: tools.start(state) if standard else tools.approve(state),
                                             {"reference": reference}, tool="email_tool")
     else:
         reply_approve = approved[-1]["response"]
@@ -221,7 +267,8 @@ def run_email(ctx: RunnerContext, tools) -> RunnerResult:
     output = owned_rows_output(ctx.run, people_ids=person_ids, achieved=achieved, target=len(body["recipients"]),
                                reference=reference, campaign_id=state["campaign_id"],
                                workspace_id=state["workspace_id"], campaign_status=status,
-                               recipients=len(body["recipients"]), rejected=rejected, test_mode=TEST_MODE)
+                               recipients=len(body["recipients"]), rejected=rejected, test_mode=TEST_MODE,
+                               campaign_type=kind["type"], type_note=kind["note"])
     note = (f"campaign {reference} RUNNING for {achieved} recipient(s)"
             + (" (TEST MODE: team inboxes)" if TEST_MODE else ""))
     return RunnerResult.done(achieved, len(body["recipients"]), output, note)

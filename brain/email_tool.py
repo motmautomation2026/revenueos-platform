@@ -447,7 +447,7 @@ def campaign_reference(customer: str) -> tuple[str, str]:
 def smtp_settings() -> dict:
     """Mailbox details, only for a brand-new client (no CLIENT_REFERENCE yet)."""
     check_settings("SMTP_HOST", "SMTP_PORT", "SMTP_SECURITY", "SMTP_USERNAME", "SMTP_PASSWORD", "SMTP_DISPLAY_NAME")
-    return {
+    settings = {
         "host": os.getenv("SMTP_HOST"),
         "security_mode": os.getenv("SMTP_SECURITY"),
         "port": int(os.getenv("SMTP_PORT")),
@@ -456,6 +456,83 @@ def smtp_settings() -> dict:
         "email_address": os.getenv("SMTP_USERNAME"),
         "sender_display_name": os.getenv("SMTP_DISPLAY_NAME"),
     }
+    if os.getenv("SMTP_IMAP_HOST"):
+        # Lets the tool read replies. The IMAP login defaults to the SMTP one.
+        settings.update({"imap_host": os.getenv("SMTP_IMAP_HOST"), "imap_port": 993, "imap_security_mode": "IMPLICIT_TLS"})
+    return settings
+
+
+def with_sender(body: dict) -> dict:
+    """
+    The request as it is SENT. A customer whose own mailbox details were handed to this process
+    (run_for.py, from the platform's checklist) gets them added here, at send time only, next to
+    client_reference: the tool connects the mailbox on the first campaign and updates it after
+    that. The request that is saved and resent therefore never holds the mailbox password.
+    """
+    if "smtp" in body or not os.getenv("SMTP_HOST"):
+        return body
+    return {**body, "smtp": smtp_settings()}
+
+
+def without_password(text: str) -> str:
+    """A tool reply can echo what it was sent: never let the mailbox password into a message or a log."""
+    password = os.getenv("SMTP_PASSWORD")
+    return text.replace(password, "********") if password else text
+
+
+# ================= STANDARD OR HYPER-PERSONALIZED (code decides) =================
+
+HYPER, STANDARD = "HYPER_PERSONALIZED", "STANDARD"
+THIN_SHARE = 0.5          # more than this share of thin recipients -> the whole campaign goes STANDARD
+
+
+def is_thin(recipient: dict) -> bool:
+    """Too little to write a personal email from: no name or company, or none of title / industry / website."""
+    return (not (recipient.get("first_name") and recipient.get("company"))
+            or not any(recipient.get(key) for key in ("title", "company_industry", "company_website")))
+
+
+def choose_campaign_type(recipients: list[dict], wanted: str | None = None) -> tuple[str, str]:
+    """
+    (campaign type, the reason in plain words). Code decides, never the LLM.
+        wanted STANDARD (the customer's email style, EMAIL_CAMPAIGN_TYPE)  -> STANDARD
+        more than THIN_SHARE of the recipients are thin                    -> STANDARD (the tool would send
+                                                                              them the plain email anyway)
+        otherwise                                                          -> HYPER_PERSONALIZED
+    """
+    wanted = (wanted or os.getenv("EMAIL_CAMPAIGN_TYPE") or HYPER).strip().upper()
+    thin = sum(1 for recipient in recipients if is_thin(recipient))
+    if wanted == STANDARD:
+        return STANDARD, "This customer's email style is: the same email for everyone."
+    if recipients and thin > len(recipients) * THIN_SHARE:
+        return STANDARD, (f"{thin} of {len(recipients)} recipients have too few details for a personal email, "
+                          "so everyone gets the same email.")
+    if thin:
+        return HYPER, f"{thin} of {len(recipients)} recipients have too few details and get the plain version."
+    return HYPER, ""
+
+
+def campaign_kind(body: dict) -> dict:
+    """{'type', 'note'} of a built request. Read from the request itself, so it is the same on every later run."""
+    kind = body.get("campaign_type") or STANDARD
+    chosen, note = choose_campaign_type(body.get("recipients") or [], kind)
+    return {"type": kind, "note": note if chosen == kind else ""}
+
+
+def fill(text: str, recipient: dict) -> str:
+    """A reference text with the recipient's own values in place of {{first_name}} and {{company}}."""
+    for name in ("first_name", "last_name", "company", "title"):
+        text = text.replace("{{" + name + "}}", str(recipient.get(name) or ""))
+    return text
+
+
+def preview(body: dict) -> list[dict]:
+    """A STANDARD campaign's emails as its first recipient will read them (the tool writes no samples for it)."""
+    first = (body.get("recipients") or [{}])[0]
+    who = f"{first.get('first_name') or 'the first recipient'} at {first.get('company') or 'their company'}"
+    return [{"email": number, "for": who, "subject": fill(email.get("subject") or "", first),
+             "text": plain_text(fill(email.get("body_html") or "", first))}
+            for number, email in enumerate(body.get("emails") or [], start=1)]
 
 
 def build_launch_body(rows: list[dict] | None = None, write=None) -> dict:
@@ -467,17 +544,20 @@ def build_launch_request(rows: list[dict] | None = None, write=None) -> tuple[di
     """(launch request, person row id of each recipient). Used by the CLI and the orchestrator's runner."""
     check_settings("EMAIL_TOOL_USER_EMAIL")
     customer = load_json("data/understanding.json").get("customer_name", "Customer")
-    workspace = (os.getenv("TEST_WORKSPACE_NAME") or customer) if TEST_MODE else customer
+    # EMAIL_WORKSPACE_NAME (run_for.py: the platform's customer name) never changes between months;
+    # the understanding's name can, and the tool refuses a different user block for the same account.
+    workspace = ((os.getenv("TEST_WORKSPACE_NAME") or customer) if TEST_MODE
+                 else (os.getenv("EMAIL_WORKSPACE_NAME") or customer))
     reference, run_tag = campaign_reference(customer)
     content = (write or write_content)()
     pairs = recipients_for(rows if rows is not None else fetch_people(validated_people_links()), run_tag)
 
+    recipients = [recipient for _, recipient in pairs]
+    kind, _ = choose_campaign_type(recipients)
     body = {
         "reference": reference,
-        "campaign_type": "HYPER_PERSONALIZED",
         "user": {"email": os.getenv("EMAIL_TOOL_USER_EMAIL"), "workspace_name": workspace, "role": "ADMIN"},
-        "objective": {**content.objective.model_dump(), "email_format": "TEXT"},
-        "recipients": [recipient for _, recipient in pairs],
+        "recipients": recipients,
         "campaign": {"name": content.campaign_name, "description": content.campaign_description},
         "emails": [email.model_dump() for email in content.emails],
         "schedule": {
@@ -488,6 +568,13 @@ def build_launch_request(rows: list[dict] | None = None, write=None) -> tuple[di
             "daily_limit": DAILY_LIMIT,
         },
     }
+    if kind == HYPER:
+        # The emails are then reference emails; the tool rewrites each one for every recipient.
+        body["campaign_type"] = HYPER
+        body["objective"] = {**content.objective.model_dump(), "email_format": "TEXT"}
+    else:
+        # Everyone gets these emails as written. Stored as a DRAFT: a person approves before it starts.
+        body["auto_start"] = False
     if os.getenv("CLIENT_REFERENCE"):
         body["client_reference"] = os.getenv("CLIENT_REFERENCE")    # existing account: no smtp
     else:
@@ -537,10 +624,11 @@ def send_launch(body: dict, wait_seconds: int = 20) -> tuple[int, dict]:
     PENDING_RETRIES times. Same reference + same content is safe to resend (duplicate: true).
     """
     url = os.getenv("EMAIL_TOOL_URL")
+    payload = with_sender(body)
     for attempt in range(1, PENDING_RETRIES + 1):
-        status, reply = call_tool("POST", url, body)
+        status, reply = call_tool("POST", url, payload)
         if status >= 400:
-            raise ToolError(f"Launch rejected ({status}): {json.dumps(reply)[:500]}")
+            raise ToolError(f"Launch rejected ({status}): {without_password(json.dumps(reply))[:500]}")
         if reply.get("start_status") != "pending":
             break
         print(f"  Audience not ready yet (pending), sending the same request again in {wait_seconds}s "
@@ -548,7 +636,12 @@ def send_launch(body: dict, wait_seconds: int = 20) -> tuple[int, dict]:
         time.sleep(wait_seconds)
     start = reply.get("start_status")
     if start in ("blocked", "failed", "pending") or not reply.get("campaign_id"):
-        raise ToolError(f"Launch did not complete: start_status={start}, error={reply.get('start_error')}")
+        raise ToolError("Launch did not complete: "
+                        + without_password(f"start_status={start}, error={reply.get('start_error')}"))
+    if reply.get("mailbox_status") == "failed":
+        # The account's earlier mailbox is used instead; the reason is kept with the reply.
+        print("  WARNING: the mailbox could not be connected or updated: "
+              + without_password(str(reply.get("mailbox_error"))))
     return status, reply
 
 
@@ -556,7 +649,7 @@ def run_launch(send: bool) -> None:
     body = build_launch_body()
     save_json("data/email_launch_preview.json", masked(body))
     print(json.dumps(masked(body), indent=2, ensure_ascii=False))
-    print(f"\nRecipients: {len(body['recipients'])} | test mode: {TEST_MODE} | type: HYPER_PERSONALIZED")
+    print(f"\nRecipients: {len(body['recipients'])} | test mode: {TEST_MODE} | type: {campaign_kind(body)['type']}")
     print("Saved data/email_launch_preview.json")
     if not send:
         return

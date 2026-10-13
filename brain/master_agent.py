@@ -62,6 +62,7 @@ from pydantic import BaseModel, Field
 from plan_approval import (APPROVAL_FILE, archive_plan_files, ask_approval, describe, plan_approver,
                            write_proof)
 from quickicp import ToolError
+import platform_approval
 
 load_dotenv()
 
@@ -872,7 +873,10 @@ def check_document(path: str) -> None:
 def main(document_path: str = "data/extracted.txt") -> None:
     """Plan a month: read the document, plan, ask the human to approve, write work orders + approval proof."""
     # Who approves must be known BEFORE planning, so we never plan for nothing.
-    approver = plan_approver()
+    # Started for a platform request (run_for.py sets BRAIN_REQUEST_ID): the plan is approved in the
+    # platform, and the approver is whoever approves it there. Otherwise: the typed prompt, as before.
+    platform = platform_approval.from_environment()
+    approver = platform.PENDING if platform else plan_approver()
     check_document(document_path)
 
     # Old plan files are MOVED (never deleted) to data/archive/<YYYYMMDD-HHMMSS>/, the proof first,
@@ -904,7 +908,12 @@ def main(document_path: str = "data/extracted.txt") -> None:
             for error in errors:
                 print("  -", error)
         # Code decides: a plain 'yes' is refused while rules are broken; 'override' needs a reason.
-        approval, errors_at_approval = ask_approval(errors), errors
+        if platform:
+            reader = platform.reader(state, errors)
+            approval, errors_at_approval = ask_approval(errors, read=reader), errors
+            approver = reader.approved_by or approver
+        else:
+            approval, errors_at_approval = ask_approval(errors), errors
         state = graph.invoke(Command(resume=approval["resume"]), config)
 
     for key, path in [("understanding", "data/understanding.json"),
@@ -944,6 +953,6 @@ def main(document_path: str = "data/extracted.txt") -> None:
 if __name__ == "__main__":
     try:
         main(choose_document(sys.argv))
-    except ToolError as error:
+    except (ToolError, platform_approval.Stop) as error:
         print(error)
         sys.exit(1)

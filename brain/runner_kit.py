@@ -206,6 +206,9 @@ def target_for(task: dict, test_cap: int) -> int:
         TEST_TARGET_OVERRIDE in .env (test mode only) -> that number
         TEST_MODE                                     -> min(target_number, test_cap)
         real                                          -> target_number
+    Then the platform's Staging limit, if the person set one for this customer (run_for.py):
+        STAGING_COMPANIES for an 'accounts' task, STAGING_PEOPLE for a 'contacts' task
+                                                      -> never more than that, in test OR real mode
     """
     from quickicp import TEST_MODE
     import os
@@ -218,4 +221,16 @@ def target_for(task: dict, test_cap: int) -> int:
         return int(override)
     if task["target_number"] is None:
         raise ToolError(f"STOPPED: {task['task_id']} target has no number: '{task['work_order'].get('target')}'.")
-    return min(task["target_number"], test_cap) if TEST_MODE else task["target_number"]
+    target = min(task["target_number"], test_cap) if TEST_MODE else task["target_number"]
+    limit = staging_limit(task)
+    return min(target, limit) if limit else target
+
+
+STAGING_LIMITS = {"accounts": "STAGING_COMPANIES", "contacts": "STAGING_PEOPLE"}
+
+
+def staging_limit(task: dict) -> int | None:
+    """The person's own limit for this kind of task in the platform's Staging mode, or None."""
+    import os
+    value = (os.getenv(STAGING_LIMITS.get(task.get("output_type") or "", "")) or "").strip()
+    return int(value) if value.isdigit() and int(value) > 0 else None

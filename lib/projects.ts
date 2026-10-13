@@ -1,10 +1,5 @@
-export const ENGAGEMENT_TYPES = [
-  "Full funnel",
-  "Lead generation only",
-  "Digital / authority only",
-  "Market research only",
-  "Other",
-] as const;
+/** Every project is a full-funnel engagement; there is nothing to choose. */
+export const ENGAGEMENT_TYPE = "Full funnel";
 
 export type ProjectStatus =
   | "draft"
@@ -26,18 +21,32 @@ export type Project = {
   status: ProjectStatus;
   created_at: string;
   updated_at: string;
+  /** The customer's email: their email and calling accounts are opened with it. */
+  customer_email?: string | null;
+  /** Staging or production, and the staging limits. Absent until 0008_project_run_mode.sql is applied. */
+  run_mode?: "staging" | "production" | null;
+  staging_companies?: number | null;
+  staging_people?: number | null;
+  staging_phones?: string | null;
+  staging_emails?: string | null;
+  /** Set while the project is archived. Absent until supabase/migrations/0006_project_archive.sql is applied. */
+  archived_at?: string | null;
 };
+
+export const isArchived = (project: Pick<Project, "archived_at">) => !!project.archived_at;
 
 export const STEPS = [
   { key: "upload", number: 1, label: "Upload", path: "upload" },
   { key: "checklist", number: 2, label: "Checklist", path: "checklist" },
   { key: "plan", number: 3, label: "Plan", path: "plan" },
   { key: "review", number: 4, label: "Review", path: "plan" },
+  // Opens once the plan is ready. The work itself is run by the Brain (brain/), not by this app.
+  { key: "execution", number: 5, label: "Execution", path: "execution" },
 ] as const;
 
 export type StepKey = (typeof STEPS)[number]["key"];
 
-/** Highest step the project has reached (1-4). A step unlocks only when the previous one is done. */
+/** Highest plan-building step the project has reached (1-4). A step unlocks only when the previous one is done. */
 export function reachedStep(status: ProjectStatus): number {
   switch (status) {
     case "checklist_ready":
@@ -72,4 +81,15 @@ const STATUS_LABELS: Record<ProjectStatus, string> = {
 
 export function statusLabel(status: ProjectStatus) {
   return STATUS_LABELS[status];
+}
+
+const BUSY: ProjectStatus[] = ["checklist_generating", "plan_running"];
+const NEEDS_ATTENTION: ProjectStatus[] = ["plan_blocked", "failed"];
+
+/** Colour classes for a status pill: amber needs attention, green is ready, indigo is working. */
+export function statusTone(status: ProjectStatus) {
+  if (NEEDS_ATTENTION.includes(status)) return "bg-amber-500/15 text-amber-800";
+  if (status === "plan_ready") return "bg-emerald-500/15 text-emerald-800";
+  if (BUSY.includes(status)) return "bg-primary/10 text-primary";
+  return "bg-muted text-muted-foreground";
 }
