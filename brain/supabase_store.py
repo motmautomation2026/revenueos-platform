@@ -502,17 +502,23 @@ def separation_test() -> bool:
 # ================= RUN =================
 
 if __name__ == "__main__":
-    command = sys.argv[1] if len(sys.argv) > 1 else ""
-    try:
-        customer = current_customer()
-        if command == "check":
-            check_save(customer)
-        elif command == "separation-test":
-            sys.exit(0 if separation_test() else 1)
-        else:
-            print("Usage: python supabase_store.py check | separation-test\n"
-                  "  Companies and people are saved only by the QuickICP runners (ledger first).")
+    from quickicp import run_cli
+
+    def cli() -> None:
+        """The command line; run_cli turns a network drop into one STOPPED line (--debug: traceback)."""
+        command = sys.argv[1] if len(sys.argv) > 1 else ""
+        try:
+            customer = current_customer()
+            if command == "check":
+                check_save(customer)
+            elif command == "separation-test":
+                sys.exit(0 if separation_test() else 1)
+            else:
+                print("Usage: python supabase_store.py check | separation-test\n"
+                      "  Companies and people are saved only by the QuickICP runners (ledger first).")
+                sys.exit(1)
+        except ToolError as error:
+            print(error)
             sys.exit(1)
-    except ToolError as error:
-        print(error)
-        sys.exit(1)
+
+    run_cli(cli)

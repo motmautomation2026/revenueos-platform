@@ -75,7 +75,7 @@ from pydantic import BaseModel, Field
 from plan_approval import (APPROVAL_FILE, archive_plan_files, ask_approval, describe, plan_approver,
                            write_proof)
 from quickicp import (COUNTED_TOOL_TASKS, LLM_TIMEOUT_LONG, ToolError, ask_llm, ask_llm_batch, count_in,
-                      percent_base, percent_of)
+                      percent_base, percent_of, usage_summary)
 
 load_dotenv()
 
@@ -1071,8 +1071,17 @@ def main(document_path: str = "data/extracted.txt") -> None:
 
 
 if __name__ == "__main__":
-    try:
-        main(choose_document(sys.argv))
-    except ToolError as error:
-        print(error)
-        sys.exit(1)
+    from quickicp import run_cli
+
+    def cli() -> None:
+        """The command line; run_cli turns a network drop into one STOPPED line (--debug: traceback)."""
+        try:
+            main(choose_document(sys.argv))
+        except ToolError as error:
+            print(error)
+            sys.exit(1)
+        finally:
+            print()
+            print(f"{usage_summary()}   (every call: data/llm_usage.jsonl)")
+
+    run_cli(cli)

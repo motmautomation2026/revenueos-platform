@@ -318,6 +318,8 @@ def run_e2e(steps: Steps, customer: str, month: str | None = None, resume: bool 
     say("SUMMARY")
     for line in lines:
         print(f"  {line}")
+    from quickicp import usage_summary
+    print(f"  {usage_summary()}   (every call: data/llm_usage.jsonl)")
     return {"run_key": run["run_key"], "ended_because": ended, "summary": lines, "review": review}
 
 
@@ -513,15 +515,21 @@ def selftest() -> bool:
 
 
 if __name__ == "__main__":
-    args = sys.argv[1:]
-    try:
-        if args == ["selftest"]:
-            sys.exit(0 if selftest() else 1)
-        month_arg = args[args.index("--month") + 1] if "--month" in args else None
-        if set(args) - {"--month", "--resume", month_arg}:
-            print("Usage: python e2e_test.py selftest | python e2e_test.py [--month 2026-10] [--resume]")
+    from quickicp import run_cli
+
+    def cli() -> None:
+        """The command line; run_cli turns a network drop into one STOPPED line (--debug: traceback)."""
+        args = sys.argv[1:]
+        try:
+            if args == ["selftest"]:
+                sys.exit(0 if selftest() else 1)
+            month_arg = args[args.index("--month") + 1] if "--month" in args else None
+            if set(args) - {"--month", "--resume", month_arg}:
+                print("Usage: python e2e_test.py selftest | python e2e_test.py [--month 2026-10] [--resume]")
+                sys.exit(1)
+            run_e2e(Steps(), current_customer(), month_arg, resume="--resume" in args)
+        except ToolError as error:
+            print(error)
             sys.exit(1)
-        run_e2e(Steps(), current_customer(), month_arg, resume="--resume" in args)
-    except ToolError as error:
-        print(error)
-        sys.exit(1)
+
+    run_cli(cli, rerun="rerun the same command (once step 4 'load' is done: python e2e_test.py --resume)")

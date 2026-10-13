@@ -50,6 +50,9 @@ from quickicp import COUNTED_TOOL_TASKS, ToolError, percent_base, percent_of
 from state_store import finish_step, get_decisions, get_steps, renew_run_lock, start_step
 
 
+# Ledger keys of paid calls sent but not yet saved, in this process (read by quickicp.network_stop_line).
+PAID_IN_FLIGHT: list[str] = []
+
 @dataclass
 class RunnerResult:
     """What a runner tells the orchestrator. Code decides which one."""
@@ -140,12 +143,15 @@ class RunnerContext:
         row, is_new = start_step(self.task["id"], step, self.key(step, seq), tool, True, request)
         if not is_new:
             raise ToolError(f"STOPPED: paid call key {self.key(step, seq)} already used; refusing to call again.")
+        PAID_IN_FLIGHT.append(row["idempotency_key"])  # for the network-drop line only; cleared once saved
         try:
             response = fn()
         except ToolError as error:
             finish_step(row["id"], "failed", error=str(error))
+            PAID_IN_FLIGHT.remove(row["idempotency_key"])
             raise
         finish_step(row["id"], "done", response={"items": response} if isinstance(response, list) else response)
+        PAID_IN_FLIGHT.remove(row["idempotency_key"])
         return response
 
     def resendable_call(self, step: str, key: str, fn: Callable[[], object], request: dict, tool: str):

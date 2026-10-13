@@ -120,7 +120,6 @@ import os
 import re
 import sys
 import time
-import traceback
 from datetime import datetime
 
 import requests
@@ -642,13 +641,15 @@ def parse_manual_args(args: list[str]) -> tuple[str, str, str, str | None]:
 
 
 if __name__ == "__main__":
-    try:
-        command, month, task_id, reference = parse_manual_args(sys.argv[1:])
-        COMMANDS[command](ledger_campaign(month, task_id, reference))
-    except ToolError as error:
-        print(error)
-        sys.exit(1)
-    except Exception:
-        print("\nUNEXPECTED ERROR (details below for debugging):")
-        traceback.print_exc()
-        sys.exit(1)
+    from quickicp import run_cli
+
+    def cli() -> None:
+        """The command line; run_cli turns a network drop into one STOPPED line (--debug: traceback)."""
+        try:
+            command, month, task_id, reference = parse_manual_args(sys.argv[1:])
+            COMMANDS[command](ledger_campaign(month, task_id, reference))
+        except ToolError as error:
+            print(error)
+            sys.exit(1)
+
+    run_cli(cli)

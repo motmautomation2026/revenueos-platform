@@ -130,7 +130,6 @@ import json
 import os
 import re
 import sys
-import traceback
 from datetime import datetime, timezone
 from typing import Literal
 
@@ -286,7 +285,7 @@ def judge_in_batches(schema, prompts: list[str]) -> list:
     the parsed answer, or the Exception if that batch failed (so other batches still count).
     """
     from quickicp import llm      # the one LLM factory: OPENAI_MODEL, temperature 0, timeout + 2 retries
-    return llm().with_structured_output(schema).batch(
+    return llm(name=f"Judge ({schema.__name__})").with_structured_output(schema).batch(
         prompts, config={"max_concurrency": 5}, return_exceptions=True
     )
 
@@ -854,16 +853,18 @@ def selftest() -> None:
 MODES = {"maps": show_maps, "reset-maps": reset_maps, "selftest": selftest}
 
 if __name__ == "__main__":
-    mode = sys.argv[1] if len(sys.argv) > 1 else ""
-    if mode not in MODES:
-        print("Usage: python validator.py " + " | ".join(MODES))
-        sys.exit(1)
-    try:
-        MODES[mode]()
-    except ToolError as error:
-        print("\nSTOPPED:", error)
-        sys.exit(1)
-    except Exception:
-        print("\nUNEXPECTED ERROR (details below for debugging):")
-        traceback.print_exc()
-        sys.exit(1)
+    from quickicp import run_cli
+
+    def cli() -> None:
+        """The command line; run_cli turns a network drop into one STOPPED line (--debug: traceback)."""
+        mode = sys.argv[1] if len(sys.argv) > 1 else ""
+        if mode not in MODES:
+            print("Usage: python validator.py " + " | ".join(MODES))
+            sys.exit(1)
+        try:
+            MODES[mode]()
+        except ToolError as error:
+            print("\nSTOPPED:", error)
+            sys.exit(1)
+
+    run_cli(cli)
