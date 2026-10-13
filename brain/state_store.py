@@ -108,7 +108,7 @@ from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
 
-from quickicp import ToolError, max_number
+from quickicp import ToolError, count_in
 
 load_dotenv()
 
@@ -292,9 +292,9 @@ def current_customer() -> str:
 
 
 def target_number(target_text: str) -> int | None:
-    """Largest number in a work order target ('150-200 accounts' -> 200); None if it has no number."""
-    number = max_number(target_text, -1)
-    return None if number < 0 else number
+    """Largest COUNT in a work order target ('150-200 accounts' -> 200); None if it has none. A percent is a
+    share, not a count ('100% of contacts' -> None): runner_kit.percent_target resolves it at run time."""
+    return count_in(target_text)
 
 
 def assert_no_secrets(data, path: str = "") -> None:

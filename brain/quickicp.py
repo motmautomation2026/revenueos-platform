@@ -2,26 +2,11 @@
 quickicp.py
 ===========
 
-Connects the Master Agent's QuickICP work orders to the QuickICP tools (n8n webhooks),
-and optionally saves results to Supabase.
-
-CHAIN
------
-    companies  : work order (accounts) -> keywords -> Prospeo exact names -> company search
-                 writes data/quickicp_payload.json, data/quickicp_raw.json
-    people     : company domains + job titles -> people search
-                 writes data/quickicp_people_raw.json
-    emails     : people -> email finder
-                 writes data/quickicp_emails_raw.json
-    phones     : people with emails -> phone finder
-                 writes data/quickicp_phones_raw.json
-    all        : all four (unvalidated), then saves to Supabase
-
-    For the VALIDATED flow (judges between the steps), use:  python pipeline.py
-
-RUN
----
-    python quickicp.py companies | people | emails | phones | all
+The QuickICP / Prospeo / OpenAI library the orchestrator's runners use: company search payloads
+(keywords -> Prospeo exact names), company and people search, email and phone finders, and the ONE LLM
+factory (llm / ask_llm / ask_llm_batch) for the whole brain. Every paid call goes through a runner, which
+saves it in the ledger (brain_tool_calls) first. No CLI any more: the old 'python quickicp.py companies |
+people | emails | phones | all' commands (paid calls outside the ledger) are in archive/legacy/quickicp_cli.py.
 
 REQUIRED IN .env
 ----------------
@@ -31,7 +16,6 @@ REQUIRED IN .env
     QUICKICP_PEOPLE_WEBHOOK_URL     people search
     QUICKICP_EMAIL_WEBHOOK_URL      email finder
     QUICKICP_PHONE_WEBHOOK_URL      phone finder
-    SUPABASE_URL, SUPABASE_KEY      only for 'all'
 
 PAGINATION (company search)
 ---------------------------
@@ -44,8 +28,7 @@ RELIABILITY
     - Every LLM client comes from llm() (OPENAI_MODEL, temperature 0, LLM_MAX_RETRIES = 2, 120 s per attempt;
       300 s for the month plan + work orders). ask_llm / ask_llm_batch turn a failure into ONE line:
       "STOPPED: <step>: the LLM did not answer within N s (2 retries). Nothing was saved for this step; run it again."
-    - Every step saves its result to a file, so a failure never loses earlier work.
-    - Failed batches are saved to *_failed.json and the remaining batches continue.
+    - A failed enrichment batch is skipped by the runner; the remaining batches continue.
 
 TEST MODE
 ---------
@@ -53,12 +36,9 @@ TEST MODE
 """
 
 import json
-import math
 import os
 import re
-import sys
 import time
-import traceback
 from typing import Literal
 
 import httpx
@@ -85,7 +65,6 @@ PEOPLE_LOCATIONS = ["India"]
 
 TEST_MODE = True
 TEST_MAX_COMPANIES = 40         # test runs ask for 40; n8n splits into pages itself
-TEST_START = 3                  # which company to start from in the standalone people test
 TEST_MAX_PEOPLE_COMPANIES = 3
 TEST_PEOPLE_PER_COMPANY = 2
 TEST_MAX_EMAIL_PEOPLE = 6
@@ -205,18 +184,42 @@ def save_json(path: str, data) -> None:
 
 # ================= SHARED HELPERS =================
 
-def load_quickicp_work_order(output_type: str) -> dict:
-    """Find the QuickICP work order for 'accounts' or 'contacts' in the Master Agent output."""
-    for work_order in load_json("data/work_orders.json"):
-        if work_order.get("agent") == "QuickICP" and work_order.get("output_type") == output_type:
-            return work_order
-    raise ToolError(f"No QuickICP work order with output_type '{output_type}' in data/work_orders.json.")
-
 
 def max_number(text: str, default: int) -> int:
     """Largest number in a text, e.g. '150-200 accounts' -> 200."""
     numbers = [int(n) for n in re.findall(r"\d+", text or "")]
     return max(numbers) if numbers else default
+
+
+# Tool tasks the orchestrator runs by a COUNT (their target needs a number, or a % of another counted task).
+COUNTED_TOOL_TASKS = {("QuickICP", "accounts"), ("QuickICP", "contacts"), ("Email Agent", "emails"),
+                      ("Quickhowl", "calls")}
+PERCENT = re.compile(r"(\d+(?:\.\d+)?)\s*%")
+
+
+def count_in(text: str | None) -> int | None:
+    """The largest COUNT in a target; a percent is a share and a task id is a name, neither is a count:
+    '100% of 250 contacts' -> 250, '50% of T4 contacts' -> None, '150-200 accounts' -> 200."""
+    number = max_number(re.sub(r"\bT\d+\b", " ", PERCENT.sub(" ", text or "")), -1)
+    return None if number < 0 else number
+
+
+def percent_of(text: str | None) -> float | None:
+    """The share in a target, '100% of T4 contacts' -> 100.0; None without a '%'."""
+    found = PERCENT.search(text or "")
+    return float(found.group(1)) if found else None
+
+
+def percent_base(text: str | None, depends_on: list[str], counted: set[str]) -> str | None:
+    """
+    The counted task a % target is a share OF (code): the counted task id named in the text that the task
+    depends on ('100% of T4 contacts' -> 'T4'); else its ONLY directly-dependent counted task; else None.
+    """
+    named = {task_id for task_id in re.findall(r"\bT\d+\b", text or "") if task_id in counted}
+    if named:
+        return named.pop() if len(named) == 1 and next(iter(named)) in depends_on else None
+    deps = [d for d in depends_on if d in counted]
+    return deps[0] if len(deps) == 1 else None
 
 
 def clean_domain(website: str | None) -> str:
@@ -351,22 +354,6 @@ def search_companies(payload: CompanyPayload) -> list[dict]:
     return result
 
 
-def run_companies() -> None:
-    check_settings("OPENAI_MODEL", "PROSPEO_API_KEY", "QUICKICP_WEBHOOK_URL")
-    understanding = load_json("data/understanding.json")
-    work_order = load_quickicp_work_order("accounts")
-    print("Work order:", work_order.get("work_order_id"), "|", work_order.get("target"), "|",
-          work_order.get("geography"))
-
-    payload = build_company_payload(work_order, understanding)
-    print("\n[4] Payload:", json.dumps(payload.model_dump(), indent=2, ensure_ascii=False))
-    save_json("data/quickicp_payload.json", payload.model_dump())
-
-    companies = search_companies(payload)
-    save_json("data/quickicp_raw.json", companies)
-    print(f"\n[5] Companies received: {len(companies)} -> saved to data/quickicp_raw.json")
-
-
 # ================= PEOPLE SEARCH =================
 
 class JobTitles(BaseModel):
@@ -381,16 +368,6 @@ class PeoplePayload(BaseModel):
     job_titles: list[str]
     locations: list[str]
     count_per_company: int
-
-
-def load_domains(companies_path: str = "data/quickicp_raw.json") -> list[str]:
-    """Cleaned, de-duplicated website domains from a companies file."""
-    domains = []
-    for company in load_json(companies_path):
-        domain = clean_domain(company.get("WEBSITE"))
-        if domain and domain not in domains:
-            domains.append(domain)
-    return domains
 
 
 def make_job_titles(work_order: dict) -> list[str]:
@@ -409,22 +386,6 @@ def make_job_titles(work_order: dict) -> list[str]:
     return titles
 
 
-def build_people_payloads(work_order: dict, domains: list[str]) -> list[PeoplePayload]:
-    """Split domains into batches, each with the same job titles and per-company count."""
-    job_titles = make_job_titles(work_order)
-    print("\n[2] Job titles:", job_titles)
-
-    contacts_wanted = max_number(work_order.get("target", ""), len(domains))
-    per_company = min(10, max(1, math.ceil(contacts_wanted / len(domains))))
-    if TEST_MODE:
-        per_company = TEST_PEOPLE_PER_COMPANY
-    print(f"[3] Contacts wanted: {contacts_wanted} for {len(domains)} companies -> {per_company} per company")
-
-    batches = [domains[i:i + DOMAIN_BATCH_SIZE] for i in range(0, len(domains), DOMAIN_BATCH_SIZE)]
-    return [PeoplePayload(domains=batch, job_titles=job_titles, locations=PEOPLE_LOCATIONS,
-                          count_per_company=per_company) for batch in batches]
-
-
 def search_people(payload: PeoplePayload) -> list[dict]:
     """Send one batch to QuickICP people search."""
     result = post_json("People search", PEOPLE_WEBHOOK, payload.model_dump(), 300)
@@ -433,43 +394,6 @@ def search_people(payload: PeoplePayload) -> list[dict]:
     if not isinstance(result, list):
         raise ToolError(f"People search: expected a list, got {type(result).__name__}")
     return result
-
-
-def run_people(companies_path: str = "data/quickicp_raw.json", test_start: int = TEST_START) -> None:
-    """
-    People search on the companies in companies_path.
-    The pipeline passes data/companies_passed.json, so only validated companies are searched.
-    """
-    check_settings("OPENAI_MODEL", "QUICKICP_PEOPLE_WEBHOOK_URL")
-    work_order = load_quickicp_work_order("contacts")
-    print("Work order:", work_order.get("work_order_id"), "|", work_order.get("target"))
-
-    domains = load_domains(companies_path)
-    if TEST_MODE:
-        domains = domains[test_start:test_start + TEST_MAX_PEOPLE_COMPANIES]
-    print(f"\n[1] Domains to search (from {companies_path}): {len(domains)}")
-    if not domains:
-        raise ToolError(f"No domains to search in {companies_path}. Run the company step first.")
-
-    payloads = build_people_payloads(work_order, domains)
-    print(f"[4] Sending {len(payloads)} batch(es) of up to {DOMAIN_BATCH_SIZE} domains")
-
-    people, failed = [], []
-    for number, payload in enumerate(payloads, start=1):
-        try:
-            batch_people = search_people(payload)
-            people.extend(batch_people)
-            print(f"  Batch {number}: {len(batch_people)} people")
-        except ToolError as error:
-            failed.append({"batch": number, "domains": payload.domains, "error": str(error)})
-            print(f"  Batch {number}: FAILED -> {error}")
-        save_json("data/quickicp_people_raw.json", people)
-
-    save_json("data/quickicp_people_failed.json", failed)
-    print(f"\n[5] People received: {len(people)} | failed batches: {len(failed)}")
-    print("Saved to data/quickicp_people_raw.json")
-    if people:
-        print("First record:", json.dumps(people[0], indent=2, ensure_ascii=False))
 
 
 # ================= EMAIL AND PHONE FINDERS =================
@@ -482,113 +406,3 @@ def enrich_people(name: str, webhook: str, people: list[dict]) -> list[dict]:
     if not isinstance(result, list):
         raise ToolError(f"{name}: expected a list, got {type(result).__name__}")
     return result
-
-
-def run_enrichment(name: str, webhook: str, input_path: str, output_path: str, failed_path: str) -> None:
-    """
-    Read people, send them in batches, save results after every batch, record failed batches.
-    Our own 'validation' block is removed before sending (the tool expects its own format)
-    and attached again to each returned record, matched by LinkedIn profile URL.
-    """
-    people = load_json(input_path)
-    if not people:
-        raise ToolError(f"No people found in {input_path}. Run the previous step first.")
-    if TEST_MODE:
-        people = people[:TEST_MAX_EMAIL_PEOPLE]
-    print(f"[1] {name}: {len(people)} people from {input_path}")
-
-    validations = {p.get("USER SOCIAL"): p["validation"] for p in people if "validation" in p}
-    to_send = [{k: v for k, v in p.items() if k != "validation"} for p in people]
-
-    batches = [to_send[i:i + PEOPLE_BATCH_SIZE] for i in range(0, len(to_send), PEOPLE_BATCH_SIZE)]
-    print(f"[2] Sending {len(batches)} batch(es) of up to {PEOPLE_BATCH_SIZE} people")
-
-    results, failed = [], []
-    for number, batch in enumerate(batches, start=1):
-        try:
-            batch_results = enrich_people(name, webhook, batch)
-            for record in batch_results:
-                if record.get("USER SOCIAL") in validations:
-                    record["validation"] = validations[record["USER SOCIAL"]]
-            results.extend(batch_results)
-            print(f"  Batch {number}: {len(batch_results)} records")
-        except ToolError as error:
-            failed.append({"batch": number, "people": [p.get("FULL NAME") for p in batch], "error": str(error)})
-            print(f"  Batch {number}: FAILED -> {error}")
-        save_json(output_path, results)
-
-    save_json(failed_path, failed)
-    print(f"\n[3] Records received: {len(results)} | failed batches: {len(failed)}")
-    print("Saved to", output_path)
-    if results:
-        print("First record:", json.dumps(results[0], indent=2, ensure_ascii=False))
-
-
-def run_emails(input_path: str = "data/quickicp_people_raw.json") -> None:
-    """Email finder. The pipeline passes data/people_passed.json, so only validated people are enriched."""
-    check_settings("QUICKICP_EMAIL_WEBHOOK_URL")
-    run_enrichment("Email finder", EMAIL_WEBHOOK, input_path,
-                   "data/quickicp_emails_raw.json", "data/quickicp_emails_failed.json")
-
-
-def run_phones() -> None:
-    """Phone finder on the email results, so each record ends with person + email + phone."""
-    check_settings("QUICKICP_PHONE_WEBHOOK_URL")
-    run_enrichment("Phone finder", PHONE_WEBHOOK,
-                   "data/quickicp_emails_raw.json", "data/quickicp_phones_raw.json",
-                   "data/quickicp_phones_failed.json")
-
-
-# ================= FULL CHAIN (UNVALIDATED) =================
-
-def run_all() -> None:
-    """Run companies -> people -> emails -> phones without judges, then save to Supabase.
-    For the validated flow, use: python pipeline.py"""
-    print("\n===== 1/5 COMPANIES =====")
-    run_companies()
-    print("\n===== 2/5 PEOPLE =====")
-    run_people()
-    print("\n===== 3/5 EMAILS =====")
-    run_emails()
-    print("\n===== 4/5 PHONES =====")
-    run_phones()
-
-    print("\n===== 5/5 SAVE TO SUPABASE =====")
-    check_settings("SUPABASE_URL", "SUPABASE_KEY")
-    try:
-        # Imported here, not at the top: supabase_store imports from this file (avoids a circular import).
-        from supabase_store import current_customer, save_companies, save_people, COMPANIES_FILE, PEOPLE_FILE
-        customer = current_customer()   # fixed CUSTOMER_KEY from .env
-        lookups = save_companies(load_json(COMPANIES_FILE), customer)
-        save_people(load_json(PEOPLE_FILE), lookups, customer)
-    except ToolError:
-        raise
-    except Exception as error:
-        print(f"Supabase save failed: {error}")
-        print("All results are still safe in the data/ JSON files. Fix the issue and run: python supabase_store.py")
-
-
-# ================= RUN =================
-
-MODES = {
-    "companies": run_companies,
-    "people": run_people,
-    "emails": run_emails,
-    "phones": run_phones,
-    "all": run_all,
-}
-
-if __name__ == "__main__":
-    mode = sys.argv[1] if len(sys.argv) > 1 else "companies"
-    if mode not in MODES:
-        print("Usage: python quickicp.py " + " | ".join(MODES))
-        sys.exit(1)
-    try:
-        MODES[mode]()
-    except ToolError as error:
-        print("\nSTOPPED:", error)
-        sys.exit(1)
-    except Exception:
-        print("\nUNEXPECTED ERROR (details below for debugging):")
-        traceback.print_exc()
-        sys.exit(1)

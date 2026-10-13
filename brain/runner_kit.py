@@ -46,7 +46,7 @@ DEBUGGING
 from dataclasses import dataclass, field
 from typing import Callable
 
-from quickicp import ToolError
+from quickicp import COUNTED_TOOL_TASKS, ToolError, percent_base, percent_of
 from state_store import finish_step, get_decisions, get_steps, renew_run_lock, start_step
 
 
@@ -217,6 +217,7 @@ def target_for(task: dict, test_cap: int) -> int:
     """
     How many results a tool task needs (code):
         TEST_TARGET_OVERRIDE in .env (test mode only) -> that number
+        a % target ('100% of T4 contacts')            -> percent_target: share x T4's achieved number
         TEST_MODE                                     -> min(target_number, test_cap)
         real                                          -> target_number
     """
@@ -229,6 +230,30 @@ def target_for(task: dict, test_cap: int) -> int:
         if not override.isdigit() or int(override) < 1:
             raise ToolError(f"STOPPED: TEST_TARGET_OVERRIDE must be a whole number > 0, got '{override}'.")
         return int(override)
-    if task["target_number"] is None:
+    number = task["target_number"]
+    if number is None and percent_of(task["work_order"].get("target")) is not None:
+        number = percent_target(task)[0]                  # '100% of T4 contacts': a share, resolved now
+    if number is None:
         raise ToolError(f"STOPPED: {task['task_id']} target has no number: '{task['work_order'].get('target')}'.")
-    return min(task["target_number"], test_cap) if TEST_MODE else task["target_number"]
+    return min(number, test_cap) if TEST_MODE else number
+
+
+def percent_target(task: dict) -> tuple[int, str]:
+    """
+    A % target as a count (code): ceil(share x the achieved number of the counted task it is a share of),
+    e.g. '100% of T4 contacts' with T4 done at 6 -> (6, 'T4'). That task: named in the text, else the only
+    counted task this one depends on (quickicp.percent_base). Unknown base or base not done -> STOPPED.
+    """
+    import math
+    from state_store import get_tasks
+    text = task["work_order"].get("target")
+    share = percent_of(text)
+    tasks = {t["task_id"]: t for t in get_tasks(task["run_id"])}
+    counted = {tid for tid, t in tasks.items() if (t["agent"], t["output_type"]) in COUNTED_TOOL_TASKS}
+    base = percent_base(text, task["depends_on"], counted)
+    if base is None:
+        raise ToolError(f"STOPPED: {task['task_id']} target '{text}' is a share, but it is not clear of which task: "
+                        "name it (e.g. '100% of T4 contacts') or depend on exactly one counted task.")
+    if tasks[base]["status"] != "done" or tasks[base]["achieved_number"] is None:
+        raise ToolError(f"STOPPED: {task['task_id']} target '{text}' is a share of {base}, which is not done yet.")
+    return math.ceil(share * tasks[base]["achieved_number"] / 100), base
