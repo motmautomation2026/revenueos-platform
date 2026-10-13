@@ -1019,39 +1019,45 @@ USAGE = """Usage:
   <YYYY-MM> may be a revision: 2026-10-r2"""
 
 if __name__ == "__main__":
-    args = sys.argv[1:]
-    command = args[0] if args else ""
-    try:
-        if command == "selftest":
-            from orchestrator_selftest import selftest      # the selftests live in their own file
-            sys.exit(0 if selftest() else 1)
-        elif command == "load" and len(args) == 2:
-            cmd_load(args[1])
-        elif command == "status" and len(args) <= 2:
-            show_status(find_run(current_customer(), args[1] if len(args) == 2 else None))
-        elif command == "next" and len(args) <= 2:
-            show_next(find_run(current_customer(), args[1] if len(args) == 2 else None))
-        elif command == "run" and len(args) in (3, 4) and args[2] == "--dry":
-            cmd_dry(current_customer(), check_month(args[1]), args[3] if len(args) == 4 else None)
-        elif command == "run" and len(args) == 2:
-            cmd_run(current_customer(), check_month(args[1]))
-        elif command == "run" and len(args) == 3 and args[2] == "--until-wait":
-            cmd_run_until_wait(current_customer(), check_month(args[1]))
-        elif command == "review" and len(args) == 2:
-            cmd_review(current_customer(), check_month(args[1]))
-        elif command == "unlock" and len(args) == 2:
-            cmd_unlock(current_customer(), check_month(args[1]))
-        elif command == "close" and len(args) == 3:
-            cmd_close(current_customer(), args[1], args[2])
-        elif command == "decisions":
-            cmd_decisions(current_customer())
-        elif command == "answer" and len(args) in (3, 4) and args[1].isdigit():
-            cmd_answer(current_customer(), int(args[1]), args[2], args[3] if len(args) == 4 else None)
-        elif command == "answer" and len(args) in (3, 4) and re.fullmatch(r"T\d+", args[1]):
-            cmd_answer_task(current_customer(), args[1], args[2], args[3] if len(args) == 4 else None)
-        else:
-            print(USAGE)
+    from quickicp import run_cli
+
+    def cli() -> None:
+        """The command line; run_cli turns a network drop into one STOPPED line (--debug: traceback)."""
+        args = sys.argv[1:]
+        command = args[0] if args else ""
+        try:
+            if command == "selftest":
+                from orchestrator_selftest import selftest      # the selftests live in their own file
+                sys.exit(0 if selftest() else 1)
+            elif command == "load" and len(args) == 2:
+                cmd_load(args[1])
+            elif command == "status" and len(args) <= 2:
+                show_status(find_run(current_customer(), args[1] if len(args) == 2 else None))
+            elif command == "next" and len(args) <= 2:
+                show_next(find_run(current_customer(), args[1] if len(args) == 2 else None))
+            elif command == "run" and len(args) in (3, 4) and args[2] == "--dry":
+                cmd_dry(current_customer(), check_month(args[1]), args[3] if len(args) == 4 else None)
+            elif command == "run" and len(args) == 2:
+                cmd_run(current_customer(), check_month(args[1]))
+            elif command == "run" and len(args) == 3 and args[2] == "--until-wait":
+                cmd_run_until_wait(current_customer(), check_month(args[1]))
+            elif command == "review" and len(args) == 2:
+                cmd_review(current_customer(), check_month(args[1]))
+            elif command == "unlock" and len(args) == 2:
+                cmd_unlock(current_customer(), check_month(args[1]))
+            elif command == "close" and len(args) == 3:
+                cmd_close(current_customer(), args[1], args[2])
+            elif command == "decisions":
+                cmd_decisions(current_customer())
+            elif command == "answer" and len(args) in (3, 4) and args[1].isdigit():
+                cmd_answer(current_customer(), int(args[1]), args[2], args[3] if len(args) == 4 else None)
+            elif command == "answer" and len(args) in (3, 4) and re.fullmatch(r"T\d+", args[1]):
+                cmd_answer_task(current_customer(), args[1], args[2], args[3] if len(args) == 4 else None)
+            else:
+                print(USAGE)
+                sys.exit(1)
+        except ToolError as error:
+            print(error)
             sys.exit(1)
-    except ToolError as error:
-        print(error)
-        sys.exit(1)
+
+    run_cli(cli)

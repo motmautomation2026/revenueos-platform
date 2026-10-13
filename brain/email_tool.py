@@ -81,7 +81,6 @@ import os
 import re
 import sys
 import time
-import traceback
 from datetime import datetime
 
 import httpx
@@ -639,14 +638,17 @@ MODES = {"samples": run_samples}
 
 
 if __name__ == "__main__":
-    args = sys.argv[1:]
-    try:
-        if len(args) != 4 or args[0] not in MODES or args[1] != "--run":
-            raise ToolError(USAGE)
-        MODES[args[0]](ledger_email_campaign(args[2], args[3]))
-    except ToolError as error:
-        print(error)
-        sys.exit(1)
-    except Exception:
-        traceback.print_exc()
-        sys.exit(1)
+    from quickicp import run_cli
+
+    def cli() -> None:
+        """The command line; run_cli turns a network drop into one STOPPED line (--debug: traceback)."""
+        args = sys.argv[1:]
+        try:
+            if len(args) != 4 or args[0] not in MODES or args[1] != "--run":
+                raise ToolError(USAGE)
+            MODES[args[0]](ledger_email_campaign(args[2], args[3]))
+        except ToolError as error:
+            print(error)
+            sys.exit(1)
+
+    run_cli(cli)

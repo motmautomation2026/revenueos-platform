@@ -578,7 +578,7 @@ def llm_selftest(expect, raises) -> None:
     import quickicp
     import validator
 
-    seen = {"requests": 0, "bodies": [], "slow": True}
+    seen = {"requests": 0, "bodies": [], "slow": True, "usage": True}
 
     class FakeLLM(BaseHTTPRequestHandler):
         """POST /v1/chat/completions: slow mode sleeps past the client timeout; fast mode answers at once."""
@@ -592,7 +592,8 @@ def llm_selftest(expect, raises) -> None:
             reply = json.dumps({"id": "x", "object": "chat.completion", "created": 0, "model": body.get("model"),
                                 "choices": [{"index": 0, "finish_reason": "stop",
                                              "message": {"role": "assistant", "content": json.dumps({"value": "ok"})}}],
-                                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}).encode()
+                                **({"usage": {"prompt_tokens": 11, "completion_tokens": 3, "total_tokens": 14,
+                                              "prompt_tokens_details": {"cached_tokens": 7}}} if seen["usage"] else {})}).encode()
             try:
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
@@ -611,6 +612,9 @@ def llm_selftest(expect, raises) -> None:
     server = ThreadingHTTPServer(("127.0.0.1", 0), FakeLLM)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     real_llm = quickicp.llm
+    real_usage_file, usage_folder = quickicp.USAGE_FILE, tempfile.mkdtemp(prefix="usage_selftest_")
+    quickicp.USAGE_FILE = os.path.join(usage_folder, "llm_usage.jsonl")    # never the real data/llm_usage.jsonl
+    before_total = dict(quickicp.USAGE_TOTAL)
     quickicp.llm = lambda timeout=quickicp.LLM_TIMEOUT_SECONDS, **options: real_llm(
         timeout=min(timeout, 0.3), base_url=f"http://127.0.0.1:{server.server_port}/v1", api_key="selftest", **options)
     saved_model = os.environ.get("OPENAI_MODEL")
@@ -645,6 +649,40 @@ def llm_selftest(expect, raises) -> None:
                answer.value == "ok" and seen["bodies"][-1].get("model") == os.environ["OPENAI_MODEL"]
                and seen["bodies"][-1].get("temperature") == 0)
 
+        # Usage log: one line per call (no prompt text), 'n/a' when usage is missing, never stops a call
+        def usage_lines():
+            if not os.path.exists(quickicp.USAGE_FILE):
+                return []
+            with open(quickicp.USAGE_FILE, encoding="utf-8") as file:
+                return [json.loads(line) for line in file]
+        first = usage_lines()
+        expect("usage log: one line for that call: name, model, input 11, cached input 7, output 3, seconds; "
+               "no prompt text in the file",
+               len(first) == 1 and first[0]["call"] == "Fake step" and first[0]["model"] == os.environ["OPENAI_MODEL"]
+               and (first[0]["input_tokens"], first[0]["cached_input_tokens"], first[0]["output_tokens"]) == (11, 7, 3)
+               and isinstance(first[0]["seconds"], float) and "hello" not in open(quickicp.USAGE_FILE, encoding="utf-8").read())
+        quickicp.ask_llm_batch(Answer, ["hello a", "hello b"], "Work orders")
+        expect("usage log: a batch of 2 -> 2 lines, one per call ('Work orders')",
+               [line["call"] for line in usage_lines()] == ["Fake step", "Work orders", "Work orders"])
+        seen["usage"] = False
+        answer = quickicp.ask_llm(Answer, "hello", "No usage")
+        expect("usage missing in the reply -> 'n/a' in the line; the answer is still returned",
+               answer.value == "ok" and usage_lines()[-1]["input_tokens"] == "n/a"
+               and usage_lines()[-1]["output_tokens"] == "n/a")
+        seen["usage"] = True
+        logged_file = quickicp.USAGE_FILE
+        quickicp.USAGE_FILE = usage_folder                 # a folder: appending must fail
+        answer = quickicp.ask_llm(Answer, "hello", "Broken log")
+        quickicp.USAGE_FILE = logged_file
+        expect("a usage log that cannot be written never stops the call (the answer is still returned)",
+               answer.value == "ok" and len(usage_lines()) == 4)
+        total = quickicp.USAGE_TOTAL
+        expect("usage total counts every logged call; 'n/a' adds nothing; usage_summary() prints it",
+               total["calls"] - before_total["calls"] == 5
+               and total["input_tokens"] - before_total["input_tokens"] == 11 * 4
+               and total["cached_input_tokens"] - before_total["cached_input_tokens"] == 7 * 4
+               and quickicp.usage_summary().startswith("LLM usage total:"))
+
         # master_agent.main(): the plan step times out -> STOPPED; nothing archived, nothing written
         seen["slow"] = True
         archived, proofs = [], []
@@ -677,6 +715,8 @@ def llm_selftest(expect, raises) -> None:
                and main_body.index("archive_plan_files()") < main_body.index("Saved {key} to {path}"))
     finally:
         quickicp.llm = real_llm
+        quickicp.USAGE_FILE = real_usage_file
+        shutil.rmtree(usage_folder, ignore_errors=True)
         for name, value in real_main_parts.items():
             setattr(master_agent, name, value)
         if saved_model is None:
@@ -857,15 +897,21 @@ def selftest() -> bool:
 
 
 if __name__ == "__main__":
-    command = sys.argv[1] if len(sys.argv) > 1 else "run"
-    try:
-        if command == "selftest":
-            sys.exit(0 if selftest() else 1)
-        elif command == "run":
-            main()
-        else:
-            print("Usage: python intake_adapter.py [run | selftest]")
+    from quickicp import run_cli
+
+    def cli() -> None:
+        """The command line; run_cli turns a network drop into one STOPPED line (--debug: traceback)."""
+        command = sys.argv[1] if len(sys.argv) > 1 else "run"
+        try:
+            if command == "selftest":
+                sys.exit(0 if selftest() else 1)
+            elif command == "run":
+                main()
+            else:
+                print("Usage: python intake_adapter.py [run | selftest]")
+                sys.exit(1)
+        except ToolError as error:
+            print(error)
             sys.exit(1)
-    except ToolError as error:
-        print(error)
-        sys.exit(1)
+
+    run_cli(cli)

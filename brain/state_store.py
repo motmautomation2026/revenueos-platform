@@ -438,6 +438,20 @@ class SqliteBackend:
         self.conn.close()
 
 
+# What this process wrote, for the network-drop line (quickicp.network_stop_line). Read-only bookkeeping:
+# 'pending' = a write was sent but its reply never came (it may or may not have been saved).
+STATE_WRITES = {"done": 0, "last": None, "pending": None}
+HELD_LOCKS: set[int] = set()          # run ids whose lock this process took and has not released yet
+
+
+def _write(label: str, send):
+    """Send one write, keeping STATE_WRITES up to date (no retry, no change to what is written)."""
+    STATE_WRITES["pending"] = label
+    result = send()
+    STATE_WRITES.update(done=STATE_WRITES["done"] + 1, last=label, pending=None)
+    return result
+
+
 class SupabaseBackend:
     """State in Supabase. Only usable after sql/001_brain_state.sql has been run by the database developer."""
 
@@ -462,26 +476,27 @@ class SupabaseBackend:
 
     def insert(self, table: str, row: dict) -> dict:
         """Insert one row and return it as saved."""
-        return self.db.table(table).insert(row).execute().data[0]
+        return _write(f"{table} insert", lambda: self.db.table(table).insert(row).execute().data[0])
 
     def insert_ignore(self, table: str, rows: list[dict], conflict: str) -> None:
         """Insert rows; rows that clash on the 'conflict' columns are skipped (never overwritten)."""
-        self.db.table(table).upsert(rows, on_conflict=conflict, ignore_duplicates=True).execute()
+        _write(f"{table} insert", lambda: self.db.table(table).upsert(rows, on_conflict=conflict,
+                                                                       ignore_duplicates=True).execute())
 
     def update(self, table: str, fields: dict, where: dict) -> list[dict]:
         """Update rows matching where; returns the updated rows ([] if none matched)."""
-        return self._filter(self.db.table(table).update(fields), where).execute().data
+        return _write(f"{table} update", lambda: self._filter(self.db.table(table).update(fields), where).execute().data)
 
     def delete(self, table: str, where: dict) -> int:
         """Delete rows matching where (used only by the write test cleanup); returns how many."""
         if not where:
             raise ToolError("STOPPED: delete without a filter is not allowed.")
-        return len(self._filter(self.db.table(table).delete(), where).execute().data)
+        return _write(f"{table} delete", lambda: len(self._filter(self.db.table(table).delete(), where).execute().data))
 
     def take_lock(self, run_id: int, holder: str, until: str, now: str) -> bool:
         """One atomic update: take the run lock only if it is free or expired. True if we got it."""
-        rows = (self.db.table(RUNS).update({"locked_by": holder, "locked_until": until})
-                .eq("id", run_id).or_(f"locked_until.is.null,locked_until.lt.{now}").execute().data)
+        rows = _write(f"{RUNS} lock", lambda: self.db.table(RUNS).update({"locked_by": holder, "locked_until": until})
+                      .eq("id", run_id).or_(f"locked_until.is.null,locked_until.lt.{now}").execute().data)
         return len(rows) == 1
 
     def close(self) -> None:
@@ -559,7 +574,9 @@ def lock_holder() -> str:
 
 def take_run_lock(run_id: int, holder: str, minutes: float = LOCK_MINUTES) -> None:
     """Take the run lock (free or expired only), or stop with who holds it and until when."""
+    HELD_LOCKS.add(run_id)                     # noted BEFORE sending: a lost reply may still have taken it
     if not backend().take_lock(run_id, holder, lock_time(minutes), lock_time()):
+        HELD_LOCKS.discard(run_id)
         run = first(backend().select(RUNS, {"id": run_id})) or {}
         raise ToolError(f"STOPPED: run is busy: locked by {run.get('locked_by')} until {run.get('locked_until')}. "
                         "Wait for it to finish, or after a crash: python orchestrator.py unlock <YYYY-MM>")
@@ -573,12 +590,15 @@ def renew_run_lock(run_id: int, holder: str, minutes: float = LOCK_MINUTES) -> N
 
 def release_run_lock(run_id: int, holder: str) -> bool:
     """Free the lock if we hold it. True if released."""
-    return bool(backend().update(RUNS, {"locked_by": None, "locked_until": None}, {"id": run_id, "locked_by": holder}))
+    released = bool(backend().update(RUNS, {"locked_by": None, "locked_until": None}, {"id": run_id, "locked_by": holder}))
+    HELD_LOCKS.discard(run_id)
+    return released
 
 
 def force_unlock(run_id: int) -> None:
     """Free the lock whoever holds it (human command after a crash)."""
     backend().update(RUNS, {"locked_by": None, "locked_until": None}, {"id": run_id})
+    HELD_LOCKS.discard(run_id)
 
 
 # ================= TASKS =================

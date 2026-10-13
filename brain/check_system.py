@@ -160,25 +160,33 @@ def check_files() -> None:
 
 # ================= 4-6. LIVE CHECKS =================
 
+def failure_text(error: Exception) -> str:
+    """A check's FAIL detail: 'no network (<service>)' for a network drop (the other checks still run)."""
+    from quickicp import network_error, network_service
+    found = network_error(error)
+    return f"no network ({network_service(found)})" if found else str(error)[:200]
+
+
 def check_openai() -> None:
     try:
         from quickicp import llm      # the one LLM factory (short timeout + tiny answer for a health check)
         reply = llm(timeout=30, max_tokens=5).invoke("Reply OK")
         report("PASS", "OpenAI", f"model {os.getenv('OPENAI_MODEL')} replied: {reply.content.strip()[:20]}")
     except Exception as error:
-        report("FAIL", "OpenAI", str(error)[:200])
+        report("FAIL", "OpenAI", failure_text(error))
 
 
 def check_prospeo() -> None:
     try:
-        response = httpx.post("https://api.prospeo.io/search-suggestions", json={"location_search": "Pune"},
+        from quickicp import PROSPEO_URL
+        response = httpx.post(PROSPEO_URL, json={"location_search": "Pune"},
                               headers={"X-KEY": os.getenv("PROSPEO_API_KEY") or ""}, timeout=30)
         if response.status_code == 200:
             report("PASS", "Prospeo suggestions", "lookup answered")
         else:
             report("FAIL", "Prospeo suggestions", f"status {response.status_code}: {response.text[:150]}")
     except Exception as error:
-        report("FAIL", "Prospeo suggestions", str(error)[:200])
+        report("FAIL", "Prospeo suggestions", failure_text(error))
 
 
 def check_supabase() -> None:
@@ -188,7 +196,7 @@ def check_supabase() -> None:
         people = db.table(PEOPLE_TABLE).select("id", count="exact").limit(1).execute().count
         report("PASS", "Supabase", f"{companies} companies, {people} people saved")
     except Exception as error:
-        report("FAIL", "Supabase", str(error)[:200])
+        report("FAIL", "Supabase", failure_text(error))
 
 
 # ================= 7. EMAIL TOOL =================
@@ -254,26 +262,32 @@ def check_quickhowl() -> None:
         else:
             report("WARN", "Quickhowl DND", "QUICKHOWL_DND_HANDLED is not true: real calls stay blocked even at go-live")
     except Exception as error:
-        report("FAIL", "Quickhowl test numbers", str(error)[:200])
+        report("FAIL", "Quickhowl test numbers", failure_text(error))
 
 
 # ================= RUN =================
 
 if __name__ == "__main__":
-    print("MOTM Revenue OS - system check\n")
-    check_env()
-    check_git()
-    check_secret_leaks()
-    check_files()
-    check_openai()
-    check_prospeo()
-    check_supabase()
-    check_email_tool()
-    check_quickhowl()
+    from quickicp import run_cli
 
-    fails, warns = results.count("FAIL"), results.count("WARN")
-    print(f"\nResult: {results.count('PASS')} pass, {warns} warn, {fails} fail")
-    if fails:
-        print("Fix every FAIL before a real run.")
-        sys.exit(1)
-    print("System is ready." + (" Clean up the WARN items when you can." if warns else ""))
+    def cli() -> None:
+        """The command line; run_cli turns a network drop into one STOPPED line (--debug: traceback)."""
+        print("MOTM Revenue OS - system check\n")
+        check_env()
+        check_git()
+        check_secret_leaks()
+        check_files()
+        check_openai()
+        check_prospeo()
+        check_supabase()
+        check_email_tool()
+        check_quickhowl()
+
+        fails, warns = results.count("FAIL"), results.count("WARN")
+        print(f"\nResult: {results.count('PASS')} pass, {warns} warn, {fails} fail")
+        if fails:
+            print("Fix every FAIL before a real run.")
+            sys.exit(1)
+        print("System is ready." + (" Clean up the WARN items when you can." if warns else ""))
+
+    run_cli(cli)

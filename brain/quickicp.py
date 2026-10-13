@@ -28,6 +28,9 @@ RELIABILITY
     - Every LLM client comes from llm() (OPENAI_MODEL, temperature 0, LLM_MAX_RETRIES = 2, 120 s per attempt;
       300 s for the month plan + work orders). ask_llm / ask_llm_batch turn a failure into ONE line:
       "STOPPED: <step>: the LLM did not answer within N s (2 retries). Nothing was saved for this step; run it again."
+    - Every LLM call logs one usage line (call, model, input / cached input / output tokens, seconds):
+      printed and appended to data/llm_usage.jsonl (git-ignored). No prompt text, no secrets. Missing
+      usage -> 'n/a'; a logging problem never stops a run. usage_summary() = the total of this process.
     - A failed enrichment batch is skipped by the runner; the remaining batches continue.
 
 TEST MODE
@@ -38,11 +41,14 @@ TEST MODE
 import json
 import os
 import re
+import sys
 import time
+from datetime import datetime, timezone
 from typing import Literal
 
 import httpx
 from dotenv import load_dotenv
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 
@@ -54,7 +60,7 @@ COMPANY_WEBHOOK = os.getenv("QUICKICP_WEBHOOK_URL")
 PEOPLE_WEBHOOK = os.getenv("QUICKICP_PEOPLE_WEBHOOK_URL")
 EMAIL_WEBHOOK = os.getenv("QUICKICP_EMAIL_WEBHOOK_URL")
 PHONE_WEBHOOK = os.getenv("QUICKICP_PHONE_WEBHOOK_URL")
-PROSPEO_URL = "https://api.prospeo.io/search-suggestions"
+PROSPEO_URL = os.getenv("PROSPEO_URL") or "https://api.prospeo.io/search-suggestions"   # env: selftests only
 PROSPEO_HEADERS = {"X-KEY": os.getenv("PROSPEO_API_KEY") or ""}
 
 RETRY_WAITS = [5, 15, 45]       # seconds to wait before retry 1, 2, 3
@@ -79,6 +85,100 @@ CompanySize = Literal[
 
 class ToolError(Exception):
     """A known, explained failure: printed as one clear line instead of a traceback."""
+
+
+# ================= NETWORK DROP: one clear STOPPED line at the entry points (run_cli) =================
+
+NETWORK_WINERRORS = {10054, 10060, 10061, 11001, 11004}   # reset, timed out, refused, host not found, no data
+
+
+def network_error(error: BaseException) -> BaseException | None:
+    """The network error in error's cause chain (DNS, connect, timeout, reset, proxy), or None."""
+    import socket
+    kinds = [socket.gaierror, ConnectionError, TimeoutError, httpx.TransportError]
+    for module, names in (("httpcore", ("NetworkError", "TimeoutException", "ProxyError")),
+                          ("requests.exceptions", ("ConnectionError", "Timeout")),
+                          ("openai", ("APIConnectionError",))):
+        try:
+            imported = __import__(module, fromlist=list(names))
+            kinds += [getattr(imported, name) for name in names if hasattr(imported, name)]
+        except ImportError:
+            pass
+    seen, current = 0, error
+    while current is not None and seen < 12:
+        if isinstance(current, tuple(kinds)) or getattr(current, "winerror", None) in NETWORK_WINERRORS:
+            return current
+        current, seen = current.__cause__ or current.__context__, seen + 1
+    return None
+
+
+def network_service(error: BaseException) -> str:
+    """Which service could not be reached, from the failing request's host (env URLs first)."""
+    from urllib.parse import urlparse
+    host = None
+    for item in (error, error.__cause__, error.__context__):
+        try:
+            request = getattr(item, "request", None)
+            url = getattr(request, "url", None)
+            host = getattr(url, "host", None) or (urlparse(str(url)).hostname if url else None)
+        except RuntimeError:                       # httpx: '.request' not set on this error
+            host = None
+        if host:
+            break
+    names = {"SUPABASE_URL": "Supabase", "QUICKHOWL_URL": "Quickhowl", "EMAIL_TOOL_URL": "email tool",
+             "QUICKICP_WEBHOOK_URL": "QuickICP (n8n)", "QUICKICP_PEOPLE_WEBHOOK_URL": "QuickICP (n8n)",
+             "QUICKICP_EMAIL_WEBHOOK_URL": "QuickICP (n8n)", "QUICKICP_PHONE_WEBHOOK_URL": "QuickICP (n8n)",
+             "PROSPEO_URL": "Prospeo", "OPENAI_BASE_URL": "OpenAI"}
+    for key, name in names.items():
+        if host and host == urlparse(os.getenv(key) or "").hostname:
+            return name
+    if host and "openai" in host:
+        return "OpenAI"
+    if host and "prospeo" in host:
+        return "Prospeo"
+    return host or "a service"
+
+
+def network_stop_line(error: BaseException, rerun: str) -> str:
+    """The one STOPPED line (+ what was saved, a paid call in flight, a lock left held), from what is known."""
+    short = str(error).strip().splitlines()[0][:120] if str(error).strip() else type(error).__name__
+    lines = [f"STOPPED: no network ({network_service(error)}, {short}). Nothing lost: check the internet, then {rerun}."]
+    store = sys.modules.get("state_store")
+    if store is not None:
+        writes = store.STATE_WRITES
+        if writes["pending"]:
+            lines.append(f"  The last change ({writes['pending']}) may or may not have been saved; the rerun "
+                         "checks what is there.")
+        if writes["done"]:
+            lines.append(f"  Saved before the drop: {writes['done']} state change(s) (last: {writes['last']}).")
+        elif not writes["pending"]:
+            lines.append("  Nothing was saved by this command.")
+        if store.HELD_LOCKS:
+            lines.append("  The run lock may still be held by this stopped command: it expires within 30 min, "
+                         "or free it with: python orchestrator.py unlock <YYYY-MM>.")
+    kit = sys.modules.get("runner_kit")
+    if kit is not None and kit.PAID_IN_FLIGHT:
+        lines.append(f"  A paid call was in progress ({kit.PAID_IN_FLIGHT[-1]}): the next 'run' marks it 'unknown' "
+                     "and asks you (paid_call_unknown). It is never repeated automatically.")
+    return "\n".join(lines)
+
+
+def run_cli(main, rerun: str = "rerun the same command") -> None:
+    """
+    Run an entry point's command. A network drop (DNS, connect, timeout, reset) anywhere in it -> one STOPPED
+    line (network_stop_line) and exit code 3, no traceback. '--debug' (removed from sys.argv first) shows the
+    full traceback instead. Every other error and exit behaves exactly as before.
+    """
+    debug = "--debug" in sys.argv
+    sys.argv[:] = [arg for arg in sys.argv if arg != "--debug"]
+    try:
+        main()
+    except Exception as error:
+        found = network_error(error)
+        if found is None or debug:
+            raise
+        print(network_stop_line(found, rerun))
+        sys.exit(3)
 
 
 def check_settings(*names: str) -> None:
@@ -129,10 +229,59 @@ LLM_TIMEOUT_LONG = 300          # per attempt: the big outputs (month plan, work
 LLM_MAX_RETRIES = 2             # after the first attempt; then STOPPED
 
 
-def llm(timeout: float = LLM_TIMEOUT_SECONDS, **options) -> ChatOpenAI:
-    """OpenAI chat model: OPENAI_MODEL, temperature 0, a timeout per attempt and LLM_MAX_RETRIES retries."""
+USAGE_FILE = "data/llm_usage.jsonl"   # one JSON line per LLM call (git-ignored with data/); never prompt text
+USAGE_TOTAL = {"calls": 0, "input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0, "seconds": 0.0}
+
+
+class UsageLog(BaseCallbackHandler):
+    """Logs every LLM call made with this model: call name, model, tokens (input / cached / output), seconds."""
+
+    def __init__(self, name: str):
+        self.name, self.started = name, {}
+
+    def on_chat_model_start(self, serialized, messages, *, run_id, **kwargs):
+        self.started[run_id] = time.monotonic()
+
+    def on_llm_end(self, response, *, run_id, **kwargs):
+        log_usage(self.name, response, time.monotonic() - self.started.pop(run_id, time.monotonic()))
+
+
+def log_usage(name: str, response, seconds: float) -> None:
+    """Print + append one usage line. Missing usage -> 'n/a'. Never raises: logging must never stop a run."""
+    try:
+        message = response.generations[0][0].message
+        usage = getattr(message, "usage_metadata", None) or {}
+        model = (response.llm_output or {}).get("model_name") or message.response_metadata.get("model_name") or "n/a"
+        line = {"at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "call": name, "model": model,
+                "input_tokens": usage.get("input_tokens", "n/a"),
+                "cached_input_tokens": (usage.get("input_token_details") or {}).get("cache_read", "n/a"),
+                "output_tokens": usage.get("output_tokens", "n/a"), "seconds": round(seconds, 1)}
+        USAGE_TOTAL["calls"] += 1
+        USAGE_TOTAL["seconds"] += seconds
+        for key in ("input_tokens", "cached_input_tokens", "output_tokens"):
+            if isinstance(line[key], int):
+                USAGE_TOTAL[key] += line[key]
+        print(f"  [LLM] {name} | {model} | in {line['input_tokens']} (cached {line['cached_input_tokens']}) | "
+              f"out {line['output_tokens']} | {line['seconds']} s")
+        os.makedirs(os.path.dirname(USAGE_FILE) or ".", exist_ok=True)
+        with open(USAGE_FILE, "a", encoding="utf-8") as file:
+            file.write(json.dumps(line) + "\n")
+    except Exception as error:                    # never stop a run because of the usage log
+        print(f"  [LLM] {name}: usage not logged ({type(error).__name__})")
+
+
+def usage_summary() -> str:
+    """The total of every LLM call logged in this process, one line."""
+    t = USAGE_TOTAL
+    return (f"LLM usage total: {t['calls']} call(s) | in {t['input_tokens']} (cached {t['cached_input_tokens']}) | "
+            f"out {t['output_tokens']} | {t['seconds']:.0f} s")
+
+
+def llm(timeout: float = LLM_TIMEOUT_SECONDS, name: str = "LLM", **options) -> ChatOpenAI:
+    """OpenAI chat model: OPENAI_MODEL, temperature 0, a timeout per attempt and LLM_MAX_RETRIES retries.
+    Every call is usage-logged under 'name' (UsageLog)."""
     return ChatOpenAI(model=os.getenv("OPENAI_MODEL"), temperature=0, max_retries=LLM_MAX_RETRIES,
-                      timeout=timeout, **options)
+                      timeout=timeout, callbacks=[UsageLog(name)], **options)
 
 
 def llm_failure(name: str, error: Exception, timeout: float) -> ToolError:
@@ -148,7 +297,7 @@ def llm_failure(name: str, error: Exception, timeout: float) -> ToolError:
 def ask_llm(schema, prompt: str, name: str, timeout: float = LLM_TIMEOUT_SECONDS):
     """Ask the LLM for a structured answer; any failure (after the retries) -> one clear STOPPED ToolError."""
     try:
-        return llm(timeout).with_structured_output(schema).invoke(prompt)
+        return llm(timeout, name=name).with_structured_output(schema).invoke(prompt)
     except Exception as error:
         raise llm_failure(name, error, timeout) from error
 
@@ -157,7 +306,7 @@ def ask_llm_batch(schema, prompts: list[str], name: str, timeout: float = LLM_TI
                   max_concurrency: int = 5) -> list:
     """Several structured answers in parallel, ALL or nothing: one failure -> STOPPED (nothing is returned)."""
     try:
-        return llm(timeout).with_structured_output(schema).batch(prompts, config={"max_concurrency": max_concurrency})
+        return llm(timeout, name=name).with_structured_output(schema).batch(prompts, config={"max_concurrency": max_concurrency})
     except Exception as error:
         raise llm_failure(name, error, timeout) from error
 
