@@ -5,32 +5,38 @@ quickhowl.py
 AI voice calling (Quickhowl) for MOTM Revenue OS.
 Follows the developer's guide for https://revenueoscall.b2botix.ai (tested 8 Oct 2026).
 
-FLOW (same pattern as the email tool: build -> store -> human approves -> results)
-----
-    python quickhowl.py preview   Brain writes the call profile, contacts come from Supabase,
-                                  the request is saved to data/call_launch_preview.json.
-                                  Nothing is sent.
-    python quickhowl.py launch    Sends the request with auto_start=false (guide scenario 6):
-                                  account, profile, agent, campaign and contacts are STORED.
-                                  Nothing is dialled. Saves data/call_campaign_state.json.
-    python quickhowl.py start     Shows who will be called, you type 'yes', then sends the
-                                  IDENTICAL request with auto_start=true (scenario 7) -> dialling.
-    python quickhowl.py status    GET /campaigns/{reference}: where the campaign stands.
-    python quickhowl.py results   GET /campaigns/{reference}/calls (with since paging):
-                                  every call's status, outcome, summary, transcript.
-                                  Merged into data/call_results.json (by call_id).
-    python quickhowl.py watch     Runs 'results' every POLL_SECONDS until the campaign is
-                                  finished (or WATCH_MINUTES pass). Ctrl+C stops watching only.
-                                  A campaign still in DRAFT (not started) stops watching at once.
-    python quickhowl.py pause     You type 'yes', then POST /pause: no new calls are placed.
+HOW IT IS USED
+--------------
+    Campaigns are created, stored, started and polled ONLY by the orchestrator's calls runner
+    (runner_calls.py): every launch saved in the ledger (brain_tool_calls) first, dialling only after the
+    call_start approval. This file is its library (profile, contacts, request, safety, API calls).
+    The old CLI commands preview / launch / start (they skipped the ledger and the approval) are in
+    archive/legacy/quickhowl_cli.py.
+
+MANUAL TOOLS (the campaign comes from the LEDGER of one task, never from a data/ file)
+------------
+    python quickhowl.py status  --run 2026-10-r5 T6    READ-ONLY: where the campaign stands
+    python quickhowl.py results --run 2026-10-r5 T6    READ-ONLY: every call (outcome, summary, transcript)
+    python quickhowl.py watch   --run 2026-10-r5 T6    READ-ONLY: status + results every POLL_SECONDS until
+                                                       finished, still a DRAFT, or WATCH_MINUTES pass
+    python quickhowl.py pause   --run 2026-10-r5 T6    pause ONE campaign (see PAUSE SAFETY)
+    [--reference <ref>]  only when the task's ledger holds more than one campaign: names one exactly.
+    Reads never write anything: the runner's poll steps and its 'since' cursor stay untouched.
+
+PAUSE SAFETY (never the wrong campaign)
+    1. the reference comes only from the task's finished 'store' ledger step (this customer, this run,
+       a Quickhowl calls task); more than one -> stop and list them unless --reference names one
+    2. the status is read first: a reply for another campaign -> STOPPED; finished or draft -> nothing to pause
+    3. you TYPE the full reference; anything else -> not paused
+    4. then exactly one POST /campaigns/<that reference>/pause
 
 WHO DECIDES WHAT
 ----------------
-    LLM  : the company profile (what we offer, value, call objective) from the brain's
-           understanding.json and the Quickhowl work order
+    LLM  : the company profile (what we offer, value, call objective) from the run's understanding
+           and the task's Quickhowl work order (given by the runner)
     Code : contacts, phone format, test-number safety, references, which blocks to send,
            campaign goal, when the campaign is finished, every number
-    Human: approves before any dialling ('start'), and pausing
+    Human: approves before any dialling (orchestrator call_start decision), and pausing
 
 REFERENCES (from the guide)
 ---------------------------
@@ -38,7 +44,7 @@ REFERENCES (from the guide)
     reference         = one campaign. NEW for every launch: motm-<customer>-call-<YYYYMMDD-HHMMSS>.
     Same reference + same content  -> duplicate: true (safe to resend).
     Same reference + changed content -> HTTP 409. So 'start' resends the SAVED request exactly.
-    There is no list endpoint, so every reference we send is kept in data/call_campaigns.json.
+    There is no list endpoint: every reference is kept in the ledger (the task's 'store' step).
 
 WHAT IS SENT
 ------------
@@ -72,18 +78,13 @@ SAFETY
 READS
 -----
     .env                            QUICKHOWL_* settings, TEST_CALL_NUMBERS, SUPABASE_*
-    data/understanding.json         the brain: what the customer sells
-    data/work_orders.json           the Quickhowl (calls) work order
-    data/quickicp_phones_raw.json   who passed the judges in the latest run (LinkedIn URLs)
-    Supabase                        people (with phone) joined with their company, only rows of
-                                    THIS customer (CUSTOMER_KEY)
+    the runner's inputs             the run's understanding, the task's work order, the people (Supabase,
+                                    only rows of THIS customer)
+    the ledger (manual tools)       the task's 'store' step: reference + client_reference
 
 WRITES
 ------
-    data/call_launch_preview.json   the request (secrets removed)
-    data/call_campaign_state.json   current campaign: references, last launch/start reply, next_since
-    data/call_campaigns.json        history of every campaign we created (references)
-    data/call_results.json          every call result, by call_id (first internal transcript line removed)
+    Nothing in data/. The runner records every request and reply in the ledger.
 
 .ENV KEYS
 ---------
@@ -104,12 +105,14 @@ DEBUGGING
 ---------
     - 401: wrong QUICKHOWL_KEY.   404 on status/results: wrong client_reference for that reference.
     - 409: reference reused with different content, or user email differs for that client.
-           Run 'launch' again (new reference). 'start' always resends the saved request exactly.
+           The runner makes a new reference per campaign; 'start' always resends the saved request exactly.
     - 422: the reply names the bad field or the refused contacts.
     - 503: server settings (launch or auto-start switched off). Nothing was created.
     - start_status 'blocked': read start_reason (e.g. phone_number failed to connect).
     - contacts_rejected: bad, duplicate or do-not-call numbers; the rest still go through.
     - Silent calls with elevenlabs: the ElevenLabs plan must be paid; or use voice_provider sarvam.
+    - "has no stored calls campaign in the ledger yet": the calls task has not stored its campaign.
+    - "has 2 campaigns": add --reference <one of the listed references>.
 """
 
 import json
@@ -118,13 +121,13 @@ import re
 import sys
 import time
 import traceback
-from datetime import datetime, timezone
+from datetime import datetime
 
 import requests
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
-from quickicp import TEST_MODE, ToolError, ask_llm, check_settings, clean_domain, load_json, save_json
+from quickicp import TEST_MODE, ToolError, ask_llm, check_settings, clean_domain
 
 load_dotenv()
 
@@ -150,11 +153,6 @@ PAGE_LIMIT = 100
 PEOPLE_TABLE = "quickicp_revenueos_client_people_data"
 COMPANY_TABLE = "quickicp_revenueos_client_company_data"
 
-# ---- Files ----
-PREVIEW_FILE = "data/call_launch_preview.json"
-STATE_FILE = "data/call_campaign_state.json"
-HISTORY_FILE = "data/call_campaigns.json"
-RESULTS_FILE = "data/call_results.json"
 
 REQUIRED_KEYS = ("QUICKHOWL_URL", "QUICKHOWL_KEY", "QUICKHOWL_CLIENT_REFERENCE", "QUICKHOWL_USER_EMAIL",
                  "QUICKHOWL_USER_PASSWORD", "QUICKHOWL_USER_FULL_NAME", "QUICKHOWL_USER_COMPANY")
@@ -167,24 +165,6 @@ FINISHED_STATUSES = {"completed", "failed", "paused"}
 
 
 # ================= SMALL HELPERS =================
-
-def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-
-def read_json(path: str, default):
-    """Read a JSON file we own; return default if it does not exist yet."""
-    if not os.path.exists(path):
-        return default
-    with open(path, encoding="utf-8") as file:
-        return json.load(file)
-
-
-def ask_yes(question: str) -> bool:
-    try:
-        return input(f"{question} Type 'yes' to continue: ").strip().lower() == "yes"
-    except EOFError:
-        return False
 
 
 def slug(text: str) -> str:
@@ -271,30 +251,6 @@ def call_api(method: str, path: str, params: dict | None = None, body: dict | No
 
 # ================= INPUTS: WORK ORDER, BRAIN, SUPABASE =================
 
-def calls_work_order() -> dict:
-    """The Quickhowl work order written by the Master Agent."""
-    work_orders = load_json("data/work_orders.json")
-    for order in work_orders if isinstance(work_orders, list) else work_orders.values():
-        if "quickhowl" in str(order.get("agent", "")).lower():
-            return order
-    raise ToolError("No Quickhowl work order in data/work_orders.json. Check AI calling is enabled "
-                    "and run 'python master_agent.py'.")
-
-
-def passed_linkedin_urls() -> list[tuple[str, int]]:
-    """(LinkedIn URL, judge score) of people who passed the judges in the latest run, best first."""
-    people = load_json("data/quickicp_phones_raw.json")
-    rows = []
-    for person in people:
-        url = person.get("USER SOCIAL")
-        validation = person.get("validation") or {}
-        if url and validation.get("status", "pass") == "pass":
-            rows.append((url, validation.get("score") or 0))
-    rows.sort(key=lambda row: -row[1])
-    if not rows:
-        raise ToolError("No passed people in data/quickicp_phones_raw.json. Run 'python pipeline.py' first.")
-    return rows
-
 
 def supabase_people(urls: list[str]) -> list[dict]:
     """People (with phone) of THIS customer (CUSTOMER_KEY) from Supabase, each joined with their company row."""
@@ -314,19 +270,6 @@ def supabase_people(urls: list[str]) -> list[dict]:
     for person in people:
         person["company"] = companies.get(person.get("company_id")) or {}
     return people
-
-
-def build_contacts() -> list[dict]:
-    """
-    Contacts for the call campaign. Real prospect details always; the phone is the prospect's
-    own in real mode, or one of our TEST_CALL_NUMBERS in test mode.
-    """
-    ranked = passed_linkedin_urls()
-    order = {url: index for index, (url, _) in enumerate(ranked)}
-    people = supabase_people([url for url, _ in ranked])
-    people.sort(key=lambda p: order.get(p.get("user_social"), 10**6))
-    print(f"Passed people in latest run: {len(ranked)} | found in Supabase: {len(people)}")
-    return contacts_from_people(people)
 
 
 def contacts_from_people(people: list[dict]) -> list[dict]:
@@ -432,22 +375,17 @@ def make_profile(understanding: dict, work_order: dict) -> dict:
 
 # ================= REQUEST: BUILD, SECRETS, SAFETY =================
 
-def build_request(contacts: list[dict] | None = None, understanding: dict | None = None,
-                  work_order: dict | None = None) -> dict:
+def build_request(contacts: list[dict], understanding: dict, work_order: dict) -> dict:
     """
-    The full request WITHOUT secrets. Saved to disk; 'start' resends exactly this.
-    contacts: given by the orchestrator's calls runner; default: the latest pipeline run's people.
-    understanding / work_order: the runner passes the run's understanding and THIS task's work order;
-    None (the CLI) = data/understanding.json and the first calls work order in data/work_orders.json.
+    The full request WITHOUT secrets (the calls runner saves it in the ledger; 'start' resends exactly this).
+    contacts, understanding, work_order: given by the runner (the run's understanding, THIS task's work
+    order). Never read from data/ files.
     """
     check_settings("OPENAI_MODEL", *REQUIRED_KEYS)
     reason = real_calls_block_reason()
     if reason:
         raise ToolError(reason)
 
-    understanding = load_json("data/understanding.json") if understanding is None else understanding
-    work_order = calls_work_order() if work_order is None else work_order
-    contacts = build_contacts() if contacts is None else contacts
     made = make_profile(understanding, work_order)
     company = customer_display_name(understanding)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -527,52 +465,7 @@ def real_calls_block_reason() -> str | None:
     return None
 
 
-def print_request(request: dict) -> None:
-    print(f"\nclient_reference: {request['client_reference']}")
-    print(f"reference:        {request['reference']}")
-    print(f"campaign:         {request['campaign']['name']}")
-    print(f"agent:            {request['agent']['name']} ({request['agent']['language']}, "
-          f"{request['agent']['voice_provider']})")
-    print("\nCompany profile the caller will use:")
-    for key, value in request["company_profile"].items():
-        print(f"  {key}: {value}")
-    print(f"\nContacts ({len(request['contacts'])}):")
-    for contact in request["contacts"]:
-        role = contact.get("custom_fields", {}).get("designation", "")
-        print(f"  {contact.get('name')} | {role} | {contact.get('company')} | phone {contact['phone']}")
-
-
-def print_launch_reply(reply: dict) -> None:
-    for block in ("account", "phone_number", "company_profile", "agent", "campaign"):
-        value = reply.get(block)
-        if isinstance(value, dict):
-            extra = f" - {value['reason']}" if value.get("reason") else ""
-            print(f"  {block}: {value.get('status')}{extra}")
-        elif value is None and block in reply:
-            print(f"  {block}: none")
-    if reply.get("contacts_rejected"):
-        print(f"  contacts_rejected: {reply['contacts_rejected']}")
-    print(f"  duplicate: {reply.get('duplicate')} | start_status: {reply.get('start_status')}"
-          + (f" - {reply['start_reason']}" if reply.get("start_reason") else ""))
-
-
 # ================= STATE =================
-
-def load_state() -> dict:
-    state = read_json(STATE_FILE, None)
-    if not state or not state.get("reference"):
-        raise ToolError("No call campaign yet. Run 'python quickhowl.py launch' first.")
-    return state
-
-
-def save_state(state: dict) -> None:
-    save_json(STATE_FILE, state)
-
-
-def add_history(entry: dict) -> None:
-    history = read_json(HISTORY_FILE, [])
-    history.append(entry)
-    save_json(HISTORY_FILE, history)
 
 
 def campaign_params(state: dict) -> dict:
@@ -580,72 +473,6 @@ def campaign_params(state: dict) -> dict:
 
 
 # ================= COMMANDS =================
-
-def cmd_preview() -> dict:
-    request = build_request()
-    assert_safe(request)
-    save_json(PREVIEW_FILE, request)
-    print_request(request)
-    print(f"\nSaved {PREVIEW_FILE} (no secrets). Nothing was sent.")
-    return request
-
-
-def cmd_launch() -> None:
-    """Store the campaign (auto_start false). Nothing is dialled."""
-    request = cmd_preview()
-    print("\nLaunching with auto_start=false: the campaign is STORED, nobody is called.")
-    reply = call_api("POST", "/launch", body=with_secrets(request, auto_start=False))
-    print_launch_reply(reply)
-
-    state = {"client_reference": request["client_reference"], "reference": request["reference"],
-             "launched_at": now_iso(), "test_mode": TEST_MODE, "launch_reply": reply,
-             "started": False, "next_since": None}
-    save_state(state)
-    add_history({"client_reference": request["client_reference"], "reference": request["reference"],
-                 "launched_at": state["launched_at"], "test_mode": TEST_MODE,
-                 "contacts": len(request["contacts"])})
-
-    if reply.get("start_status") == "blocked":
-        raise ToolError(f"Launch blocked: {reply.get('start_reason')}. Fix it, then run 'launch' again.")
-    print(f"\nStored. Next: python quickhowl.py start   (asks before dialling)")
-
-
-def cmd_start() -> None:
-    """Human approval, then the identical request with auto_start true (guide scenario 7)."""
-    state = load_state()
-    request = read_json(PREVIEW_FILE, None)
-    if not request or request.get("reference") != state["reference"]:
-        raise ToolError("The saved request does not match the stored campaign. Run 'launch' again.")
-    assert_safe(request)
-    print_request(request)
-    if TEST_MODE:
-        print("\nTEST MODE: only our own test numbers above will ring.")
-    print("Calls go out inside the calling window (default 09:00-19:00 Mon-Sat), one at a time, "
-          "20-40 s preparation before each. Unanswered calls are not retried.")
-    if not ask_yes("\nStart dialling now?"):
-        print("Not started.")
-        return
-
-    reply = call_api("POST", "/launch", body=with_secrets(request, auto_start=True))
-    print_launch_reply(reply)
-    state.update({"started": reply.get("start_status") in ("started", "already_started"),
-                  "started_at": now_iso(), "start_reply": reply})
-    save_state(state)
-    if reply.get("start_status") == "blocked":
-        raise ToolError(f"Start blocked: {reply.get('start_reason')}")
-    print("\nNext: python quickhowl.py watch   (or 'status' / 'results' any time)")
-
-
-def cmd_status() -> dict:
-    state = load_state()
-    reply = call_api("GET", f"/campaigns/{state['reference']}", params=campaign_params(state), timeout=60)
-    print(f"\nCampaign {state['reference']}")
-    print(f"  status: {reply.get('status')} | in calling window now: {reply.get('in_calling_window_now')}")
-    print(f"  window: {reply.get('calling_window')}")
-    print(f"  contacts: {reply.get('contacts_total')} total, {reply.get('contacts_still_to_call')} still to call")
-    print(f"  contacts_by_status: {reply.get('contacts_by_status')}")
-    print(f"  calls: {reply.get('calls_total')} | by outcome: {reply.get('calls_by_outcome')}")
-    return reply
 
 
 def clean_transcript(transcript: list | None) -> list:
@@ -657,99 +484,169 @@ def clean_transcript(transcript: list | None) -> list:
     return lines
 
 
-def cmd_results(quiet: bool = False) -> dict:
-    """Fetch new/changed calls since last time (all pages), merge by call_id, save, summarise."""
-    state = load_state()
-    results = read_json(RESULTS_FILE, {})
-    since, fetched, campaign_status = state.get("next_since"), 0, None
+# ================= MANUAL TOOLS: the campaign comes from the LEDGER (--run <month> <task>) =================
+
+def ledger_campaign(month: str, task_id: str, reference: str | None = None) -> dict:
+    """
+    The calls campaign of ONE task of THIS customer's run, from the ledger (never from a data/ file):
+    the task's finished 'store' steps. More than one campaign in that task -> stop and list them,
+    unless reference names one of them exactly.
+    Returns {"run_key", "task_id", "reference", "client_reference"}.
+    """
+    from orchestrator import check_month, find_run
+    from state_store import current_customer, get_steps, get_tasks
+    run = find_run(current_customer(), check_month(month))
+    task = next((t for t in get_tasks(run["id"]) if t["task_id"] == task_id), None)
+    if not task:
+        raise ToolError(f"STOPPED: no task {task_id} in run {run['run_key']}.")
+    if (task["agent"], task["output_type"]) != ("Quickhowl", "calls"):
+        raise ToolError(f"STOPPED: {task_id} is a {task['agent']} / {task['output_type']} task, "
+                        "not a Quickhowl calls task.")
+    stored = {}
+    for step in get_steps(task["id"]):
+        if step["step"] == "store" and step["status"] == "done":
+            ref = (step["request"] or {}).get("reference")
+            stored[ref] = (step["response"] or {}).get("client_reference") or os.getenv("QUICKHOWL_CLIENT_REFERENCE")
+    if not stored:
+        raise ToolError(f"STOPPED: {task_id} in run {run['run_key']} has no stored calls campaign in the ledger yet.")
+    if reference is None and len(stored) > 1:
+        raise ToolError(f"STOPPED: {task_id} in run {run['run_key']} has {len(stored)} campaigns: "
+                        f"{', '.join(stored)}. Name one with --reference <ref>.")
+    if reference is not None and reference not in stored:
+        raise ToolError(f"STOPPED: {reference} is not a campaign of {task_id} in run {run['run_key']} "
+                        f"(the ledger has: {', '.join(stored)}).")
+    ref = reference or next(iter(stored))
+    return {"run_key": run["run_key"], "task_id": task_id, "reference": ref, "client_reference": stored[ref]}
+
+
+def campaign_status(campaign: dict) -> dict:
+    """READ-ONLY: the campaign's status from Quickhowl. Stops if Quickhowl answers for another campaign."""
+    reply = call_api("GET", f"/campaigns/{campaign['reference']}", params=campaign_params(campaign), timeout=60)
+    if reply.get("reference") not in (None, campaign["reference"]):
+        raise ToolError(f"STOPPED: Quickhowl answered for campaign {reply.get('reference')}, not "
+                        f"{campaign['reference']}. Nothing was done.")
+    return reply
+
+
+def cmd_status(campaign: dict) -> dict:
+    """READ-ONLY: print the campaign's status."""
+    reply = campaign_status(campaign)
+    print(f"\nCampaign {campaign['reference']} ({campaign['run_key']} {campaign['task_id']})")
+    print(f"  status: {reply.get('status')} | in calling window now: {reply.get('in_calling_window_now')}")
+    print(f"  window: {reply.get('calling_window')}")
+    print(f"  contacts: {reply.get('contacts_total')} total, {reply.get('contacts_still_to_call')} still to call")
+    print(f"  contacts_by_status: {reply.get('contacts_by_status')}")
+    print(f"  calls: {reply.get('calls_total')} | by outcome: {reply.get('calls_by_outcome')}")
+    return reply
+
+
+def cmd_results(campaign: dict, quiet: bool = False) -> dict:
+    """READ-ONLY: every call of the campaign (all pages), printed. Writes nothing (the runner owns the ledger)."""
+    calls, since, campaign_state = {}, None, None
     while True:
-        params = {**campaign_params(state), "limit": PAGE_LIMIT}
-        if since:
-            params["since"] = since
-        reply = call_api("GET", f"/campaigns/{state['reference']}/calls", params=params, timeout=60)
+        params = {**campaign_params(campaign), "limit": PAGE_LIMIT, **({"since": since} if since else {})}
+        reply = call_api("GET", f"/campaigns/{campaign['reference']}/calls", params=params, timeout=60)
         for item in reply.get("items", []):
             item["transcript"] = clean_transcript(item.get("transcript"))
-            item["reference"] = state["reference"]
-            results[item["call_id"]] = item
-            fetched += 1
-        campaign_status = reply.get("campaign_status")
+            calls[item["call_id"]] = item
+        campaign_state = reply.get("campaign_status")
         since = reply.get("next_since") or since
         if not reply.get("has_more"):
             break
-
-    state["next_since"] = since
-    save_state(state)
-    save_json(RESULTS_FILE, results)
-
-    mine = [r for r in results.values() if r.get("reference") == state["reference"]]
-    if not quiet or fetched:
-        print(f"\nCalls updated: {fetched} | campaign: {campaign_status} | calls so far: {len(mine)}")
-        for call in mine:
+    if not quiet:
+        print(f"\nCalls of {campaign['reference']}: {len(calls)} | campaign: {campaign_state}")
+        for call in calls.values():
             contact = call.get("contact") or {}
             summary = (call.get("summary") or "").replace("\n", " ")[:120]
-            print(f"  {str(call.get('status')):10} {str(call.get('outcome')):18} "
-                  f"{str(call.get('duration_seconds') or '-'):>4}s  {contact.get('name')} | "
-                  f"{contact.get('company')}  {summary}")
-        outcomes = {}
-        for call in mine:
-            outcomes[call.get("outcome")] = outcomes.get(call.get("outcome"), 0) + 1
-        print(f"  Outcomes: {outcomes}")
-        print(f"  Saved {RESULTS_FILE}")
-    return {"campaign_status": campaign_status, "calls": mine}
+            print(f"  {contact.get('name')} | {call.get('outcome')} | {call.get('duration_seconds')} s | {summary}")
+    return {"calls": list(calls.values()), "campaign_status": campaign_state}
 
 
-def cmd_watch() -> None:
-    """Poll every POLL_SECONDS until finished or WATCH_MINUTES pass. Ctrl+C only stops watching."""
+def cmd_watch(campaign: dict, sleep=time.sleep) -> None:
+    """READ-ONLY: status + results every POLL_SECONDS until finished, still a draft, or WATCH_MINUTES pass."""
     deadline = time.time() + WATCH_MINUTES * 60
-    print(f"Watching every {POLL_SECONDS} s for up to {WATCH_MINUTES} min (Ctrl+C stops watching, "
-          f"not the calls).")
+    print(f"Watching {campaign['reference']} every {POLL_SECONDS} s for up to {WATCH_MINUTES} min "
+          "(Ctrl+C stops watching, not the calls).")
     try:
         while True:
-            outcome = cmd_results(quiet=True)
-            status = cmd_status()
+            outcome = cmd_results(campaign, quiet=True)
+            status = cmd_status(campaign)
             if status.get("status") == "draft":
-                # Known issue 3: a draft campaign never starts by itself; stop at once.
                 print("\nThe campaign is still a DRAFT (stored, not started): nobody will be called. "
-                      "Run 'python quickhowl.py start' first.")
+                      "It is started through the orchestrator (call_start decision).")
                 return
             calls = outcome["calls"]
-            all_finished = all(call.get("finished") for call in calls) if calls else False
             if status.get("status") in FINISHED_STATUSES and status.get("contacts_still_to_call") == 0 \
-                    and all_finished:
+                    and calls and all(call.get("finished") for call in calls):
                 print("\nCampaign finished.")
-                cmd_results()
+                cmd_results(campaign)
                 return
             if time.time() > deadline:
                 print(f"\nStopped watching after {WATCH_MINUTES} min. Calls continue; run 'watch' again.")
                 return
-            time.sleep(POLL_SECONDS)
+            sleep(POLL_SECONDS)
     except KeyboardInterrupt:
-        print("\nStopped watching. Calls continue on the server; run 'results' or 'watch' later.")
+        print("\nStopped watching. Calls continue on the server.")
 
 
-def cmd_pause() -> None:
-    state = load_state()
-    if not ask_yes(f"Pause campaign {state['reference']}? Calls in progress finish; no new calls."):
-        print("Not paused.")
-        return
-    reply = call_api("POST", f"/campaigns/{state['reference']}/pause", params=campaign_params(state))
+def cmd_pause(campaign: dict, confirm=input) -> dict | None:
+    """
+    Pause ONE campaign, never the wrong one: the reference comes only from the ledger (ledger_campaign),
+    the status is read first (another campaign in the reply -> STOPPED; finished or draft -> nothing to
+    pause), and you must TYPE the full reference. Then exactly one POST for that reference.
+    """
+    status = campaign_status(campaign)
+    if status.get("status") == "draft" or status.get("status") in FINISHED_STATUSES:
+        print(f"Campaign {campaign['reference']} is '{status.get('status')}': nothing to pause. Nothing was sent.")
+        return None
+    print(f"\nPause campaign {campaign['reference']} of {campaign['run_key']} {campaign['task_id']}?")
+    print(f"  status: {status.get('status')} | contacts still to call: {status.get('contacts_still_to_call')}")
+    print("  Calls in progress finish; no new calls start.")
+    try:
+        typed = confirm(f"Type the campaign reference to pause it ({campaign['reference']}): ").strip()
+    except EOFError:
+        typed = ""
+    if typed != campaign["reference"]:
+        print("Not paused (the reference did not match).")
+        return None
+    reply = call_api("POST", f"/campaigns/{campaign['reference']}/pause", params=campaign_params(campaign))
     print(f"  paused: {reply.get('paused')} | status: {reply.get('status')} | {reply.get('reason')}")
     if reply.get("next_action"):
         print(f"  {reply['next_action']}")
+    return reply
 
 
-COMMANDS = {"preview": cmd_preview, "launch": cmd_launch, "start": cmd_start, "status": cmd_status,
-            "results": cmd_results, "watch": cmd_watch, "pause": cmd_pause}
+COMMANDS = {"status": cmd_status, "results": cmd_results, "watch": cmd_watch, "pause": cmd_pause}
+USAGE = ("Usage: python quickhowl.py <status | results | watch | pause> --run <YYYY-MM[-rN]> <task id> "
+         "[--reference <ref>]\n  e.g. python quickhowl.py status --run 2026-10-r5 T6\n"
+         "  Campaigns are created and started only through the orchestrator (ledger + call_start approval).")
+
+
+def parse_manual_args(args: list[str]) -> tuple[str, str, str, str | None]:
+    """'status --run 2026-10-r5 T6 [--reference R]' -> (command, month, task id, reference). Stops on anything else."""
+    if not args or args[0] not in COMMANDS or "--run" not in args:
+        raise ToolError(USAGE)
+    at = args.index("--run")
+    if len(args) < at + 3:
+        raise ToolError(USAGE)
+    used, reference = {0, at, at + 1, at + 2}, None
+    if "--reference" in args:
+        ref_at = args.index("--reference")
+        if len(args) < ref_at + 2:
+            raise ToolError(USAGE)
+        reference = args[ref_at + 1]
+        used |= {ref_at, ref_at + 1}
+    if len(used) != len(args):
+        raise ToolError(USAGE)
+    return args[0], args[at + 1], args[at + 2], reference
+
 
 if __name__ == "__main__":
-    command = sys.argv[1] if len(sys.argv) > 1 else "preview"
-    if command not in COMMANDS:
-        print("Usage: python quickhowl.py " + " | ".join(COMMANDS))
-        sys.exit(1)
     try:
-        COMMANDS[command]()
+        command, month, task_id, reference = parse_manual_args(sys.argv[1:])
+        COMMANDS[command](ledger_campaign(month, task_id, reference))
     except ToolError as error:
-        print("\nSTOPPED:", error)
+        print(error)
         sys.exit(1)
     except Exception:
         print("\nUNEXPECTED ERROR (details below for debugging):")

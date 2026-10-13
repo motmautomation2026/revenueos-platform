@@ -33,8 +33,11 @@ FLOW
                    whats_short, next_actions (max 3). Each action has a kind and 'follows_rule':
                    one of the plan's optimization rules, copied exactly, or 'new'.
                    Code checks: numbers only from the data (0-3 always allowed), real plan rules, and no
-                   claimed EVENT the RESULTS do not show (CLAIMS: demo/meeting booked, deal won; e.g.
-                   'demo scheduled' when the outcome is only 'interested'; negated sentences are fine).
+                   claimed OUTCOME the outcome data does not show (CLAIMS: booked, won / PO received,
+                   replied, meeting held, calls completed, qualified, interested, proposal / RFQ, POC;
+                   evidence = call outcomes + summaries, objection labels, calls completed, email replies,
+                   never the plan's own text). Negated sentences are fine. A claim type not in CLAIMS is
+                   not checked: add one line there.
                    Fails -> ONE retry naming the problem. Numbers or claims still wrong -> numbers-only review.
                    Rules still not matched -> 'new (rule not matched)' + a note.
                    TEST_MODE: code DROPS every 'volume' action and says once: volume shortfalls are test caps.
@@ -64,7 +67,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from quickicp import ToolError, ask_llm
+from quickicp import ToolError, ask_llm, percent_of
+from runner_kit import percent_target
 from state_store import (get_steps, get_tasks, list_open_decisions, now_iso, open_decision, ready_tasks,
                          record_decision, update_task)
 
@@ -126,8 +130,16 @@ def task_numbers(task: dict) -> dict:
     """Numbers of one DONE tool task, from its saved result."""
     r = task["result"] or {}
     achieved, effective, plan = task["achieved_number"], r.get("target"), task["target_number"]
+    basis = None
+    if plan is None and percent_of(task["work_order"].get("target")) is not None:
+        try:
+            plan, base = percent_target(task)          # same reading as the runners: share x the base's achieved
+            basis = f"{percent_of(task['work_order'].get('target')):g}% of {base}"
+        except ToolError:
+            pass
     entry = {"task_id": task["task_id"], "agent": task["agent"], "output_type": task["output_type"],
              "plan_target": task["work_order"].get("target"), "plan_target_number": plan,
+             **({"plan_target_basis": basis} if basis else {}),
              "effective_target": effective, "achieved": achieved,
              "pct_of_effective_target": pct(achieved, effective), "pct_of_plan_target": pct(achieved, plan)}
     kind = task["output_type"]
@@ -281,20 +293,67 @@ def invented_numbers(text: ReviewText, allowed: set[str]) -> list[str]:
     return sorted(found - allowed - FREE_NUMBERS, key=lambda n: (len(n), n))
 
 
-# Claims of an EVENT the text may only make when RESULTS (code data, never the plan goals) show it:
-# name -> (claim in the text, evidence in RESULTS). A negated sentence ('no demo was booked') is fine.
+# Outcome claims the text may only make when the OUTCOME data shows them (outcome_evidence: call outcomes and
+# summaries, objection labels and quotes, calls completed, email replies, campaign status; never the plan
+# targets or goals). name -> (claim in a sentence, evidence in the outcome data). Negated sentences are fine.
+_W = r"[^.;!?]{0,40}"
 CLAIMS = {
     "demo or meeting booked": (
-        re.compile(r"\b(demo|meeting|appointment)s?\b[^.;!?]{0,40}\b(scheduled|booked|confirmed|arranged)\b"
-                   r"|\b(scheduled|booked|confirmed|arranged)\b[^.;!?]{0,40}\b(demo|meeting|appointment)s?\b",
-                   re.IGNORECASE),
-        re.compile(r"(demo|meeting|appointment)[ _-]?(scheduled|booked|confirmed|arranged)", re.IGNORECASE)),
+        rf"\b(demo|meeting|appointment)s?\b{_W}\b(scheduled|booked|confirmed|arranged)\b"
+        rf"|\b(scheduled|booked|confirmed|arranged)\b{_W}\b(demo|meeting|appointment)s?\b",
+        r"\b(demo|meeting|appointment)s? ?(scheduled|booked|confirmed|arranged)\b|\b(scheduled|booked) (a )?(demo|meeting)"),
     "deal or order won": (
-        re.compile(r"\b(deal|order|contract|sale)s?\b[^.;!?]{0,30}\b(won|closed|signed)\b"
-                   r"|\b(won|closed|signed)\b[^.;!?]{0,30}\b(deal|order|contract|sale)s?\b", re.IGNORECASE),
-        re.compile(r"(deal|order|contract)[ _-]?(won|closed|signed)|closed[ _-]won", re.IGNORECASE)),
+        rf"\b(deal|order|contract|sale|po|purchase order)s?\b{_W}\b(won|closed|signed|received|placed)\b"
+        rf"|\b(won|closed|signed|received|placed)\b{_W}\b(deal|order|contract|sale|purchase order)s?\b",
+        r"\b(deal|order|contract|purchase order|po)s? ?(won|closed|signed|received|placed)\b|\bclosed won\b"),
+    "prospect replied": (
+        r"\b(replied|responded|wrote back|got back to us|replies received|reply received)\b",
+        r"\b(replied|reply|replies|responded)\b"),
+    "meeting or demo held": (
+        rf"\b(meeting|demo|presentation|discussion|visit)s?\b{_W}\b(held|done|conducted|completed|attended|took place|given|happened)\b"
+        rf"|\b(held|conducted|attended|completed|gave)\b{_W}\b(meeting|demo|presentation|visit)s?\b",
+        r"\b(meeting|demo|presentation|visit)s? ?(held|done|conducted|completed|attended|given)\b"),
+    "call completed": (
+        rf"\bcalls?\b{_W}\b(completed|connected|answered|held)\b",
+        r"\bcalls completed [1-9]"),
+    "lead qualified": (
+        rf"\b(lead|prospect|enquir\w*|opportunit\w*|contact)s?\b{_W}\b(was|were|is|are|got|been|became)\b{_W}\bqualified\b"
+        r"|\b\d+\s+qualified\b|\bqualified (a|one|two|three|\d+)\b",
+        r"\bqualified\b"),
+    "prospect interested": (
+        r"\b(interested|showed interest|expressed interest|keen)\b",
+        r"(?<!not )(?<!no )\binterest(ed)?\b"),
+    "proposal or RFQ": (
+        rf"\b(proposal|quote|quotation|rfq)s?\b{_W}\b(sent|received|accepted|shared|submitted|requested)\b"
+        rf"|\b(sent|received|accepted|shared|submitted|requested)\b{_W}\b(proposal|quote|quotation|rfq)s?\b",
+        r"\b(proposal|quote|quotation|rfq)s?\b"),
+    "POC or pilot": (
+        rf"\b(poc|pilot|proof of concept)s?\b{_W}\b(started|agreed|approved|running|signed|kicked off)\b"
+        rf"|\b(started|agreed to|approved|kicked off)\b{_W}\b(poc|pilot|proof of concept)\b",
+        r"\b(poc|pilot|proof of concept)\b"),
 }
-NEGATION = re.compile(r"\b(no|not|none|never|zero|without|yet to)\b|n't\b", re.IGNORECASE)
+CLAIMS = {name: (re.compile(claim, re.IGNORECASE), re.compile(proof)) for name, (claim, proof) in CLAIMS.items()}
+NEGATION = re.compile(r"\b(no|not|none|never|zero|without|yet to|nobody|nothing|neither)\b|n't\b", re.IGNORECASE)
+# A sentence about a target ('short of the 10-12 qualified enquiries target') is not a claim that it happened.
+TARGET_TALK = re.compile(r"\b(target|goal|plan|kpi|aim|expected|needs?|required)\b", re.IGNORECASE)
+
+
+def outcome_evidence(results: dict) -> str:
+    """The OUTCOME data only (lowercase, '_' as spaces): what really happened, never what was planned."""
+    parts = []
+    for task in results.get("tool_tasks", []):
+        parts += [f"{label} {count}" for label, count in (task.get("outcome_counts") or {}).items()]
+        parts += [f"{call.get('outcome')} {call.get('summary') or ''}" for call in task.get("calls", [])]
+        if task.get("calls_completed"):
+            parts.append(f"calls completed {task['calls_completed']}")
+        if task.get("campaign_status"):
+            parts.append(f"campaign {task['campaign_status']}")
+        if isinstance(task.get("email_replies"), (int, float)) and task["email_replies"]:
+            parts.append(f"email replies {task['email_replies']}")
+    objections = results.get("objections") or {}
+    parts += [f"{label} {count}" for label, count in (objections.get("counts") or {}).items()]
+    parts += [f"{q.get('label')} {q.get('quote') or ''}" for q in objections.get("quotes", [])]
+    return " | ".join(str(part) for part in parts).lower().replace("_", " ")
 
 
 def text_sentences(text: ReviewText) -> list[str]:
@@ -306,14 +365,19 @@ def text_sentences(text: ReviewText) -> list[str]:
 
 def unsupported_claims(text: ReviewText, results: dict) -> list[str]:
     """
-    Sentences claiming an event (demo/meeting booked, deal won) that RESULTS do not show, e.g.
-    'demo scheduled' when the call outcome is only 'interested'. Negated sentences are allowed. Code decides.
+    Sentences claiming an OUTCOME (CLAIMS: booked, won, replied, held, completed, qualified, interested,
+    proposal, POC) that the outcome data does not show, e.g. 'demo scheduled' when the call outcome is only
+    'interested'. Negated sentences are allowed; a 'qualified' sentence about a target is not a claim. Code decides.
     """
-    evidence = json.dumps(results, ensure_ascii=False)
+    evidence = outcome_evidence(results)
     found = []
     for sentence in text_sentences(text):
+        if NEGATION.search(sentence):
+            continue
         for name, (claim, proof) in CLAIMS.items():
-            if claim.search(sentence) and not NEGATION.search(sentence) and not proof.search(evidence):
+            if name == "lead qualified" and TARGET_TALK.search(sentence):
+                continue
+            if claim.search(sentence) and not proof.search(evidence):
                 found.append(f"{name}: '{sentence}'")
     return found
 

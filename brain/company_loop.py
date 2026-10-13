@@ -2,14 +2,10 @@
 company_loop.py
 ===============
 
-Company search with validation, pagination, an automatic shortfall loop, and a
-GOAL CHECK that asks a human when the loop is still short.
-
-WHY
----
-After the company judge, some companies fail. If too few pass, this loop fetches more,
-for new companies only, up to MAX_EXTRA_ROUNDS times. If it is STILL short after that,
-it saves everything and asks you (goal_check.py): continue, try more, or stop.
+The company search ROUNDS used by the orchestrator's accounts runner (runner_quickicp_accounts.py):
+one round = search -> keep only new companies -> judge; extra rounds fetch the next page or let the
+brain adjust the filters. No standalone CLI any more: the old 'python company_loop.py' loop and its
+goal_check.py prompt are in archive/legacy/ (the goal check is now an orchestrator decision).
 
 PAGINATION (agreed with the n8n developer)
 ------------------------------------------
@@ -20,7 +16,7 @@ PAGINATION (agreed with the n8n developer)
     - After a successful request: coveredpages += ceil(company_count / 25).
     - If the filters change (brain adjustment), it is a NEW search: coveredpages = 0.
 
-FLOW
+FLOW (run_round / run_extra_rounds)
 ----
     Round 0   filters from the work order, coveredpages 0
     Round 1+  only while passed < target, at most MAX_EXTRA_ROUNDS:
@@ -28,67 +24,37 @@ FLOW
                            (used while the last round returned companies AND some passed)
               ADJUST     - brain changes the filters, coveredpages = 0
                            (used when the last page was empty, or nothing in it passed)
-    GOAL CHECK  still short -> results saved -> you choose:
-              1 continue  - move on with what passed (shortfall recorded)
-              2 more      - run MAX_EXTRA_ROUNDS more rounds (allowed MAX_USER_RETRIES times)
-              3 stop      - stop here; everything is already saved
+    Still short after the rounds -> the runner opens a goal_check decision (continue / more / stop).
 
 WHO DECIDES WHAT
 ----------------
-    Code : target, shortfall, pages, next-page vs adjust, de-duplication, when to ask
-    LLM  : how to change the filters when the current search is exhausted
-    Human: continue / more / stop when the goal is not met after the retries
+    Code : target, shortfall, pages, next-page vs adjust, de-duplication
+    LLM  : how to change the filters when the current search is exhausted (brain_adjust)
+    Human: continue / more / stop, through the orchestrator's goal_check decision
 
-READS
------
-    data/work_orders.json        QuickICP accounts work order (target, geography, tier)
-    data/understanding.json      the brain: what the customer sells, priority segments
-
-WRITES
-------
-    data/quickicp_payload.json   payload of the CURRENT round (the judge reads its cities and sizes)
-    data/quickicp_raw.json       every company found, across all rounds (no duplicates)
-    data/companies_judged.json   every company with its verdict, across all rounds
-    data/companies_passed.json   only passed companies (used by people search)
-    data/company_loop_log.json   one entry per round: strategy, payload, counts, explanation
-    data/decisions.json          the goal-check decision, if one was needed (via goal_check.py)
-
-RUN
----
-    python company_loop.py
-
-ORCHESTRATOR
-------------
-    The orchestrator's runner (runner_quickicp_accounts.py) reuses run_round() / run_extra_rounds()
-    with its own LoopTools: every paid search recorded in brain_tool_calls before it is made, the
-    state saved after every round (LoopState.to_json / from_json). This CLI uses REAL_TOOLS and
-    behaves exactly as before.
+READS / WRITES
+--------------
+    Through the LoopTools the runner passes: every paid search recorded in brain_tool_calls before it is
+    made, the state saved after every round (LoopState.to_json / from_json). The run's understanding and
+    the task's work order come from the run (brain_customer_runs), never data/.
 
 TEST MODE
 ---------
     With TEST_MODE on (in quickicp.py), the target is TEST_TARGET.
-    To see the goal check with NO extra credits: set TEST_TARGET = 60 and
-    MAX_EXTRA_ROUNDS = 0 (only round 0 runs), then choose 1 or 3 when asked.
-    Put both values back afterwards (40 and 2).
 
 DEBUGGING
 ---------
-    Open data/company_loop_log.json: each round shows its strategy (next_page / adjust),
-    the exact payload sent (with coveredpages), how many came back, how many were new,
-    and how many passed. Goal-check entries show the decision.
-    Open data/decisions.json to see every human/auto decision.
+    brain_tool_calls rows of the task: step 'state' (output.loop.log: each round's strategy, payload,
+    counts) and the round log file data/runs/<run_key>/<task>_company_loop_log.json.
 """
 
 import json
 import math
-import sys
-import traceback
 from collections import Counter
 from dataclasses import dataclass, field
 
 from pydantic import BaseModel, Field
 
-from goal_check import StopRequested, ask_on_shortfall
 from quickicp import (
     PAGE_SIZE,
     TEST_MODE,
@@ -96,19 +62,15 @@ from quickicp import (
     CompanySize,
     ToolError,
     ask_llm,
-    build_company_payload,
-    check_settings,
     clean_domain,
     industry_options,
-    load_json,
-    load_quickicp_work_order,
     max_number,
     pick_exact_names,
     prospeo_suggestions,
     save_json,
     search_companies,
 )
-from validator import PASS_SCORE, company_context, judge_companies
+from validator import company_context, judge_companies
 
 MAX_EXTRA_ROUNDS = 2      # extra requests after round 0 (and per "try more")
 MAX_USER_RETRIES = 2      # how many times the human may choose "try more"
@@ -164,8 +126,8 @@ class LoopState:
 
 class LoopTools:
     """
-    The calls one round makes. 'python company_loop.py' uses these real ones (same behaviour as
-    before). The orchestrator's runner passes its own version: every search saved in
+    The calls one round makes (the base the runners build on; the real search / judge).
+    The orchestrator's runner passes its own version: every search saved in
     brain_tool_calls BEFORE it is made, and a fake version in its selftest (no network, no LLM).
     """
 
@@ -191,7 +153,7 @@ class LoopTools:
         save_json("data/company_loop_log.json", log)
 
     def after_round(self, state: "LoopState") -> None:
-        """Called after every round; the orchestrator saves the state here. Nothing in the CLI."""
+        """Called after every round; the orchestrator's runner saves the state here."""
 
 
 REAL_TOOLS = LoopTools()
@@ -359,8 +321,6 @@ def run_extra_rounds(state: LoopState, how_many: int, tools: LoopTools = REAL_TO
             print(f"Strategy: {strategy} - {explanation}")
             run_round(number, strategy, payload, state, explanation, tools)
 
-        except StopRequested:
-            raise
         except ToolError as error:
             # A failed extra round never loses earlier results: stop these rounds, keep what we have.
             print(f"Round {number} stopped: {error}")
@@ -370,78 +330,3 @@ def run_extra_rounds(state: LoopState, how_many: int, tools: LoopTools = REAL_TO
             # Force "adjust" next time: the current search just failed.
             state.received, state.last_passed = 0, 0
             return
-
-
-def save_results(state: LoopState) -> list[dict]:
-    """Save every output file. Called before asking the human, and at the end."""
-    passed_companies = [c for c in state.all_judged if c["validation"]["status"] == "pass"]
-    save_json("data/quickicp_raw.json", state.all_raw)
-    save_json("data/companies_judged.json", state.all_judged)
-    save_json("data/companies_passed.json", passed_companies)
-    save_json("data/company_loop_log.json", state.log)
-    return passed_companies
-
-
-# ================= THE LOOP =================
-
-def run_loop() -> None:
-    check_settings("OPENAI_MODEL", "PROSPEO_API_KEY", "QUICKICP_WEBHOOK_URL")
-    work_order = load_quickicp_work_order("accounts")
-    understanding = load_json("data/understanding.json")
-    state = LoopState(work_order=work_order, target=passed_target(work_order))
-    print(f"Target: {state.target} passed companies (pass score {PASS_SCORE}, "
-          f"max extra rounds {MAX_EXTRA_ROUNDS})")
-
-    # Round 0: the normal search from the work order (coveredpages = 0).
-    print("\n===== ROUND 0 =====")
-    payload = build_company_payload(work_order, understanding)
-    run_round(0, "initial", payload, state, "Initial search from the work order")
-
-    # Extra rounds, then a goal check if still short.
-    user_retries = 0
-    run_extra_rounds(state, MAX_EXTRA_ROUNDS)
-    while count_passed(state.all_judged) < state.target:
-        save_results(state)   # never ask before everything is safely saved
-        decision = ask_on_shortfall(
-            step="companies",
-            target=state.target,
-            achieved=count_passed(state.all_judged),
-            rounds_done=state.rounds + 1,
-            can_retry=user_retries < MAX_USER_RETRIES,
-            details=rejection_summary(state.all_judged),
-            more_label=f"Try {MAX_EXTRA_ROUNDS} more rounds ({MAX_USER_RETRIES - user_retries} left)",
-        )
-        state.log.append({"goal_check": "companies", "decision": decision,
-                          "passed": count_passed(state.all_judged), "target": state.target})
-        save_json("data/company_loop_log.json", state.log)
-
-        if decision == "more":
-            user_retries += 1
-            run_extra_rounds(state, MAX_EXTRA_ROUNDS)
-            continue
-        if decision == "stop":
-            raise StopRequested("Stopped at the companies goal check. Everything found so far is saved "
-                                "in data/companies_passed.json.")
-        break   # continue with what we have
-
-    passed_companies = save_results(state)
-    shortfall = max(0, state.target - len(passed_companies))
-    print(f"\nDONE: {len(passed_companies)} passed of target {state.target} "
-          f"across {len([e for e in state.log if 'payload' in e])} round(s)")
-    if shortfall:
-        print(f"Continuing with a shortfall of {shortfall} (decision in data/decisions.json).")
-    print("Saved quickicp_raw.json, companies_judged.json, companies_passed.json, company_loop_log.json")
-
-
-# ================= RUN =================
-
-if __name__ == "__main__":
-    try:
-        run_loop()
-    except ToolError as error:
-        print("\nSTOPPED:", error)
-        sys.exit(1)
-    except Exception:
-        print("\nUNEXPECTED ERROR (details below for debugging):")
-        traceback.print_exc()
-        sys.exit(1)

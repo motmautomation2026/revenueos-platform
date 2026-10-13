@@ -18,7 +18,9 @@ FLOW
     2. plan     master_agent --intake: the LLM plans the month, YOU approve (yes / override / changes),
                 proof saved. No valid fresh proof -> stop (nothing closed)
     3. close    this customer's latest RUNNING run is closed ("replaced by E2E test plan"); you type its key
-    4. load     the next free revision of its month (e.g. 2026-10-r3); no earlier run -> --month as given
+    4. load     the next free revision of the month of this customer's LATEST run, whatever its status
+                (e.g. 2026-10-r5 after a stopped r4), or of --month. Worked out BEFORE step 1, so a missing
+                month stops before any LLM call. No run at all and no --month -> STOPPED.
                 The loaded run must say test_mode = true.
     5. loop     run --until-wait, then act on why it stopped:
                   human task / gate decision      -> answered 'done', note 'E2E TEST', decided_by 'e2e-test'
@@ -133,10 +135,19 @@ def latest_running(customer: str) -> dict | None:
     return running[-1] if running else None
 
 
-def target_month(customer: str, old: dict | None, month: str | None) -> str:
-    """The month to load: the next free revision of the old run's month, or --month (its revision if taken)."""
+def latest_run(customer: str) -> dict | None:
+    """This customer's newest run of ANY status (running, stopped or done), or None."""
+    runs = get_runs(customer)
+    return runs[-1] if runs else None
+
+
+def target_month(customer: str, latest: dict | None, month: str | None) -> str:
+    """
+    The month to load: --month if given, else the month of the customer's LATEST run (any status);
+    the next free revision when that month is taken (2026-10 -> 2026-10-r5).
+    """
     from orchestrator import check_month, month_of, next_revision, run_key_for
-    base = month_of(old) if old else month
+    base = month or (month_of(latest) if latest else None)
     if not base:
         raise ToolError("STOPPED: no earlier run for this customer: give the month, e.g. --month 2026-10")
     base = check_month(base).split("-r")[0]
@@ -246,6 +257,8 @@ def run_e2e(steps: Steps, customer: str, month: str | None = None, resume: bool 
         if not run:
             raise ToolError(f"STOPPED: no running run for '{customer}' to resume.")
     else:
+        # Decided BEFORE any LLM call: a missing month stops here, not after paying for a plan.
+        new_month = target_month(customer, latest_run(customer), month)
         say("1. intake: the platform plan (Supabase reads only)")
         steps.intake()
         say("2. plan: master_agent --intake (you approve)")
@@ -253,8 +266,7 @@ def run_e2e(steps: Steps, customer: str, month: str | None = None, resume: bool 
             steps.plan()
         except ToolError as error:
             raise ToolError(f"STOPPED: the plan was not approved ({error}). Nothing was closed or loaded.") from error
-        old = latest_running(customer)
-        new_month = target_month(customer, old, month)
+        old = latest_running(customer)         # only a RUNNING run is closed
         if old:
             say(f"3. close: {old['run_key']} (type its key)")
             if cmd_close(customer, month_of(old), CLOSE_REASON, confirm=steps.ask) is None:
@@ -314,7 +326,8 @@ def run_e2e(steps: Steps, customer: str, month: str | None = None, resume: bool 
 def selftest() -> bool:
     """The whole E2E flow with fake steps and fake toolsets; scripted answers. No network, no LLM."""
     from brain_review import CallLabels, ReviewText
-    from orchestrator import WIRED_RUNNERS, expect, load_run, network_guard, raises, sweep_selftest_runs
+    from orchestrator import WIRED_RUNNERS, load_run
+    from orchestrator_selftest import expect, network_guard, raises, sweep_selftest_runs
     from runner_calls import FakeCallTools
     from runner_email import FakeEmailTools
     from runner_quickicp_accounts import FakeAccountsTools
@@ -418,6 +431,10 @@ def selftest() -> bool:
             expect("wrong customer key typed -> STOPPED, no intake", raises(lambda: run_e2e(wrong, customer, "2026-10"))
                    and wrong.log == ["ask:customer key"])
 
+            none_yet = FakeSteps(dict(base))
+            expect("no run at all and no --month -> STOPPED BEFORE intake and plan (no LLM spent)",
+                   raises(lambda: run_e2e(none_yet, customer)) and none_yet.log == ["ask:customer key"])
+
             # The old run (running, with an open human task) that the new plan replaces
             old = load_run(customer, "2026-10", [wo("T1", "CAM", "coordination", "requirements", [], "x")],
                            {"month": "Month 1", "revenue_analysis": {}}, {}, True, {**proof, "work_orders_count": 1})[0]
@@ -474,6 +491,14 @@ def selftest() -> bool:
                    "tasks: done 7" in text and "T3 accounts:" in text and "bought" in text
                    and "T4 contacts:" in text and "with email" in text and "T5 email:" in text
                    and "T6 calls:" in text and "outcomes" in text)
+
+            # The r5 bug: the latest run is DONE (r2) and the old one stopped; nothing is running
+            again = FakeSteps({**base, "Buy data": "no"})
+            run_e2e(again, customer)
+            expect("latest run done / stopped, nothing running -> loads 2026-10-r3 from the latest run's month; "
+                   "closes nothing (no run key asked)",
+                   "load:2026-10-r3" in again.log and "ask:run key" not in again.log
+                   and get_run(new["run_key"])["status"] == "done")
         print(f"\n  Network guard: {len(blocked)} call(s) outside Supabase attempted (blocked): {blocked}")
         ok = not blocked
     except AssertionError as error:

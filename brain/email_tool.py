@@ -6,25 +6,30 @@ Hyper-personalized email campaigns in the RevenueOS email tool.
 The tool's AI rewrites our reference emails for every recipient; we supply the objective,
 reference emails and rich recipient details.
 
-FLOW
-----
-    python email_tool.py preview    build the request and save it; nothing is sent
-    python email_tool.py launch     step 1: campaign stored as DRAFT, sample emails requested
-    python email_tool.py samples    step 2: wait for the sample emails and print them
-    python email_tool.py approve    step 3: you confirm, the campaign starts (RUNNING)
+HOW IT IS USED
+--------------
+    Campaigns are built, launched (stored as DRAFT, samples) and approved ONLY by the orchestrator's email
+    runner (runner_email.py): every launch saved in the ledger first, sending only after the email_approve
+    decision. This file is its library (content rules, recipients, request, API calls). The old CLI
+    commands preview / launch / approve (they skipped the ledger and the approval) are in
+    archive/legacy/email_tool_cli.py.
 
     A human always approves. Each email is personalized about an hour before it is sent,
     only inside the schedule.
 
+MANUAL TOOL (the campaign comes from the LEDGER of one task, never from a data/ file)
+-----------
+    python email_tool.py samples --run 2026-10-r5 T5    READ-ONLY: the sample emails of that task's campaign
+                                                        (campaign_id + workspace_id from its 'launch' step)
+
 WHERE EACH PART COMES FROM
 --------------------------
-    objective, emails, campaign   LLM, from the brain (understanding + email work order), facts only
-    recipients                    Supabase: people who PASSED the judge in the latest pipeline run
-                                  (their LinkedIn URLs in data/quickicp_phones_raw.json), with company joined.
-                                  Only rows of THIS customer (CUSTOMER_KEY); a person linked to another
-                                  customer's company stops the run.
+    objective, emails, campaign   LLM, from the run's understanding + THIS task's work order, facts only
+    recipients                    the contacts task's people (Supabase), with company joined. Only rows of
+                                  THIS customer (CUSTOMER_KEY); a person linked to another customer's
+                                  company stops the run.
     client_reference, user        .env (later: the customer's record in the platform)
-    campaign_id, workspace_id     saved after launch in data/email_campaign_state.json
+    campaign_id, workspace_id     the ledger (the email task's 'launch' step)
 
 TEST MODE
 ---------
@@ -41,6 +46,10 @@ REFERENCE EMAIL RULES (code, known issue 4)
       or body, matched as WHOLE phrases in any case (strict: 'free' also hits 'feel free' and
       'hassle-free', not 'freedom'). A hit is printed with email, field and the text around it:
       one LLM rewrite (shown those pieces), then STOPPED with the same lines.
+    - The LLM's own list is for hype/claims only: ordinary words (ORDINARY_WORDS: free, help, easy, quick,
+      simple) it adds are DROPPED by code (printed), so 'feel free' no longer forces a rewrite. Longer LLM
+      phrases ('risk-free', 'free trial') and our fixed phrases stay strict.
+    - Cold emails: never imply an earlier conversation, meeting, call or reply (COLD_EMAIL_RULE, prompt).
     - The LLM writes no sign-off. Code adds '<p>Regards,<br>Team <CUSTOMER_DISPLAY_NAME></p>' and
       replaces every long customer name with the display name (CUSTOMER_DISPLAY_NAME is required):
       CUSTOMER_LONG_NAMES (.env, comma-separated) + the understanding's customer_name, longest first,
@@ -79,7 +88,7 @@ import httpx
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
-from quickicp import TEST_MODE, ToolError, ask_llm, check_settings, load_json, save_json
+from quickicp import TEST_MODE, ToolError, ask_llm, check_settings
 
 load_dotenv()
 
@@ -91,14 +100,18 @@ PENDING_RETRIES = 3                    # resend when the tool says 'pending'
 SAMPLE_WAIT_SECONDS = 120              # how long 'samples' waits for samples to be ready
 EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
-ENRICHED_FILE = "data/quickicp_phones_raw.json"
-STATE_FILE = "data/email_campaign_state.json"
-SAMPLES_FILE = "data/email_samples.json"
 NEVER_SAY_DEFAULTS = ["guaranteed", "cheapest", "100%", "last chance"]
 # Email 3 used to pull the LLM towards 'last chance': it is a calm follow-up (prompt guidance, not the guard).
-EMAIL3_RULE = ("Email 3 is a polite final follow-up: calm and helpful (e.g. a last useful idea, or an easy way to "
-               "reply later). It must never use urgency or deadline wording ('last chance', 'final chance', "
-               "'act now', 'hurry', 'don't miss out', 'limited time') in its subject, preheader or body.")
+EMAIL3_RULE = ("Email 3 is a polite final follow-up to our earlier emails: calm and helpful (e.g. a last useful "
+               "idea, or an easy way to reply later). It must never use urgency or deadline wording ('last chance', "
+               "'final chance', 'act now', 'hurry', 'don't miss out', 'limited time') in its subject, preheader or body.")
+# Every email is cold: the prospect has never spoken with us (prompt rule for all emails).
+COLD_EMAIL_RULE = ("Every email is a cold email to someone who has never spoken with us. Never imply an earlier "
+                   "conversation, meeting, call or reply (e.g. 'continuing our conversation', 'as discussed', "
+                   "'following up on our call', 'great speaking with you', 'as promised').")
+# Ordinary words the LLM may NOT put in its own never_say list: polite writing needs them ('feel free').
+# Code drops them from the LLM's list; our fixed NEVER_SAY_DEFAULTS are never dropped.
+ORDINARY_WORDS = ["free", "help", "easy", "quick", "simple"]
 
 
 # ================= WHAT THE LLM WRITES =================
@@ -147,26 +160,14 @@ def is_internal(phrase: str) -> bool:
     return any(ch.isdigit() for ch in text) or any(word in text for word in INTERNAL_WORDS)
 
 
-def email_work_order() -> dict:
-    """The Email Agent work order from data/work_orders.json ({} if there is none)."""
-    for work_order in load_json("data/work_orders.json"):
-        if work_order.get("agent") == "Email Agent":
-            return work_order
-    return {}
-
-
-def write_content(ask=ask_llm, understanding: dict | None = None, work_order: dict | None = None) -> CampaignContent:
+def write_content(ask=ask_llm, *, understanding: dict, work_order: dict) -> CampaignContent:
     """
     Objective + reference emails from the brain. Code enforces the tool's rules afterwards:
     our own never_say phrases may not appear (one rewrite, then STOPPED), and the signature is
     added by code from CUSTOMER_DISPLAY_NAME.
-    understanding / work_order: given by a selftest (then no file in data/ is read); None = read the files.
+    understanding / work_order: the run's understanding and THIS task's work order (required; never data/).
     """
     display = display_name()
-    if understanding is None:
-        understanding = load_json("data/understanding.json")
-    if work_order is None:
-        work_order = email_work_order()
     prompt = (
         "You are the Master Agent of MOTM Revenue OS. Prepare a HYPER-PERSONALIZED email campaign.\n"
         "The email tool's AI rewrites your reference emails for every recipient.\n"
@@ -181,8 +182,10 @@ def write_content(ask=ask_llm, understanding: dict | None = None, work_order: di
         "- never_say: hype words the emails must avoid. These are ALWAYS forbidden (they are added "
         f"automatically): {json.dumps(NEVER_SAY_DEFAULTS)}. Do not use any of them in any subject, "
         "preheader or body. You may add a few more.\n"
-        "- Every phrase in YOUR never_say list must not appear in YOUR OWN emails either (whole words, any case): "
-        "only ban a word you do not use, e.g. if you ban 'free', also avoid 'feel free' and 'free demo'.\n"
+        "- Every phrase in YOUR never_say list must not appear in YOUR OWN emails either (whole words, any case).\n"
+        "- Your own never_say list is only for hype or claims (e.g. 'revolutionary', 'risk-free'). Never add "
+        f"ordinary words you may need for polite writing, such as {', '.join(repr(w) for w in ORDINARY_WORDS)}.\n"
+        f"- {COLD_EMAIL_RULE}\n"
         f"- {EMAIL3_RULE}\n"
         "- Each email: max 90 words, <p> paragraphs only, first paragraph 'Hi {{first_name}},'. "
         "Subjects may use {{company}}. No other variables.\n"
@@ -312,12 +315,18 @@ def enforce_rules(content: CampaignContent) -> CampaignContent:
     objective.cta = cta
 
 
-
     # never_say: OUR fixed phrases first, then the LLM's (same phrase once, any case), so the cut to the
     # tool's limit only ever drops the LLM's extras, never ours.
+    # An ordinary word the LLM banned for itself (e.g. 'free' -> then 'feel free' = a rewrite every run) is
+    # dropped; longer LLM phrases ('risk-free', 'free trial') and all our fixed phrases stay.
+    fixed = {phrase.lower() for phrase in NEVER_SAY_DEFAULTS}
+    dropped = [p.strip() for p in objective.never_say
+               if p.strip().lower() in ORDINARY_WORDS and p.strip().lower() not in fixed]
+    if dropped:
+        print(f"  never_say: dropped ordinary word(s) the LLM banned for itself: {dropped}")
     merged = {}
     for phrase in NEVER_SAY_DEFAULTS + objective.never_say:
-        if phrase.strip():
+        if phrase.strip() and phrase.strip().lower() not in {d.lower() for d in dropped}:
             merged.setdefault(phrase.strip().lower(), phrase.strip())
     objective.never_say = list(merged.values())[:MAX_PHRASES]
 
@@ -369,17 +378,6 @@ def split_location(location: str | None) -> tuple[str, str, str]:
     return parts[0], state, country
 
 
-def validated_people_links() -> list[str]:
-    """LinkedIn URLs of people who passed the judge and have an email, from the latest pipeline run."""
-    links = []
-    for person in load_json(ENRICHED_FILE):
-        if person.get("validation", {}).get("status") == "pass" and person.get("email") and person.get("USER SOCIAL"):
-            links.append(person["USER SOCIAL"])
-    if not links:
-        raise ToolError("No validated people with an email. Run: python pipeline.py")
-    return links
-
-
 def fetch_people(links: list[str]) -> list[dict]:
     """Read those people of THIS customer (CUSTOMER_KEY) from Supabase, each with its company joined."""
     check_settings("SUPABASE_URL", "SUPABASE_KEY")
@@ -393,7 +391,7 @@ def fetch_people(links: list[str]) -> list[dict]:
               .execute().data)
     if not rows:
         raise ToolError(f"Validated people of customer '{customer}' are not in Supabase yet. "
-                        "Run: python pipeline.py save")
+                        "They are saved by the QuickICP contacts task.")
     for row in rows:
         row["company"] = row.pop(COMPANY_TABLE, None) or {}
         # Code check: a person must never be linked to another customer's company.
@@ -478,26 +476,19 @@ def smtp_settings() -> dict:
     }
 
 
-def build_launch_body(rows: list[dict] | None = None, write=None) -> dict:
-    """The full launch request. rows: people to email (default: the latest pipeline run's file)."""
-    return build_launch_request(rows, write)[0]
-
-
-def build_launch_request(rows: list[dict] | None = None, write=None, understanding: dict | None = None,
-                         work_order: dict | None = None) -> tuple[dict, list]:
+def build_launch_request(rows: list[dict], *, understanding: dict, work_order: dict,
+                         write=None) -> tuple[dict, list]:
     """
-    (launch request, person row id of each recipient). Used by the CLI and the orchestrator's runner.
-    understanding / work_order: the runner passes the run's understanding and THIS task's work order;
-    None (the CLI) = data/understanding.json and the first Email Agent work order in data/work_orders.json.
+    (launch request, person row id of each recipient), for the orchestrator's email runner.
+    rows: the task's people (Supabase); understanding / work_order: the run's understanding and THIS task's
+    work order. All required: nothing is read from data/.
     """
     check_settings("EMAIL_TOOL_USER_EMAIL")
-    if understanding is None:
-        understanding = load_json("data/understanding.json")
     customer = understanding.get("customer_name", "Customer")
     workspace = (os.getenv("TEST_WORKSPACE_NAME") or customer) if TEST_MODE else customer
     reference, run_tag = campaign_reference(customer)
     content = write() if write else write_content(understanding=understanding, work_order=work_order)
-    pairs = recipients_for(rows if rows is not None else fetch_people(validated_people_links()), run_tag)
+    pairs = recipients_for(rows, run_tag)
 
     body = {
         "reference": reference,
@@ -520,13 +511,6 @@ def build_launch_request(rows: list[dict] | None = None, write=None, understandi
     else:
         body["smtp"] = smtp_settings()                              # brand-new client
     return body, [person_id for person_id, _ in pairs]
-
-
-def masked(body: dict) -> dict:
-    copy = json.loads(json.dumps(body))
-    if "smtp" in copy:
-        copy["smtp"]["password"] = "********"
-    return copy
 
 
 # ================= TOOL CALLS =================
@@ -579,31 +563,6 @@ def send_launch(body: dict, wait_seconds: int = 20) -> tuple[int, dict]:
     return status, reply
 
 
-def run_launch(send: bool) -> None:
-    body = build_launch_body()
-    save_json("data/email_launch_preview.json", masked(body))
-    print(json.dumps(masked(body), indent=2, ensure_ascii=False))
-    print(f"\nRecipients: {len(body['recipients'])} | test mode: {TEST_MODE} | type: HYPER_PERSONALIZED")
-    print("Saved data/email_launch_preview.json")
-    if not send:
-        return
-
-    status, reply = send_launch(body)
-    save_json("data/email_launch_result.json", {"status": status, "reply": reply})
-    print(json.dumps(reply, indent=2, ensure_ascii=False))
-    start = reply.get("start_status")
-
-    save_json(STATE_FILE, {
-        "reference": body["reference"],
-        "workspace_id": reply["workspace_id"],
-        "campaign_id": reply["campaign_id"],
-        "campaign_name": body["campaign"]["name"],
-        "launched_at": datetime.now().isoformat(timespec="seconds"),
-    })
-    print(f"\nLAUNCHED as {reply.get('campaign_status')} ({start}). Saved {STATE_FILE}")
-    print("Next: python email_tool.py samples")
-
-
 # ================= STEP 2: SAMPLES =================
 
 def plain_text(body_html: str) -> str:
@@ -611,36 +570,6 @@ def plain_text(body_html: str) -> str:
     text = re.sub(r"<br\s*/?>", "\n", body_html or "")
     text = re.sub(r"</p>", "\n\n", text)
     return html.unescape(re.sub(r"<[^>]+>", "", text)).strip()
-
-
-def run_samples() -> None:
-    state = load_json(STATE_FILE)
-    print(f"Campaign: {state['campaign_name']} ({state['campaign_id']})")
-
-    deadline = time.time() + SAMPLE_WAIT_SECONDS
-    while True:
-        status, reply = call_tool("GET", campaign_url(state, "samples"))
-        if status >= 400:
-            raise ToolError(f"Samples request rejected ({status}): {json.dumps(reply)[:500]}")
-        samples_status = reply.get("samples_status")
-        if samples_status != "generating" or time.time() > deadline:
-            break
-        print("  Samples still generating, checking again in 5s...")
-        time.sleep(5)
-
-    save_json(SAMPLES_FILE, reply)
-    print(f"\nSamples status: {samples_status} | approval: {reply.get('approval_status')}\n")
-    for sample in reply.get("samples", []):
-        print(f"--- Email {sample.get('email_number')} | state {sample.get('state')} | "
-              f"for {sample.get('recipient_first_name')} at {sample.get('recipient_company')} | "
-              f"fallback: {sample.get('fallback_used')} | issues: {sample.get('failure_codes')}")
-        print(f"Subject: {sample.get('subject')}\n")
-        print(plain_text(sample.get("body_html")) + "\n")
-
-    if samples_status == "ready":
-        print("Read them carefully. If they are good: python email_tool.py approve")
-    else:
-        print("Samples are not ready to approve. Run 'samples' again shortly, or check the campaign in the app.")
 
 
 # ================= STEP 3: APPROVE =================
@@ -653,47 +582,71 @@ APPROVE_MESSAGES = {
 }
 
 
-def run_approve() -> None:
-    state = load_json(STATE_FILE)
-    print(f"Campaign: {state['campaign_name']} ({state['campaign_id']})")
-    answer = input("Approve and start sending? Type 'yes' to confirm: ").strip().lower()
-    if answer != "yes":
-        print("Not approved. Nothing was started.")
-        return
+# ================= MANUAL TOOL: samples, the campaign from the LEDGER (--run <month> <task>) =================
 
-    status, reply = call_tool("POST", campaign_url(state, "approve"))
-    print(json.dumps(reply, indent=2, ensure_ascii=False))
-    if status >= 400:
-        code = reply.get("error", {}).get("code") if isinstance(reply.get("error"), dict) else None
-        raise ToolError(f"Approve rejected ({status}). " + APPROVE_MESSAGES.get(code, json.dumps(reply)[:300]))
+def ledger_email_campaign(month: str, task_id: str) -> dict:
+    """
+    The email campaign of ONE task of THIS customer's run, from the ledger (never a data/ file): the task's
+    finished 'launch' step (key = our reference; reply = campaign_id + workspace_id).
+    Returns {"run_key", "task_id", "reference", "campaign_id", "workspace_id"}.
+    """
+    from orchestrator import check_month, find_run
+    from state_store import current_customer, get_steps, get_tasks
+    run = find_run(current_customer(), check_month(month))
+    task = next((t for t in get_tasks(run["id"]) if t["task_id"] == task_id), None)
+    if not task:
+        raise ToolError(f"STOPPED: no task {task_id} in run {run['run_key']}.")
+    if (task["agent"], task["output_type"]) != ("Email Agent", "emails"):
+        raise ToolError(f"STOPPED: {task_id} is a {task['agent']} / {task['output_type']} task, not an email task.")
+    launched = [s for s in get_steps(task["id"]) if s["step"] == "launch" and s["status"] == "done"
+                and (s["response"] or {}).get("campaign_id")]
+    if not launched:
+        raise ToolError(f"STOPPED: {task_id} in run {run['run_key']} has no launched email campaign in the ledger yet.")
+    row = launched[-1]
+    return {"run_key": run["run_key"], "task_id": task_id, "reference": row["idempotency_key"],
+            "campaign_id": row["response"]["campaign_id"], "workspace_id": row["response"]["workspace_id"]}
 
-    state["approved_at"] = datetime.now().isoformat(timespec="seconds")
-    state["campaign_status"] = reply.get("campaign_status")
-    save_json(STATE_FILE, state)
-    print(f"\n{reply.get('status', '').upper()}: campaign is {reply.get('campaign_status')}. "
-          "Emails are personalized about an hour before each send, inside the schedule.")
+
+def run_samples(campaign: dict, sleep=time.sleep) -> dict:
+    """READ-ONLY: wait up to SAMPLE_WAIT_SECONDS for the sample emails, then print them. Writes nothing."""
+    print(f"Campaign {campaign['reference']} ({campaign['run_key']} {campaign['task_id']})")
+    deadline = time.time() + SAMPLE_WAIT_SECONDS
+    while True:
+        status, reply = call_tool("GET", campaign_url(campaign, "samples"))
+        if status >= 400:
+            raise ToolError(f"Samples request rejected ({status}): {json.dumps(reply)[:500]}")
+        samples_status = reply.get("samples_status")
+        if samples_status != "generating" or time.time() > deadline:
+            break
+        print("  Samples still generating, checking again in 5s...")
+        sleep(5)
+    print(f"\nSamples status: {samples_status} | approval: {reply.get('approval_status')}\n")
+    for sample in reply.get("samples", []):
+        print(f"--- Email {sample.get('email_number')} | state {sample.get('state')} | "
+              f"for {sample.get('recipient_first_name')} at {sample.get('recipient_company')} | "
+              f"fallback: {sample.get('fallback_used')} | issues: {sample.get('failure_codes')}")
+        print(f"Subject: {sample.get('subject')}\n")
+        print(plain_text(sample.get("body_html")) + "\n")
+    print("Approving happens only through the orchestrator: python orchestrator.py decisions, then answer "
+          "the email_approve decision.")
+    return reply
 
 
-# ================= RUN =================
+USAGE = ("Usage: python email_tool.py samples --run <YYYY-MM[-rN]> <task id>\n"
+         "  e.g. python email_tool.py samples --run 2026-10-r5 T5\n"
+         "  Campaigns are launched and approved only through the orchestrator (ledger + email_approve).")
+MODES = {"samples": run_samples}
 
-MODES = {
-    "preview": lambda: run_launch(send=False),
-    "launch": lambda: run_launch(send=True),
-    "samples": run_samples,
-    "approve": run_approve,
-}
 
 if __name__ == "__main__":
-    mode = sys.argv[1] if len(sys.argv) > 1 else "preview"
-    if mode not in MODES:
-        print("Usage: python email_tool.py " + " | ".join(MODES))
-        sys.exit(1)
+    args = sys.argv[1:]
     try:
-        MODES[mode]()
+        if len(args) != 4 or args[0] not in MODES or args[1] != "--run":
+            raise ToolError(USAGE)
+        MODES[args[0]](ledger_email_campaign(args[2], args[3]))
     except ToolError as error:
-        print("\nSTOPPED:", error)
+        print(error)
         sys.exit(1)
     except Exception:
-        print("\nUNEXPECTED ERROR (details below for debugging):")
         traceback.print_exc()
         sys.exit(1)
