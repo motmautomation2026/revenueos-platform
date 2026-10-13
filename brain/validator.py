@@ -55,15 +55,10 @@ MAP FILES (one pair per customer, inside data/maps/)
           under manufacturing): add its website domain under "company_overrides".
         - To rebuild a map from scratch: python validator.py reset-maps
 
-STEP 1: company judge
-    Reads:  data/quickicp_raw.json        companies from company search
-            data/quickicp_payload.json     the filters we searched with (cities, sizes)
-            data/understanding.json        the brain: what the customer sells, P1 segments
-            data/work_orders.json          the QuickICP accounts work order
-            data/maps/<customer>_industry_map.json   (created if missing)
-    Writes: data/companies_judged.json     every company with its verdict
-            data/companies_passed.json     only companies that passed
-            data/maps/<customer>_industry_map.json   (new industries added)
+STEP 1: company judge (judge_companies, called by the accounts runner)
+    Gets:   the companies of one search round, that round's payload (cities, sizes; from the task's
+            ledger) and company_context(the run's understanding, the task's work order). No data/ file.
+    Uses:   data/maps/<customer>_industry_map.json   (created if missing; new industries added)
 
     HOW A COMPANY IS JUDGED
         1. Code: location must contain a target city; headcount >= smallest size searched.
@@ -74,14 +69,10 @@ STEP 1: company judge
            then saved.
         4. Code decides: score >= PASS_SCORE -> "pass", otherwise "fail".
 
-STEP 2: people judge
-    Reads:  data/quickicp_people_raw.json  people from people search (before email/phone)
-            data/companies_passed.json     companies that passed step 1
-            data/work_orders.json          the QuickICP contacts work order (target roles)
-            data/maps/<customer>_title_map.json      (created if missing)
-    Writes: data/people_judged.json        every person with their verdict
-            data/people_passed.json        only people who passed
-            data/maps/<customer>_title_map.json      (new titles added)
+STEP 2: people judge (judge_people, called by the contacts runner)
+    Gets:   the people of one search round, the run's passed company domains / LinkedIn pages and
+            people_context(the run's understanding, the task's work order). No data/ file.
+    Uses:   data/maps/<customer>_title_map.json      (created if missing; new titles added)
 
     HOW A PERSON IS JUDGED
         1. Code: the person's company must have passed step 1 -> otherwise "fail".
@@ -112,12 +103,11 @@ RELIABILITY
     - A map entry with an invalid score or buying_role -> "review", never "pass".
 
 RUN
-    python validator.py companies     judge companies (uses / fills the industry map)
-    python validator.py people        judge people (uses / fills the title map)
-    python validator.py all           companies, then people
     python validator.py maps          print both maps for this customer
     python validator.py reset-maps    delete both maps for this customer (asks 'yes')
     python validator.py selftest      pure-code checks of the title rules (no LLM, no files)
+    The judges run only inside the orchestrator's runners. The old file-based commands
+    companies / people / all are in archive/legacy/validator_cli.py.
 
 TUNING
     PASS_SCORE, PEOPLE_PASS_SCORE   higher = stricter
@@ -132,7 +122,7 @@ DEBUGGING
     - A verdict looks wrong every run: that is the map. Edit the entry (see above).
     - Many "review" results: a judge batch failed (network / OpenAI). Run again;
       only the missing industries/titles are re-sent.
-    - Customer renamed (understanding.json or the platform): the maps do NOT change; they follow
+    - Customer renamed (the run's understanding or the platform): the maps do NOT change; they follow
       CUSTOMER_KEY. A NEW CUSTOMER_KEY starts new, empty maps (the old files stay in data/maps/).
 """
 
@@ -140,15 +130,13 @@ import json
 import os
 import re
 import sys
-import traceback
 from datetime import datetime, timezone
 from typing import Literal
 
 from dotenv import load_dotenv
-from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 
-from quickicp import ToolError, check_settings, clean_domain, load_json, load_quickicp_work_order, save_json
+from quickicp import ToolError, clean_domain
 
 load_dotenv()
 
@@ -296,8 +284,8 @@ def judge_in_batches(schema, prompts: list[str]) -> list:
     Send all prompts in parallel. Returns one item per prompt:
     the parsed answer, or the Exception if that batch failed (so other batches still count).
     """
-    llm = ChatOpenAI(model=os.getenv("OPENAI_MODEL"), temperature=0, max_retries=3, timeout=120)
-    return llm.with_structured_output(schema).batch(
+    from quickicp import llm      # the one LLM factory: OPENAI_MODEL, temperature 0, timeout + 2 retries
+    return llm(name=f"Judge ({schema.__name__})").with_structured_output(schema).batch(
         prompts, config={"max_concurrency": 5}, return_exceptions=True
     )
 
@@ -326,9 +314,6 @@ def entry_score(entry: dict) -> int | None:
 
 # ================= MAPS: LOAD / SAVE / KEYS =================
 
-def customer_name() -> str:
-    return load_json("data/understanding.json").get("customer_name") or "customer"
-
 
 def customer_slug() -> str:
     """
@@ -348,7 +333,7 @@ def load_map(kind: str) -> dict:
     """Load this customer's map, or start an empty one. Stops clearly on a broken hand-edit."""
     path = map_path(kind)
     if not os.path.exists(path):
-        return {"customer": customer_name(), "kind": kind, "items": {}, "company_overrides": {}}
+        return {"customer": None, "kind": kind, "items": {}, "company_overrides": {}}   # name set by fill_map
     try:
         with open(path, encoding="utf-8") as file:
             data = json.load(file)
@@ -509,7 +494,7 @@ def fill_map(kind: str, data: dict, labels: dict[str, str], context: dict) -> No
         data["items"] = {key: entry for key, entry in data["items"].items()
                          if not needs_judging(kind, entry)}
     data["items"].update(new_entries)
-    data["customer"] = customer_name()
+    data["customer"] = context.get("customer")                      # the run's customer name (metadata only)
     data["kind"] = kind
     save_map(kind, data)
     print(f"  Added {len(new_entries)} to {map_path(kind)}")
@@ -531,9 +516,11 @@ def city_word(location: str) -> str:
     return " ".join(LOCATION_NOISE.sub(" ", name).split()).lower()
 
 
-def target_city_words() -> list[str]:
-    """Searched locations as words to find in addresses: 'Delhi, India' -> 'delhi' (+ aliases)."""
-    payload = load_json("data/quickicp_payload.json")
+def target_city_words(payload: dict) -> list[str]:
+    """
+    Searched locations as words to find in addresses: 'Delhi, India' -> 'delhi' (+ aliases).
+    payload: the searched payload of the round being judged (from the task's ledger). Required.
+    """
     words = []
     for location in payload.get("locations", []):
         city = city_word(location)
@@ -541,13 +528,12 @@ def target_city_words() -> list[str]:
             words.append(city)
             words.extend(CITY_ALIASES.get(city, []))
     if not words:
-        raise ToolError("No target locations in data/quickicp_payload.json. Run 'python quickicp.py companies'.")
+        raise ToolError("No target locations in the search payload (the task's ledger 'payload' step).")
     return words
 
 
-def min_headcount() -> int:
-    """Smallest size searched for: ['201-500', '501-1000'] -> 201."""
-    payload = load_json("data/quickicp_payload.json")
+def min_headcount(payload: dict) -> int:
+    """Smallest size searched for: ['201-500', '501-1000'] -> 201. payload: as in target_city_words."""
     lows = [int(re.findall(r"\d+", size)[0]) for size in payload.get("company_size", []) if re.findall(r"\d+", size)]
     return min(lows) if lows else 0
 
@@ -571,10 +557,11 @@ def hard_check(company: dict, city_words: list[str], minimum: int) -> str | None
     return None
 
 
-def company_context() -> dict:
-    """What the industry judge needs to know about the customer and its product."""
-    understanding = load_json("data/understanding.json")
-    work_order = load_quickicp_work_order("accounts")
+def company_context(understanding: dict, work_order: dict) -> dict:
+    """
+    What the industry judge needs to know about the customer and its product.
+    The orchestrator passes the run's understanding and the task's own work order (required).
+    """
     return {
         "customer": understanding.get("customer_name"),
         "what_they_sell": understanding.get("business_summary"),
@@ -596,10 +583,13 @@ def company_verdict(entry: dict, label: str | None = None) -> dict:
             "reason": reason, "checked_by": source}
 
 
-def judge_companies(companies: list[dict]) -> list[dict]:
-    """Judge every company; each gets a 'validation' block: status, score, reason, checked_by."""
-    city_words = target_city_words()
-    minimum = min_headcount()
+def judge_companies(companies: list[dict], payload: dict, context: dict) -> list[dict]:
+    """
+    Judge every company; each gets a 'validation' block: status, score, reason, checked_by.
+    payload / context: the task's ledger payload and company_context of the run (required).
+    """
+    city_words = target_city_words(payload)
+    minimum = min_headcount(payload)
     print(f"Target city words: {city_words} | Minimum headcount: {minimum}")
 
     data = load_map("industry")
@@ -623,7 +613,7 @@ def judge_companies(companies: list[dict]) -> list[dict]:
         labels.setdefault(key, company.get("INDUSTRY").strip())
 
     if labels:
-        fill_map("industry", data, labels, company_context())
+        fill_map("industry", data, labels, context)
     print()
 
     for index, key in company_keys.items():
@@ -636,25 +626,6 @@ def judge_companies(companies: list[dict]) -> list[dict]:
     return [{**company, "validation": validations[index]} for index, company in enumerate(companies)]
 
 
-def run_companies() -> None:
-    check_settings("OPENAI_MODEL")
-    companies = load_json("data/quickicp_raw.json")
-    if not companies:
-        raise ToolError("data/quickicp_raw.json is empty. Run 'python quickicp.py companies' first.")
-    print(f"Judging {len(companies)} companies (pass score: {PASS_SCORE})")
-
-    judged = judge_companies(companies)
-    save_json("data/companies_judged.json", judged)
-    save_json("data/companies_passed.json", [c for c in judged if c["validation"]["status"] == "pass"])
-
-    for company in judged:
-        v = company["validation"]
-        print(f"{v['status'].upper():6} {str(v['score']):>4} [{v['checked_by']:4}] "
-              f"{company.get('COMPANY')}  -  {v['reason']}")
-    print_counts(judged)
-    print("Saved data/companies_judged.json and data/companies_passed.json")
-
-
 # ================= STEP 2: PEOPLE JUDGE =================
 
 def linkedin_key(url: str | None) -> str:
@@ -664,20 +635,11 @@ def linkedin_key(url: str | None) -> str:
     return re.sub(r"^https?://(www\.)?", "", url.strip().lower()).rstrip("/")
 
 
-def passed_company_keys() -> set[str]:
-    """Website domains and company LinkedIn pages of every company that passed step 1."""
-    keys = set()
-    for company in load_json("data/companies_passed.json"):
-        keys.add(clean_domain(company.get("WEBSITE")))
-        keys.add(linkedin_key(company.get("LINKEDIN")))
-    keys.discard("")
-    return keys
-
-
-def people_context() -> dict:
-    """What the title judge needs: the customer's product and the target roles."""
-    understanding = load_json("data/understanding.json")
-    work_order = load_quickicp_work_order("contacts")
+def people_context(understanding: dict, work_order: dict) -> dict:
+    """
+    What the title judge needs: the customer's product and the target roles.
+    understanding / work_order: as in company_context (the run's; required).
+    """
     return {
         "customer": understanding.get("customer_name"),
         "what_they_sell": understanding.get("business_summary"),
@@ -717,13 +679,12 @@ def person_verdict(key: str, entry: dict) -> dict:
             "reason": reason, "checked_by": source}
 
 
-def judge_people(people: list[dict], company_keys: set[str] | None = None) -> list[dict]:
+def judge_people(people: list[dict], company_keys: set[str], context: dict) -> list[dict]:
     """
     Judge every person; each gets a 'validation' block: status, score, buying_role, reason, checked_by.
-    company_keys: domains / company LinkedIn pages allowed (the orchestrator passes T3's companies
-    for this run); default: data/companies_passed.json.
+    company_keys: domains / company LinkedIn pages allowed (the run's T3 companies; required).
+    context: people_context of the run (required).
     """
-    company_keys = passed_company_keys() if company_keys is None else company_keys
     data = load_map("title")
     validations, person_keys, labels = {}, {}, {}
 
@@ -743,7 +704,7 @@ def judge_people(people: list[dict], company_keys: set[str] | None = None) -> li
         labels.setdefault(key, title)
 
     if labels:
-        fill_map("title", data, labels, people_context())
+        fill_map("title", data, labels, context)
     print()
 
     for index, key in person_keys.items():
@@ -755,26 +716,6 @@ def judge_people(people: list[dict], company_keys: set[str] | None = None) -> li
             validations[index] = person_verdict(key, entry)
 
     return [{**person, "validation": validations[index]} for index, person in enumerate(people)]
-
-
-def run_people() -> None:
-    check_settings("OPENAI_MODEL")
-    people = load_json("data/quickicp_people_raw.json")
-    if not people:
-        raise ToolError("data/quickicp_people_raw.json is empty. Run 'python quickicp.py people' first.")
-    print(f"Judging {len(people)} people (pass score: {PEOPLE_PASS_SCORE})")
-
-    judged = judge_people(people)
-    save_json("data/people_judged.json", judged)
-    save_json("data/people_passed.json", [p for p in judged if p["validation"]["status"] == "pass"])
-
-    for person in judged:
-        v = person["validation"]
-        print(f"{v['status'].upper():6} {str(v['score']):>4} [{v['checked_by']:4}] "
-              f"{person.get('FULL NAME')} | {person.get('JOB POSITION')} | {person.get('COMPANY NAME')}  "
-              f"-  {v.get('buying_role')}: {v['reason']}")
-    print_counts(judged)
-    print("Saved data/people_judged.json and data/people_passed.json")
 
 
 # ================= MAP COMMANDS =================
@@ -819,12 +760,6 @@ def reset_maps() -> None:
 
 
 # ================= RUN =================
-
-def run_all() -> None:
-    print("===== COMPANY JUDGE =====")
-    run_companies()
-    print("\n===== PEOPLE JUDGE =====")
-    run_people()
 
 
 def selftest() -> None:
@@ -894,14 +829,17 @@ def selftest() -> None:
         ok = names == ("anvixa_ai_product_industry_map.json", "anvixa_ai_product_title_map.json")
         failures += not ok
         print(f"  {'PASS' if ok else 'FAIL'}  CUSTOMER_KEY anvixa-ai-product -> {names[0]}, {names[1]} (same as before)")
-        original_name = globals()["customer_name"]
-        globals()["customer_name"] = lambda: "Anvika Ai"           # the platform's name for the same customer
-        try:
-            ok = os.path.basename(map_path("industry")) == "anvixa_ai_product_industry_map.json"
-        finally:
-            globals()["customer_name"] = original_name
+        # No customer NAME is read anywhere for the maps (the platform's 'Anvika Ai' cannot change them):
+        # only CUSTOMER_KEY decides, so another key gives other files and the same key the same files.
+        os.environ["CUSTOMER_KEY"] = "selftest-other-key"
+        other = os.path.basename(map_path("industry"))
+        os.environ["CUSTOMER_KEY"] = "anvixa-ai-product"
+        ok = (other == "selftest_other_key_industry_map.json"
+              and os.path.basename(map_path("industry")) == "anvixa_ai_product_industry_map.json"
+              and "customer_name" not in globals())
         failures += not ok
-        print(f"  {'PASS' if ok else 'FAIL'}  a different customer NAME ('Anvika Ai') keeps the same map files")
+        print(f"  {'PASS' if ok else 'FAIL'}  map files follow CUSTOMER_KEY only (no customer name is read; "
+              "'Anvika Ai' cannot change them)")
     finally:
         if saved_key is None:
             os.environ.pop("CUSTOMER_KEY", None)
@@ -912,20 +850,21 @@ def selftest() -> None:
         sys.exit(1)
 
 
-MODES = {"companies": run_companies, "people": run_people, "all": run_all,
-         "maps": show_maps, "reset-maps": reset_maps, "selftest": selftest}
+MODES = {"maps": show_maps, "reset-maps": reset_maps, "selftest": selftest}
 
 if __name__ == "__main__":
-    mode = sys.argv[1] if len(sys.argv) > 1 else "companies"
-    if mode not in MODES:
-        print("Usage: python validator.py " + " | ".join(MODES))
-        sys.exit(1)
-    try:
-        MODES[mode]()
-    except ToolError as error:
-        print("\nSTOPPED:", error)
-        sys.exit(1)
-    except Exception:
-        print("\nUNEXPECTED ERROR (details below for debugging):")
-        traceback.print_exc()
-        sys.exit(1)
+    from quickicp import run_cli
+
+    def cli() -> None:
+        """The command line; run_cli turns a network drop into one STOPPED line (--debug: traceback)."""
+        mode = sys.argv[1] if len(sys.argv) > 1 else ""
+        if mode not in MODES:
+            print("Usage: python validator.py " + " | ".join(MODES))
+            sys.exit(1)
+        try:
+            MODES[mode]()
+        except ToolError as error:
+            print("\nSTOPPED:", error)
+            sys.exit(1)
+
+    run_cli(cli)

@@ -46,9 +46,12 @@ DEBUGGING
 from dataclasses import dataclass, field
 from typing import Callable
 
-from quickicp import ToolError
+from quickicp import COUNTED_TOOL_TASKS, ToolError, percent_base, percent_of
 from state_store import finish_step, get_decisions, get_steps, renew_run_lock, start_step
 
+
+# Ledger keys of paid calls sent but not yet saved, in this process (read by quickicp.network_stop_line).
+PAID_IN_FLIGHT: list[str] = []
 
 @dataclass
 class RunnerResult:
@@ -140,12 +143,15 @@ class RunnerContext:
         row, is_new = start_step(self.task["id"], step, self.key(step, seq), tool, True, request)
         if not is_new:
             raise ToolError(f"STOPPED: paid call key {self.key(step, seq)} already used; refusing to call again.")
+        PAID_IN_FLIGHT.append(row["idempotency_key"])  # for the network-drop line only; cleared once saved
         try:
             response = fn()
         except ToolError as error:
             finish_step(row["id"], "failed", error=str(error))
+            PAID_IN_FLIGHT.remove(row["idempotency_key"])
             raise
         finish_step(row["id"], "done", response={"items": response} if isinstance(response, list) else response)
+        PAID_IN_FLIGHT.remove(row["idempotency_key"])
         return response
 
     def resendable_call(self, step: str, key: str, fn: Callable[[], object], request: dict, tool: str):
@@ -200,10 +206,24 @@ def contacts_people_ids(ctx: RunnerContext) -> list[int]:
     return done[-1]["result"]["people_ids"]
 
 
+def run_understanding(run: dict) -> dict:
+    """
+    The brain's understanding saved IN the run (brain_customer_runs.understanding, from 'load').
+    Runners and judges use this, never data/understanding.json (that file belongs to the latest plan,
+    which may not be this run's). Missing -> STOPPED, never a silent fallback to the file.
+    """
+    understanding = run.get("understanding")
+    if not understanding:
+        raise ToolError(f"STOPPED: run {run['run_key']} has no understanding saved. Load the plan again "
+                        "(python orchestrator.py load <YYYY-MM>) so the run carries its own understanding.")
+    return understanding
+
+
 def target_for(task: dict, test_cap: int) -> int:
     """
     How many results a tool task needs (code):
         TEST_TARGET_OVERRIDE in .env (test mode only) -> that number
+        a % target ('100% of T4 contacts')            -> percent_target: share x T4's achieved number
         TEST_MODE                                     -> min(target_number, test_cap)
         real                                          -> target_number
     Then the platform's Staging limit, if the person set one for this customer (run_for.py):
@@ -219,9 +239,12 @@ def target_for(task: dict, test_cap: int) -> int:
         if not override.isdigit() or int(override) < 1:
             raise ToolError(f"STOPPED: TEST_TARGET_OVERRIDE must be a whole number > 0, got '{override}'.")
         return int(override)
-    if task["target_number"] is None:
+    number = task["target_number"]
+    if number is None and percent_of(task["work_order"].get("target")) is not None:
+        number = percent_target(task)[0]                  # '100% of T4 contacts': a share, resolved now
+    if number is None:
         raise ToolError(f"STOPPED: {task['task_id']} target has no number: '{task['work_order'].get('target')}'.")
-    target = min(task["target_number"], test_cap) if TEST_MODE else task["target_number"]
+    target = min(number, test_cap) if TEST_MODE else number
     limit = staging_limit(task)
     return min(target, limit) if limit else target
 
@@ -234,3 +257,24 @@ def staging_limit(task: dict) -> int | None:
     import os
     value = (os.getenv(STAGING_LIMITS.get(task.get("output_type") or "", "")) or "").strip()
     return int(value) if value.isdigit() and int(value) > 0 else None
+
+
+def percent_target(task: dict) -> tuple[int, str]:
+    """
+    A % target as a count (code): ceil(share x the achieved number of the counted task it is a share of),
+    e.g. '100% of T4 contacts' with T4 done at 6 -> (6, 'T4'). That task: named in the text, else the only
+    counted task this one depends on (quickicp.percent_base). Unknown base or base not done -> STOPPED.
+    """
+    import math
+    from state_store import get_tasks
+    text = task["work_order"].get("target")
+    share = percent_of(text)
+    tasks = {t["task_id"]: t for t in get_tasks(task["run_id"])}
+    counted = {tid for tid, t in tasks.items() if (t["agent"], t["output_type"]) in COUNTED_TOOL_TASKS}
+    base = percent_base(text, task["depends_on"], counted)
+    if base is None:
+        raise ToolError(f"STOPPED: {task['task_id']} target '{text}' is a share, but it is not clear of which task: "
+                        "name it (e.g. '100% of T4 contacts') or depend on exactly one counted task.")
+    if tasks[base]["status"] != "done" or tasks[base]["achieved_number"] is None:
+        raise ToolError(f"STOPPED: {task['task_id']} target '{text}' is a share of {base}, which is not done yet.")
+    return math.ceil(share * tasks[base]["achieved_number"] / 100), base

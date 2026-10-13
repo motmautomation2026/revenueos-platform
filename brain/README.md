@@ -101,6 +101,16 @@ Create `.env` (never commit it). Ask us for the values; the key names are:
   `QUICKHOWL_USER_PASSWORD`, `QUICKHOWL_USER_FULL_NAME`, `QUICKHOWL_USER_COMPANY`, `QUICKHOWL_DND_HANDLED`
 - **Test mode:** `TEST_RECIPIENTS`, `TEST_WORKSPACE_NAME`, `TEST_CALL_NUMBERS`, `TEST_TARGET_OVERRIDE` (optional)
 
+## Files
+
+| Group | Files |
+|---|---|
+| Run path | `intake_adapter.py`, `master_agent.py`, `plan_approval.py`, `orchestrator.py`, `runner_kit.py`, `runner_quickicp_accounts.py`, `runner_quickicp_contacts.py`, `runner_email.py`, `runner_calls.py`, `brain_review.py`, `state_store.py`, `supabase_store.py` |
+| Shared tool code | `quickicp.py` (also the one LLM factory), `company_loop.py`, `people_loop.py`, `validator.py`, `email_tool.py`, `quickhowl.py` |
+| Tests and checks | `orchestrator_selftest.py` (`python orchestrator.py selftest`), `e2e_test.py`, `check_system.py` |
+| Manual tools | `quickhowl.py status / results / watch / pause --run <month> <task>`, `email_tool.py samples --run <month> <task>` (campaign from the ledger), `validator.py maps / reset-maps`, `extract_html.py` (intake fallback) |
+| Old flow, kept for reference only | `archive/legacy/` (`pipeline.py`, `goal_check.py`, `email_campaign_payload.py`, the old loop CLIs, and the old launch / start / approve / buy / save CLI modes). Never imported by the run path. |
+
 ## Run
 
 ```powershell

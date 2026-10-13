@@ -21,10 +21,16 @@ READS
 -----
     data/extracted.txt            the customer's strategy document (text; default, from extract_html.py)
     data/intake_document.txt      with --intake: the platform plan as a document (from intake_adapter.py)
+    data/intake_numbers.json      with --intake: revenue numbers taken by CODE from the platform plan (AOV,
+                                  close rates, capacity, sales cycle, valid enquiries). They WIN over the
+                                  LLM's numbers (settle_revenue_numbers); any other LLM number needs a quote
+                                  found word for word in the document, else it is removed and listed as missing.
     knowledge/motm_context.md     MOTM context
     .env                          OPENAI_API_KEY, OPENAI_MODEL, PLAN_APPROVER
 
-WRITES (old versions are MOVED, never deleted, to data/archive/<YYYYMMDD-HHMMSS>/ at the start)
+WRITES (old versions are MOVED, never deleted, to data/archive/<YYYYMMDD-HHMMSS>/ only AFTER approval
+        and the work orders, just before the new files are saved; a stop or LLM timeout before that
+        leaves the old plan files in place)
 ------
     data/understanding.json, data/revenue_analysis.json, data/month_plan.json
     data/work_orders.json         approved work orders (one per plan task)
@@ -34,18 +40,26 @@ WRITES (old versions are MOVED, never deleted, to data/archive/<YYYYMMDD-HHMMSS>
 
 RUN
 ---
-    python master_agent.py        uses LLM calls; the current plan files are moved to data/archive/
+    python master_agent.py        uses LLM calls; after approval the current plan files are moved to data/archive/
     Importing this file runs nothing (the run is inside main()).
+    LLM: quickicp.ask_llm / ask_llm_batch (OPENAI_MODEL, temperature 0, 2 retries): 120 s per attempt,
+    300 s for the month plan and the work orders.
 
 DEBUGGING
 ---------
     "STOPPED: PLAN_APPROVER is missing"   -> add PLAN_APPROVER=<your name> to .env
     "N plan rule(s) are still broken"     -> give changes, or type 'override' on purpose
+    "STOPPED: Month plan: the LLM did not answer within 300 s (2 retries)" -> nothing was saved or moved;
+        run again (check the internet connection / OpenAI status)
     Validation errors are printed per attempt ("Validation attempt N: ...").
+    "T4 (QuickICP / contacts) target '...' has no number" -> a QuickICP accounts/contacts, Email Agent emails
+        or Quickhowl calls task needs a count in its target (the runners stop without one); the brain
+        gets the error and fixes the plan before approval (up to 3 attempts)
     Next step after approval: python orchestrator.py load <YYYY-MM>
 """
 
 import logging
+import json
 import os
 import re
 import sys
@@ -53,7 +67,6 @@ import warnings
 from typing import TypedDict, Literal
 
 from dotenv import load_dotenv
-from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import interrupt, Command
 from langgraph.checkpoint.memory import MemorySaver
@@ -61,7 +74,8 @@ from pydantic import BaseModel, Field
 
 from plan_approval import (APPROVAL_FILE, archive_plan_files, ask_approval, describe, plan_approver,
                            write_proof)
-from quickicp import ToolError
+from quickicp import (COUNTED_TOOL_TASKS, LLM_TIMEOUT_LONG, ToolError, ask_llm, ask_llm_batch, count_in,
+                      percent_base, percent_of, usage_summary)
 import platform_approval
 
 load_dotenv()
@@ -70,10 +84,6 @@ warnings.filterwarnings("ignore", message=".*Deserializing unregistered type.*")
 logging.getLogger("langgraph").setLevel(logging.ERROR)
 
 MOTM_CONTEXT_PATH = "knowledge/motm_context.md"
-
-
-def make_llm() -> ChatOpenAI:
-    return ChatOpenAI(model=os.getenv("OPENAI_MODEL"), temperature=0)
 
 
 # ================= 1. UNDERSTANDING: what the document says =================
@@ -156,6 +166,11 @@ class Understanding(BaseModel):
 
 # ================= 2. REVENUE ANALYSIS =================
 
+class NumberSource(BaseModel):
+    field: str = Field(description="The field name, e.g. 'qualified_opportunities_low' or 'aov_low_inr'")
+    quote: str = Field(description="The exact sentence from the source document the number comes from")
+
+
 class RevenueInputs(BaseModel):
     revenue_goal: str = Field(description="The customer's revenue or growth goal as written; 'not stated' if absent")
     aov_as_written: str = Field(description="Average order value exactly as written, e.g. '₹30 lakh to ₹2 crore'; "
@@ -171,8 +186,10 @@ class RevenueInputs(BaseModel):
     inbound_close_rate_pct: float | None = Field(description="Inbound rate if the document gives one; otherwise null")
     capacity_per_month: str = Field(description="Customer delivery capacity exactly as written; 'not stated' if absent")
     sales_cycle_weeks: float | None = Field(description="Only if the document gives a number; otherwise null")
-    qualified_opportunities_low: int | None = Field(description="Lower bound of the roadmap's qualified-opportunity target")
-    qualified_opportunities_high: int | None = Field(description="Upper bound of the roadmap's qualified-opportunity target")
+    qualified_opportunities_low: int | None = Field(
+        description="Lower bound of the roadmap target the close rate applies to (for an enquiry-to-order rate: "
+                    "valid enquiries; never prospects, pipeline opportunities or RFQs)")
+    qualified_opportunities_high: int | None = Field(description="Upper bound of that same target")
     opportunities_period: str = Field(description="Period of that target, e.g. 'Month 1–3'")
     customer_resources_to_use: list[str] = Field(description="Which customer resources MOTM should use, and how")
     revenue_levers: list[str] = Field(
@@ -180,6 +197,8 @@ class RevenueInputs(BaseModel):
     )
     revenue_risks: list[str]
     missing_for_revenue_forecast: list[str]
+    number_sources: list[NumberSource] = Field(
+        description="For EVERY number you fill: the field name and the exact sentence from the source document")
 
 
 class RevenueAnalysis(RevenueInputs):
@@ -188,6 +207,80 @@ class RevenueAnalysis(RevenueInputs):
     expected_revenue_low_inr: float | None
     expected_revenue_high_inr: float | None
     forecast_note: str
+    numbers_source: dict[str, str] = {}          # per number group: 'platform plan: ...' or 'LLM, quoted: ...'
+
+
+# ================= REVENUE NUMBERS: code decides =================
+
+# Number groups: the platform plan's values win; an LLM value must carry a quote found in the document.
+QUOTE_GROUPS = {
+    "aov": ("aov_low_inr", "aov_high_inr"),
+    "outbound_close_rate": ("outbound_close_rate_low_pct", "outbound_close_rate_high_pct"),
+    "inbound_close_rate": ("inbound_close_rate_pct",),
+    "sales_cycle_weeks": ("sales_cycle_weeks",),
+    "qualified_opportunities": ("qualified_opportunities_low", "qualified_opportunities_high"),
+}
+PLAN_TEXT_FIELDS = ("aov_as_written", "capacity_per_month", "opportunities_period")
+
+
+def plan_numbers(document_path: str) -> dict | None:
+    """data/intake_numbers.json next to the intake document (master_agent --intake); None for the fallback."""
+    if not document_path.endswith("intake_document.txt"):
+        return None
+    path = os.path.join(os.path.dirname(document_path), "intake_numbers.json")
+    if not os.path.exists(path):
+        return None
+    with open(path, encoding="utf-8") as file:
+        return json.load(file)
+
+
+def squash(text: str | None) -> str:
+    """Lowercase, single spaces: a quote matches the document regardless of line breaks or case."""
+    return " ".join((text or "").lower().split())
+
+
+def settle_revenue_numbers(inputs: RevenueInputs, plan: dict | None,
+                           document_text: str) -> tuple[RevenueInputs, dict[str, str]]:
+    """
+    Code decides the revenue numbers (same input -> same numbers):
+        1. a number group in the platform plan (intake_numbers.json) -> that value, whatever the LLM said
+        2. else an LLM value is kept ONLY with a number_sources quote found word for word in the document;
+           otherwise it is removed and listed in missing_for_revenue_forecast
+    Returns (settled inputs, {group: where the number came from}).
+    """
+    plan = plan or {}
+    plan_sources = plan.get("sources", {})
+    values = inputs.model_dump()
+    quotes: dict[str, list[str]] = {}
+    for item in inputs.number_sources:
+        quotes.setdefault(item.field.strip(), []).append(item.quote)
+    document = squash(document_text)
+    missing, settled = list(values["missing_for_revenue_forecast"]), {}
+    for group, fields in QUOTE_GROUPS.items():
+        if group in plan_sources:
+            for field in fields:
+                if field in plan:
+                    values[field] = plan[field]
+            settled[group] = f"platform plan: {plan_sources[group]}"
+            continue
+        if all(values[field] is None for field in fields):
+            continue
+        given = [quote for name in (group, *fields) for quote in quotes.get(name, [])]
+        found = next((quote for quote in given if squash(quote) and squash(quote) in document), None)
+        if found:
+            settled[group] = f"LLM, quoted: '{found.strip()}'"
+        else:
+            for field in fields:
+                values[field] = None
+            missing.append(f"{group}: the LLM gave a number without a source quote found in the document "
+                           "(removed by code)")
+    for field in PLAN_TEXT_FIELDS:
+        if field in plan:
+            values[field] = plan[field]
+    if "capacity_per_month" in plan_sources:
+        settled["capacity_per_month"] = f"platform plan: {plan_sources['capacity_per_month']}"
+    values["missing_for_revenue_forecast"] = missing
+    return RevenueInputs(**values), settled
 
 
 # ================= 3. AGENT CATALOGUE: who exists and what each returns =================
@@ -449,14 +542,13 @@ def read_document(state: MasterState) -> dict:
 
 
 def understand_document(state: MasterState) -> dict:
-    structured_llm = make_llm().with_structured_output(Understanding)
     prompt = (
         "You are the Master Agent of MOTM Revenue OS. "
         "Read this approved go-to-market strategy and extract the facts exactly as written. "
         "Do not invent numbers. If something is missing, list it in data_gaps.\n\n"
         + state["document_text"]
     )
-    return {"understanding": structured_llm.invoke(prompt)}
+    return {"understanding": ask_llm(Understanding, prompt, "Understanding")}
 
 
 def analyze_revenue(state: MasterState) -> dict:
@@ -470,7 +562,10 @@ def analyze_revenue(state: MasterState) -> dict:
         "aov_as_written.\n"
         "- If the document gives separate inbound and outbound conversion rates, put them in the matching fields. "
         "MOTM's work is outbound.\n"
-        "- For qualified opportunities, use the roadmap target and state its period.\n"
+        "- For qualified opportunities, use the roadmap target that the close rate applies to (for an "
+        "enquiry-to-order rate: valid enquiries; never prospects, pipeline opportunities or RFQs) and state its period.\n"
+        "- For EVERY number you fill, add an entry to number_sources: the field name and the exact sentence from the "
+        "source document it comes from. A number without a matching quote is removed.\n"
         "- List which customer resources MOTM should use, and how.\n"
         "- List the revenue levers that will most increase this customer's revenue, considering MOTM's "
         "limitations (lead quality, sales capacity, customer delivery capacity, client response time, "
@@ -487,7 +582,9 @@ def analyze_revenue(state: MasterState) -> dict:
         parts.append("Your previous analysis:\n" + previous.model_dump_json(indent=2))
         parts.append("The user asked for these corrections to the analysis. Apply them:\n" + analysis_fb)
 
-    inputs = make_llm().with_structured_output(RevenueInputs).invoke("\n\n".join(parts))
+    inputs = ask_llm(RevenueInputs, "\n\n".join(parts), "Revenue analysis")
+    # Code decides the numbers: the platform plan's numbers win; an LLM number needs a quote from the document.
+    inputs, numbers_source = settle_revenue_numbers(inputs, plan_numbers(state["document_path"]), state["document_text"])
 
     orders_low = orders_high = revenue_low = revenue_high = None
     opp_low, opp_high = inputs.qualified_opportunities_low, inputs.qualified_opportunities_high
@@ -513,6 +610,9 @@ def analyze_revenue(state: MasterState) -> dict:
     else:
         note = (f"Forecast over {inputs.opportunities_period}: qualified opportunities x outbound close rate x AOV "
                 f"(AOV as written: {inputs.aov_as_written}). A wide AOV range makes the revenue range wide.")
+    platform = sorted(group for group, source in numbers_source.items() if source.startswith("platform plan"))
+    if platform:
+        note += f" Numbers taken by code from the platform plan: {', '.join(platform)}."
 
     analysis = RevenueAnalysis(
         **inputs.model_dump(),
@@ -521,6 +621,7 @@ def analyze_revenue(state: MasterState) -> dict:
         expected_revenue_low_inr=revenue_low,
         expected_revenue_high_inr=revenue_high,
         forecast_note=note,
+        numbers_source=numbers_source,
     )
     return {"revenue_analysis": analysis}
 
@@ -588,8 +689,7 @@ def plan_month(state: MasterState) -> dict:
     if errors:
         parts.append("Your last plan failed these checks. Fix all of them:\n" + "\n".join(errors))
 
-    structured_llm = make_llm().with_structured_output(MonthPlan)
-    return {"month_plan": structured_llm.invoke("\n\n".join(parts))}
+    return {"month_plan": ask_llm(MonthPlan, "\n\n".join(parts), "Month plan", timeout=LLM_TIMEOUT_LONG)}
 
 
 def depends_on(task, check, tasks_by_id, seen):
@@ -616,6 +716,33 @@ CHANNEL_AGENTS = {
     "linkedin": {"LinkedIn Agent"},
     "call": {"Quickhowl", "Human Tele Calling"},
 }
+
+
+# Tool tasks the orchestrator runs by a COUNT: their target needs a number (the runners read the largest
+# number in it, e.g. '150-200 accounts' -> 200). Without one the run stops at that task.
+def target_number_errors(tasks) -> list[str]:
+    """
+    Every counted tool task whose target the runners cannot turn into a count (code; same reading as the
+    runners): no number at all, or a % that is out of 1-100 or not clearly a share of ONE counted task
+    (named in the text, e.g. '100% of T4 contacts', or the only counted task it depends on).
+    """
+    counted = {t.task_id for t in tasks if (t.agent, t.output_type) in COUNTED_TOOL_TASKS}
+    errors = []
+    for task in tasks:
+        if (task.agent, task.output_type) not in COUNTED_TOOL_TASKS:
+            continue
+        head = f"{task.task_id} ({task.agent} / {task.output_type}) target '{task.target}'"
+        share = percent_of(task.target)
+        if share is not None and count_in(task.target) is None:
+            if not 0 < share <= 100:
+                errors.append(f"{head} is a share outside 1-100%.")
+            elif percent_base(task.target, task.depends_on, counted) is None:
+                errors.append(f"{head} is a share: name the task it is a share of (e.g. '100% of T4 contacts') "
+                              "or depend on exactly one counted task.")
+        elif count_in(task.target) is None:
+            errors.append(f"{head} has no number. Tool tasks run by a count: give one from the document, "
+                          "e.g. '150-200 accounts' or '250-350 contacts'.")
+    return errors
 
 
 def validate_plan(state: MasterState) -> dict:
@@ -658,6 +785,8 @@ def validate_plan(state: MasterState) -> dict:
             if not depends_on(task, lambda t: t.agent == "QuickICP" and t.output_type == "contacts",
                               tasks_by_id, set()):
                 errors.append(f"{task.task_id} contacts prospects but no earlier QuickICP task outputs 'contacts'.")
+
+    errors += target_number_errors(plan.tasks)
 
     planned_agents = {task.agent for task in plan.tasks}
     lead_engine = " ".join(state["understanding"].motm_channels).lower()
@@ -738,8 +867,7 @@ def create_work_orders(state: MasterState) -> dict:
         for task in plan.tasks
     ]
 
-    structured_llm = make_llm().with_structured_output(WorkOrderDetails)
-    results = structured_llm.batch(prompts, config={"max_concurrency": 5})
+    results = ask_llm_batch(WorkOrderDetails, prompts, "Work orders", timeout=LLM_TIMEOUT_LONG, max_concurrency=5)
 
     work_orders = []
     for task, details in zip(plan.tasks, results):
@@ -879,12 +1007,6 @@ def main(document_path: str = "data/extracted.txt") -> None:
     approver = platform.PENDING if platform else plan_approver()
     check_document(document_path)
 
-    # Old plan files are MOVED (never deleted) to data/archive/<YYYYMMDD-HHMMSS>/, the proof first,
-    # so a stale proof can never sit next to a new plan.
-    archived = archive_plan_files()
-    if archived:
-        print(f"Old plan files moved to {archived}")
-
     config = {"configurable": {"thread_id": "month-1-run"}}
 
     state = graph.invoke({
@@ -915,6 +1037,13 @@ def main(document_path: str = "data/extracted.txt") -> None:
         else:
             approval, errors_at_approval = ask_approval(errors), errors
         state = graph.invoke(Command(resume=approval["resume"]), config)
+
+    # Approved and the work orders written: only NOW are the old plan files MOVED (never deleted) to
+    # data/archive/<YYYYMMDD-HHMMSS>/, the proof first, so a stale proof never sits next to a new plan.
+    # An LLM timeout or a stop before this point leaves the old plan files exactly where they were.
+    archived = archive_plan_files()
+    if archived:
+        print(f"Old plan files moved to {archived}")
 
     for key, path in [("understanding", "data/understanding.json"),
                       ("revenue_analysis", "data/revenue_analysis.json"),
@@ -951,8 +1080,17 @@ def main(document_path: str = "data/extracted.txt") -> None:
 
 
 if __name__ == "__main__":
-    try:
-        main(choose_document(sys.argv))
-    except (ToolError, platform_approval.Stop) as error:
-        print(error)
-        sys.exit(1)
+    from quickicp import run_cli
+
+    def cli() -> None:
+        """The command line; run_cli turns a network drop into one STOPPED line (--debug: traceback)."""
+        try:
+            main(choose_document(sys.argv))
+        except (ToolError, platform_approval.Stop) as error:
+            print(error)
+            sys.exit(1)
+        finally:
+            print()
+            print(f"{usage_summary()}   (every call: data/llm_usage.jsonl)")
+
+    run_cli(cli)

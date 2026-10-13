@@ -649,7 +649,7 @@ def run_steps(steps: list, selection: dict, month: str, call=subprocess.call, se
     print("  python run_for.py work")
 
 
-def cmd_start(arguments: list[str]) -> None:
+def cmd_start_flow(arguments: list[str]) -> None:
     options = parse_start(arguments)
     month = check_month(options["month"] or this_month())
     steps = steps_from(month, options["first"])
@@ -1628,11 +1628,11 @@ def main(arguments: list[str]) -> None:
         print(__doc__)
         return
     if not arguments:
-        cmd_start([])          # the default: the whole flow for the new project
+        cmd_start_flow([])          # the default: the whole flow for the new project
         return
     command = arguments[0]
     if command == "start":
-        cmd_start(arguments[1:])
+        cmd_start_flow(arguments[1:])
     elif command == "work":
         cmd_work(arguments[1:])
     elif command == "_plan":

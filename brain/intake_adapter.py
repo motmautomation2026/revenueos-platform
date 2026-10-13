@@ -48,7 +48,12 @@ WRITES
                                the filled checklist, data gaps)
     data/intake_source.json    {project_id, plan_id, plan_version, plan_finished_at, checklist_id, read_at,
                                 customer_key, fields_from_plan, fields_from_checklist, fields_missing,
-                                document_sha256}: exactly which plan we used
+                                document_sha256, revenue_numbers_from_plan}: exactly which plan we used
+    data/intake_numbers.json   revenue inputs taken by CODE from the plan JSON, each with its source:
+                               AOV (funnel fact 'Order value', lakh/crore converted), outbound / inbound
+                               close rate, capacity, sales cycle, and the opportunity count = the EARLIEST
+                               roadmap milestone counting ENQUIRIES (matches the enquiry-to-order rate).
+                               master_agent --intake uses these numbers instead of the LLM's.
 
 RUN
 ---
@@ -82,6 +87,7 @@ load_dotenv()
 PROJECTS, PLANS, CHECKLISTS, ITEMS = "revenueos_projects", "revenueos_plans", "revenueos_checklists", "revenueos_checklist_items"
 DATA_DIR = "data"
 DOC_NAME, SOURCE_NAME = "intake_document.txt", "intake_source.json"
+NUMBERS_NAME = "intake_numbers.json"   # revenue inputs taken by code (master_agent --intake)
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 PREFILLED_NOTE = "(prefilled, not confirmed by the customer)"
 
@@ -199,6 +205,92 @@ def find_fields(plan: dict, items: list[dict]) -> dict:
     return found
 
 
+# ================= REVENUE NUMBERS (code, no LLM) =================
+
+def rupees_per_unit(unit: str | None) -> float | None:
+    """'lakh ₹' -> 100000, 'crore' -> 10000000, '₹' / 'INR' / 'Rs' -> 1; anything else -> None (not money)."""
+    text = (unit or "").lower()
+    if "crore" in text:
+        return 10_000_000
+    if "lakh" in text:
+        return 100_000
+    if any(mark in text for mark in ("₹", "inr", "rs")):
+        return 1
+    return None
+
+
+def revenue_numbers(plan: dict) -> dict:
+    """
+    The revenue inputs the platform plan already holds, taken by CODE (same plan -> same numbers):
+        AOV, outbound / inbound close rate, capacity, sales cycle   from diagnosis.funnel_facts
+        qualified opportunities = the EARLIEST roadmap milestone counting ENQUIRIES (it matches the
+        enquiry-to-order close rate; never prospects, pipeline opportunities or RFQs)
+    Only numbers that are there; each with its source under 'sources'. master_agent uses these
+    instead of the LLM's numbers (see analyze_revenue).
+    """
+    diagnosis, execution = plan.get("diagnosis") or {}, plan.get("execution") or {}
+    numbers, sources = {}, {}
+
+    def fact(*words):
+        for f in diagnosis.get("funnel_facts", []):
+            metric = (f.get("metric") or "").lower()
+            if all(w in metric for w in words) and (f.get("value_low") is not None or f.get("value_high") is not None):
+                return f
+        return None
+
+    def low_high(f):
+        low = f.get("value_low") if f.get("value_low") is not None else f.get("value_high")
+        high = f.get("value_high") if f.get("value_high") is not None else low
+        return low, high
+
+    def source(f):
+        return f"funnel_facts: {f.get('metric')} (source: {f.get('source')}, confidence: {f.get('confidence')})"
+
+    order_value = fact("order value")
+    if order_value and rupees_per_unit(order_value.get("unit")):
+        low, high = low_high(order_value)
+        rate = rupees_per_unit(order_value.get("unit"))
+        numbers.update(aov_low_inr=float(low * rate), aov_high_inr=float(high * rate),
+                       aov_as_written=f"{range_text(order_value.get('value_low'), order_value.get('value_high'))} "
+                                      f"{order_value.get('unit')}".strip())
+        sources["aov"] = source(order_value)
+    for side in ("outbound", "inbound"):
+        rate_fact = fact("conversion", side)
+        if rate_fact:
+            low, high = low_high(rate_fact)
+            if side == "outbound":
+                numbers.update(outbound_close_rate_low_pct=float(low), outbound_close_rate_high_pct=float(high))
+            else:
+                numbers["inbound_close_rate_pct"] = float(low)
+            sources[f"{side}_close_rate"] = source(rate_fact)
+    capacity = fact("capacity")
+    if capacity:
+        numbers["capacity_per_month"] = f"{range_text(capacity.get('value_low'), capacity.get('value_high'))} " \
+                                        f"{capacity.get('unit') or ''}".strip()
+        sources["capacity_per_month"] = source(capacity)
+    cycle = fact("sales cycle")
+    if cycle:
+        low, high = low_high(cycle)
+        unit = (cycle.get("unit") or "").lower()
+        weeks = high / 7 if "day" in unit else high if "week" in unit else None
+        if weeks is not None:
+            numbers["sales_cycle_weeks"] = round(float(weeks), 1)
+            sources["sales_cycle_weeks"] = source(cycle)
+    for phase in execution.get("roadmap", []):
+        enquiries = [m for m in phase.get("milestones", [])
+                     if "enquir" in (m.get("metric") or "").lower() and m.get("value_low") is not None]
+        if enquiries:
+            m = enquiries[0]
+            numbers.update(qualified_opportunities_low=int(m["value_low"]),
+                           qualified_opportunities_high=int(m.get("value_high") if m.get("value_high") is not None
+                                                            else m["value_low"]),
+                           opportunities_period=phase.get("months") or phase.get("phase") or "")
+            sources["qualified_opportunities"] = (f"roadmap {phase.get('months')}: {m.get('milestone')} "
+                                                  f"[{m.get('metric')}, basis {m.get('basis')}]")
+            break
+    return {**numbers, "sources": sources}
+
+
 # ================= THE DOCUMENT (code, no LLM) =================
 
 def number(value) -> str:
@@ -298,7 +390,7 @@ def build_document(data: dict, customer_key: str, read_at: str) -> tuple[str, di
 
 def archive_old(data_dir: str) -> str | None:
     """MOVE older intake files to data/archive/<stamp>-intake[-n]/. Returns the folder, or None."""
-    present = [n for n in (DOC_NAME, SOURCE_NAME) if os.path.exists(os.path.join(data_dir, n))]
+    present = [n for n in (DOC_NAME, SOURCE_NAME, NUMBERS_NAME) if os.path.exists(os.path.join(data_dir, n))]
     if not present:
         return None
     base = os.path.join(data_dir, "archive", datetime.now().strftime("%Y%m%d-%H%M%S") + "-intake")
@@ -317,6 +409,7 @@ def run_intake(reader: ReadOnly, project: str, customer_key: str, data_dir: str 
     data = read_platform(reader, project)
     read_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     document, fields = build_document(data, customer_key, read_at)
+    numbers = revenue_numbers(data["plan"])
     source = {
         "project_id": data["project"]["id"], "plan_id": data["plan"]["id"], "plan_version": data["plan"]["version"],
         "plan_finished_at": data["plan"].get("finished_at"),
@@ -326,6 +419,7 @@ def run_intake(reader: ReadOnly, project: str, customer_key: str, data_dir: str 
         "fields_from_checklist": [k for k, f in fields.items() if f["source"] == "checklist"],
         "fields_missing": [k for k, f in fields.items() if f["source"] == "missing"],
         "document_sha256": hashlib.sha256(document.encode("utf-8")).hexdigest(),
+        "revenue_numbers_from_plan": sorted(numbers["sources"]),
     }
     archived = archive_old(data_dir)
     os.makedirs(data_dir, exist_ok=True)
@@ -333,7 +427,9 @@ def run_intake(reader: ReadOnly, project: str, customer_key: str, data_dir: str 
         file.write(document)
     with open(os.path.join(data_dir, SOURCE_NAME), "w", encoding="utf-8") as file:
         json.dump(source, file, indent=2, ensure_ascii=False)
-    return {"source": source, "document": document, "archived": archived}
+    with open(os.path.join(data_dir, NUMBERS_NAME), "w", encoding="utf-8") as file:
+        json.dump(numbers, file, indent=2, ensure_ascii=False)
+    return {"source": source, "document": document, "archived": archived, "numbers": numbers}
 
 
 def main() -> None:
@@ -384,6 +480,262 @@ class FakeClient:
                 client.write_attempts.append((attr, name))
                 raise AssertionError(f"write attempted: {attr} on {name}")
         return Query()
+
+
+def revenue_selftest(expect, folder: str) -> None:
+    """
+    Revenue numbers: code takes them from the platform plan JSON (valid enquiries, never prospects / pipeline /
+    RFQs); master_agent's analyze_revenue uses them whatever the (fake) LLM says; an LLM number needs a quote.
+    No LLM, no network; files only in the throwaway folder.
+    """
+    from types import SimpleNamespace
+    import master_agent
+
+    def f(metric, low, high, unit):
+        return {"metric": metric, "value_low": low, "value_high": high, "unit": unit, "source": "customer",
+                "confidence": "high"}
+
+    def m(milestone, metric, low, high):
+        return {"milestone": milestone, "metric": metric, "value_low": low, "value_high": high, "basis": "motm_proposal"}
+    anvixa_like = {
+        "diagnosis": {"funnel_facts": [f("Order value", 30, 200, "lakh ₹"),
+                                       f("Enquiry-to-order conversion rate (inbound)", 60, 60, "%"),
+                                       f("Enquiry-to-order conversion rate (outbound)", 40, 50, "%"),
+                                       f("Capacity (new projects per month)", 3, 4, "projects/clients")]},
+        "execution": {"roadmap": [
+            {"phase": "Foundation", "months": "Months 1–3",
+             "milestones": [m("Valid enquiries generated", "enquiries", 10, 12),
+                            m("Active prospects in pipeline", "prospects", 20, 30)]},
+            {"phase": "Pipeline", "months": "Months 4–6",
+             "milestones": [m("Active RFQs received", "RFQs", 3, 6),
+                            m("Active opportunities in pipeline", "opportunities", 20, 25)]}]}}
+    numbers = revenue_numbers(anvixa_like)
+    expect("revenue numbers by code: AOV 30-200 lakh -> 3000000-20000000; outbound 40-50 %, inbound 60 %; capacity",
+           numbers["aov_low_inr"] == 3_000_000 and numbers["aov_high_inr"] == 20_000_000
+           and numbers["outbound_close_rate_low_pct"] == 40 and numbers["outbound_close_rate_high_pct"] == 50
+           and numbers["inbound_close_rate_pct"] == 60 and numbers["capacity_per_month"] == "3 to 4 projects/clients")
+    expect("opportunities = VALID ENQUIRIES 10-12 (Months 1-3), never prospects 20-30, pipeline 20-25 or RFQs 3-6",
+           (numbers["qualified_opportunities_low"], numbers["qualified_opportunities_high"]) == (10, 12)
+           and numbers["opportunities_period"] == "Months 1–3"
+           and "Valid enquiries generated" in numbers["sources"]["qualified_opportunities"])
+    expect("each number records its source; no sales cycle in the plan -> none invented",
+           set(numbers["sources"]) == {"aov", "outbound_close_rate", "inbound_close_rate", "capacity_per_month",
+                                       "qualified_opportunities"} and "sales_cycle_weeks" not in numbers)
+
+    def llm_answer(low, high, quote="", fill=True):
+        """A fake LLM RevenueInputs answer (only the opportunity numbers differ)."""
+        return master_agent.RevenueInputs(
+            revenue_goal="30X-60X", aov_as_written="LLM text", aov_low_inr=1.0 if fill else None,
+            aov_high_inr=2.0 if fill else None, outbound_close_rate_low_pct=10.0 if fill else None,
+            outbound_close_rate_high_pct=20.0 if fill else None, inbound_close_rate_pct=None,
+            capacity_per_month="LLM capacity", sales_cycle_weeks=None, qualified_opportunities_low=low,
+            qualified_opportunities_high=high, opportunities_period="LLM period", customer_resources_to_use=[],
+            revenue_levers=[], revenue_risks=[], missing_for_revenue_forecast=[],
+            number_sources=[master_agent.NumberSource(field="qualified_opportunities_low", quote=quote)] if quote else [])
+
+    document = ("== TARGETS AND ROADMAP ==\n- Foundation (Months 1–3): milestones: Valid enquiries generated "
+                "[enquiries: 10 to 12]; Active prospects in pipeline [prospects: 20 to 30]\n")
+    with open(os.path.join(folder, NUMBERS_NAME), "w", encoding="utf-8") as file:
+        json.dump(numbers, file)
+    real_ask = master_agent.ask_llm
+    results = []
+    try:
+        for low, high in ((20, 30), (10, 12)):                  # the LLM changes its mind between runs
+            master_agent.ask_llm = lambda schema, prompt, name, low=low, high=high: llm_answer(low, high)
+            state = {"document_path": os.path.join(folder, DOC_NAME), "document_text": document, "motm_context": "x",
+                     "understanding": SimpleNamespace(model_dump_json=lambda indent=None: "{}")}
+            results.append(master_agent.analyze_revenue(state)["revenue_analysis"])
+        a, b = results
+        expect("same platform plan -> SAME numbers although the LLM said 20-30 then 10-12: 10-12 enquiries x 40-50 % "
+               "-> 4-6 orders -> Rs 1.2-12 crore",
+               (a.expected_orders_low, a.expected_orders_high) == (b.expected_orders_low, b.expected_orders_high) == (4.0, 6.0)
+               and a.expected_revenue_low_inr == b.expected_revenue_low_inr == 12_000_000
+               and a.expected_revenue_high_inr == b.expected_revenue_high_inr == 120_000_000
+               and a.capacity_per_month == "3 to 4 projects/clients" and a.opportunities_period == "Months 1–3")
+        expect("the analysis says where each number came from (platform plan) and the note says so",
+               a.numbers_source["qualified_opportunities"].startswith("platform plan: roadmap Months 1–3: Valid enquiries")
+               and "Numbers taken by code from the platform plan" in a.forecast_note)
+
+        # Fallback document (no platform numbers): an LLM number needs a quote found in the document
+        fallback = {"document_path": os.path.join(folder, "extracted.txt"), "document_text": document,
+                    "motm_context": "x", "understanding": SimpleNamespace(model_dump_json=lambda indent=None: "{}")}
+        master_agent.ask_llm = lambda schema, prompt, name: llm_answer(20, 30, quote="We expect about 25 deals", fill=False)
+        unquoted = master_agent.analyze_revenue(fallback)["revenue_analysis"]
+        expect("fallback: an LLM number whose quote is NOT in the document -> removed, listed as missing",
+               unquoted.qualified_opportunities_low is None and unquoted.qualified_opportunities_high is None
+               and any(x.startswith("qualified_opportunities: the LLM gave a number without a source quote")
+                       for x in unquoted.missing_for_revenue_forecast))
+        master_agent.ask_llm = lambda schema, prompt, name: llm_answer(
+            10, 12, quote="valid enquiries generated [enquiries: 10 to 12]", fill=False)
+        quoted = master_agent.analyze_revenue(fallback)["revenue_analysis"]
+        expect("fallback: an LLM number with a REAL quote (any case / spacing) -> kept, its source recorded",
+               (quoted.qualified_opportunities_low, quoted.qualified_opportunities_high) == (10, 12)
+               and quoted.numbers_source["qualified_opportunities"].startswith("LLM, quoted:"))
+    finally:
+        master_agent.ask_llm = real_ask
+
+
+def llm_selftest(expect, raises) -> None:
+    """
+    The one LLM factory (quickicp.llm) against a FAKE SLOW LLM server on 127.0.0.1: the real OpenAI client
+    times out for real, retries LLM_MAX_RETRIES times, and the caller gets one STOPPED line. Every client
+    here points at the local server with a dummy key: no real LLM call is possible.
+    master_agent.main() with a timeout: nothing archived, nothing written.
+    """
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from pydantic import BaseModel
+    import master_agent
+    import quickicp
+    import validator
+
+    seen = {"requests": 0, "bodies": [], "slow": True, "usage": True}
+
+    class FakeLLM(BaseHTTPRequestHandler):
+        """POST /v1/chat/completions: slow mode sleeps past the client timeout; fast mode answers at once."""
+
+        def do_POST(self):
+            seen["requests"] += 1
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+            seen["bodies"].append(body)
+            if seen["slow"]:
+                threading.Event().wait(1.5)          # longer than the test timeout (0.3 s)
+            reply = json.dumps({"id": "x", "object": "chat.completion", "created": 0, "model": body.get("model"),
+                                "choices": [{"index": 0, "finish_reason": "stop",
+                                             "message": {"role": "assistant", "content": json.dumps({"value": "ok"})}}],
+                                **({"usage": {"prompt_tokens": 11, "completion_tokens": 3, "total_tokens": 14,
+                                              "prompt_tokens_details": {"cached_tokens": 7}}} if seen["usage"] else {})}).encode()
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(reply)))
+                self.end_headers()
+                self.wfile.write(reply)
+            except OSError:
+                pass                                 # the client already gave up (timeout)
+
+        def log_message(self, *args):
+            pass
+
+    class Answer(BaseModel):
+        value: str
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), FakeLLM)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    real_llm = quickicp.llm
+    real_usage_file, usage_folder = quickicp.USAGE_FILE, tempfile.mkdtemp(prefix="usage_selftest_")
+    quickicp.USAGE_FILE = os.path.join(usage_folder, "llm_usage.jsonl")    # never the real data/llm_usage.jsonl
+    before_total = dict(quickicp.USAGE_TOTAL)
+    quickicp.llm = lambda timeout=quickicp.LLM_TIMEOUT_SECONDS, **options: real_llm(
+        timeout=min(timeout, 0.3), base_url=f"http://127.0.0.1:{server.server_port}/v1", api_key="selftest", **options)
+    saved_model = os.environ.get("OPENAI_MODEL")
+    os.environ["OPENAI_MODEL"] = saved_model or "selftest-model"
+    real_main_parts = {name: getattr(master_agent, name)
+                       for name in ("graph", "plan_approver", "check_document", "archive_plan_files", "write_proof")}
+    try:
+        client = real_llm()
+        expect("LLM factory: OPENAI_MODEL, temperature 0, 2 retries, 120 s; 300 s for the month plan + work orders",
+               client.model_name == os.environ["OPENAI_MODEL"] and client.temperature == 0
+               and client.max_retries == quickicp.LLM_MAX_RETRIES == 2 and client.request_timeout == 120
+               and real_llm(quickicp.LLM_TIMEOUT_LONG).request_timeout == 300)
+
+        message = ""
+        try:
+            quickicp.ask_llm(Answer, "hello", "Fake step")
+        except ToolError as error:
+            message = str(error)
+        expect("slow LLM: 1 try + 2 retries, then ONE line 'STOPPED: Fake step: the LLM did not answer within ...'",
+               seen["requests"] == 1 + quickicp.LLM_MAX_RETRIES
+               and message.startswith("STOPPED: Fake step: the LLM did not answer within")
+               and "Nothing was saved for this step; run it again." in message)
+        expect("slow LLM in a batch (work orders): STOPPED, nothing returned",
+               raises(lambda: quickicp.ask_llm_batch(Answer, ["a", "b"], "Work orders")))
+        judged = validator.judge_in_batches(Answer, ["a"])
+        expect("slow LLM in the judge: the failed batch comes back as an error (-> 'review', map not half-saved)",
+               len(judged) == 1 and isinstance(judged[0], Exception))
+
+        seen["slow"], seen["bodies"] = False, []
+        answer = quickicp.ask_llm(Answer, "hello", "Fake step")
+        expect("fast fake LLM: the answer parses; the request has OPENAI_MODEL and temperature 0",
+               answer.value == "ok" and seen["bodies"][-1].get("model") == os.environ["OPENAI_MODEL"]
+               and seen["bodies"][-1].get("temperature") == 0)
+
+        # Usage log: one line per call (no prompt text), 'n/a' when usage is missing, never stops a call
+        def usage_lines():
+            if not os.path.exists(quickicp.USAGE_FILE):
+                return []
+            with open(quickicp.USAGE_FILE, encoding="utf-8") as file:
+                return [json.loads(line) for line in file]
+        first = usage_lines()
+        expect("usage log: one line for that call: name, model, input 11, cached input 7, output 3, seconds; "
+               "no prompt text in the file",
+               len(first) == 1 and first[0]["call"] == "Fake step" and first[0]["model"] == os.environ["OPENAI_MODEL"]
+               and (first[0]["input_tokens"], first[0]["cached_input_tokens"], first[0]["output_tokens"]) == (11, 7, 3)
+               and isinstance(first[0]["seconds"], float) and "hello" not in open(quickicp.USAGE_FILE, encoding="utf-8").read())
+        quickicp.ask_llm_batch(Answer, ["hello a", "hello b"], "Work orders")
+        expect("usage log: a batch of 2 -> 2 lines, one per call ('Work orders')",
+               [line["call"] for line in usage_lines()] == ["Fake step", "Work orders", "Work orders"])
+        seen["usage"] = False
+        answer = quickicp.ask_llm(Answer, "hello", "No usage")
+        expect("usage missing in the reply -> 'n/a' in the line; the answer is still returned",
+               answer.value == "ok" and usage_lines()[-1]["input_tokens"] == "n/a"
+               and usage_lines()[-1]["output_tokens"] == "n/a")
+        seen["usage"] = True
+        logged_file = quickicp.USAGE_FILE
+        quickicp.USAGE_FILE = usage_folder                 # a folder: appending must fail
+        answer = quickicp.ask_llm(Answer, "hello", "Broken log")
+        quickicp.USAGE_FILE = logged_file
+        expect("a usage log that cannot be written never stops the call (the answer is still returned)",
+               answer.value == "ok" and len(usage_lines()) == 4)
+        total = quickicp.USAGE_TOTAL
+        expect("usage total counts every logged call; 'n/a' adds nothing; usage_summary() prints it",
+               total["calls"] - before_total["calls"] == 5
+               and total["input_tokens"] - before_total["input_tokens"] == 11 * 4
+               and total["cached_input_tokens"] - before_total["cached_input_tokens"] == 7 * 4
+               and quickicp.usage_summary().startswith("LLM usage total:"))
+
+        # master_agent.main(): the plan step times out -> STOPPED; nothing archived, nothing written
+        seen["slow"] = True
+        archived, proofs = [], []
+        plan_files = [os.path.join("data", n) for n in ("understanding.json", "revenue_analysis.json",
+                                                         "month_plan.json", "work_orders.json", "plan_approval.json")]
+        before = {p: os.path.getmtime(p) for p in plan_files if os.path.exists(p)}
+
+        class SlowGraph:
+            def invoke(self, *args, **kwargs):
+                return master_agent.understand_document({"document_text": "test"})   # the real node -> slow LLM
+        master_agent.graph = SlowGraph()
+        master_agent.plan_approver = lambda: "Test Person"
+        master_agent.check_document = lambda path: None
+        master_agent.archive_plan_files = lambda *a, **k: archived.append(1)
+        master_agent.write_proof = lambda *a, **k: proofs.append(1)
+        message = ""
+        try:
+            master_agent.main("data/intake_document.txt")
+        except ToolError as error:
+            message = str(error)
+        after = {p: os.path.getmtime(p) for p in plan_files if os.path.exists(p)}
+        expect("master_agent: an LLM timeout -> 'STOPPED: Understanding: ...'; NOTHING archived or written "
+               "(the old plan files stay in place)",
+               message.startswith("STOPPED: Understanding: the LLM did not answer within")
+               and archived == [] and proofs == [] and after == before)
+        source = open(master_agent.__file__, encoding="utf-8").read()
+        main_body = source[source.index("def main("):]
+        expect("master_agent: the archive step comes AFTER approval (the resume loop), right before saving",
+               main_body.index("archive_plan_files()") > main_body.index("ask_approval(errors)")
+               and main_body.index("archive_plan_files()") < main_body.index("Saved {key} to {path}"))
+    finally:
+        quickicp.llm = real_llm
+        quickicp.USAGE_FILE = real_usage_file
+        shutil.rmtree(usage_folder, ignore_errors=True)
+        for name, value in real_main_parts.items():
+            setattr(master_agent, name, value)
+        if saved_model is None:
+            os.environ.pop("OPENAI_MODEL", None)
+        else:
+            os.environ["OPENAI_MODEL"] = saved_model
+        server.shutdown()
+        server.server_close()
 
 
 def selftest() -> bool:
@@ -482,7 +834,9 @@ def selftest() -> bool:
                and src["fields_missing"] == [] and "Sales cycle length: 60 to 90 days" in result["document"])
         expect("the older intake files were MOVED to data/archive/<time>-intake/, not overwritten",
                result["archived"] is not None and os.path.exists(os.path.join(result["archived"], DOC_NAME))
-               and os.path.exists(os.path.join(result["archived"], SOURCE_NAME)))
+               and os.path.exists(os.path.join(result["archived"], SOURCE_NAME))
+               and os.path.exists(os.path.join(result["archived"], NUMBERS_NAME))
+               and result["numbers"]["aov_low_inr"] == 3_000_000 and "aov" in result["source"]["revenue_numbers_from_plan"])
 
         expect("no project -> STOPPED", raises(lambda: run_intake(ReadOnly(FakeClient({**tables, PROJECTS: []})),
                                                                    project, "k", folder)))
@@ -500,6 +854,49 @@ def selftest() -> bool:
                and master_agent.choose_document(["master_agent.py", "--intake"]) == "data/intake_document.txt")
         expect("master_agent: --intake with no intake document -> STOPPED before planning",
                raises(lambda: master_agent.check_document(os.path.join(folder, "missing.txt"))))
+        from types import SimpleNamespace
+        from state_store import target_number
+
+        def planned(task_id, agent, output, target):
+            return SimpleNamespace(task_id=task_id, agent=agent, output_type=output, target=target)
+        tasks = [planned("T3", "QuickICP", "accounts", "150-200 large enterprises"),
+                 planned("T4", "QuickICP", "contacts", "Complete contact list for all target accounts"),
+                 planned("T5", "Email Agent", "emails", "Email campaigns launched to all validated contacts"),
+                 planned("T6", "Quickhowl", "calls", "Calls to 250-350 contacts"),
+                 planned("T7", "Quickhowl", "calls", "no numeric target"),
+                 planned("T1", "CAM", "coordination", "no numeric target"),
+                 planned("T8", "Human Tele Calling", "qualified_leads", "contributes to enquiries over the month")]
+        errors = master_agent.target_number_errors(tasks)
+        flagged = [error.split(" ")[0] for error in errors]
+        expect("plan rule: QuickICP accounts/contacts, emails, calls without a number -> T4, T5, T7 flagged; "
+               "with a number (T3, T6) and non-tool tasks (CAM, tele-calling) are fine",
+               flagged == ["T4", "T5", "T7"]
+               and "T4 (QuickICP / contacts) target 'Complete contact list for all target accounts' has no number"
+               in errors[0])
+        expect("plan rule reads numbers like the runners: flagged <-> target_number() is None",
+               all((t.task_id in flagged) == (target_number(t.target) is None)
+                   for t in tasks if (t.agent, t.output_type) in master_agent.COUNTED_TOOL_TASKS))
+
+        def share(task_id, agent, output, target, deps):
+            return SimpleNamespace(task_id=task_id, agent=agent, output_type=output, target=target, depends_on=deps)
+        shares = [planned("T3", "QuickICP", "accounts", "150-200 accounts"),
+                  share("T4", "QuickICP", "contacts", "250-350 contacts", ["T3"]),
+                  share("T5", "Email Agent", "emails", "Emails to 100% of validated contacts", ["T4"]),
+                  share("T6", "Quickhowl", "calls", "Calls to 100% of T4 contacts", ["T4", "T5"]),
+                  share("T7", "Quickhowl", "calls", "Calls to 100% of contacts", ["T4", "T5"]),
+                  share("T8", "Email Agent", "emails", "150% of T4 contacts", ["T4"]),
+                  share("T9", "Email Agent", "emails", "100% of T3 accounts", ["T4"])]
+        share_errors = " | ".join(master_agent.target_number_errors(shares))
+        expect("plan rule for % targets: one counted dependency (T5) or a NAMED dependency (T6) is fine; two "
+               "counted dependencies and none named (T7), 150% (T8), a named task it does not depend on (T9) -> errors",
+               "T5 " not in share_errors and "T6 " not in share_errors and "T7 (Quickhowl / calls)" in share_errors
+               and "T8 (Email Agent / emails) target '150% of T4 contacts' is a share outside 1-100%" in share_errors
+               and "T9 (Email Agent / emails)" in share_errors)
+        expect("a % is a share, not a count: '100% of contacts' -> no count; '100% of 250 contacts' -> 250",
+               target_number("100% of contacts") is None and target_number("100% of 250 contacts") == 250
+               and target_number("150-200 accounts") == 200)
+        revenue_selftest(expect, folder)
+        llm_selftest(expect, raises)
     finally:
         shutil.rmtree(folder, ignore_errors=True)
         if saved is None:
@@ -511,15 +908,21 @@ def selftest() -> bool:
 
 
 if __name__ == "__main__":
-    command = sys.argv[1] if len(sys.argv) > 1 else "run"
-    try:
-        if command == "selftest":
-            sys.exit(0 if selftest() else 1)
-        elif command == "run":
-            main()
-        else:
-            print("Usage: python intake_adapter.py [run | selftest]")
+    from quickicp import run_cli
+
+    def cli() -> None:
+        """The command line; run_cli turns a network drop into one STOPPED line (--debug: traceback)."""
+        command = sys.argv[1] if len(sys.argv) > 1 else "run"
+        try:
+            if command == "selftest":
+                sys.exit(0 if selftest() else 1)
+            elif command == "run":
+                main()
+            else:
+                print("Usage: python intake_adapter.py [run | selftest]")
+                sys.exit(1)
+        except ToolError as error:
+            print(error)
             sys.exit(1)
-    except ToolError as error:
-        print(error)
-        sys.exit(1)
+
+    run_cli(cli)

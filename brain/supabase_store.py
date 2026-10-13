@@ -5,16 +5,16 @@ supabase_store.py
 Saves QuickICP results into Supabase, PER CUSTOMER, so they can be checked in real time
 and one customer's data never mixes with another's.
 
-FLOW
+FLOW (called by the QuickICP runners, which record every save in the ledger first)
 ----
-    data/companies_passed.json      (companies that PASSED the company judge; same file as pipeline.py save)
+    the accounts runner's passed companies
             │
             ▼
     save_companies(companies, customer)  ──► table: quickicp_revenueos_client_company_data
             │
             │  returns lookups for THIS customer: domain / linkedin / name  ->  company_id
             ▼
-    data/quickicp_phones_raw.json   (people + email + phone)
+    the contacts runner's people (+ email + phone)
             │
             ▼
     save_people(people, lookups, customer) ──► table: quickicp_revenueos_client_people_data
@@ -65,10 +65,9 @@ after +91). Code rule; the calls runner uses it to skip landlines. Not stored in
 
 HOW TO RUN
 ----------
-    python supabase_store.py                   save data/companies_passed.json + data/quickicp_phones_raw.json
-                                               for CUSTOMER_KEY (same as: python pipeline.py save).
-                                               Only PASSED companies are saved. No API credits are used.
-    python supabase_store.py check             READ-ONLY: how many companies/people in the pipeline files
+    Saving happens only inside the runners. The old 'save' command (data/ files -> Supabase, outside
+    the ledger) is in archive/legacy/supabase_store_cli.py.
+    python supabase_store.py check             READ-ONLY: how many companies/people in the old pipeline files
                                                (companies_passed.json, quickicp_phones_raw.json) are new
                                                vs already saved for this customer. Writes nothing.
     python supabase_store.py separation-test   writes 1 company + 1 person for a 'selftest-<time>' customer,
@@ -119,10 +118,8 @@ load_dotenv()
 COMPANY_TABLE = "quickicp_revenueos_client_company_data"
 PEOPLE_TABLE = "quickicp_revenueos_client_people_data"
 
-# Input files written by quickicp.py
-COMPANIES_FILE = "data/quickicp_raw.json"             # all companies found; only used by quickicp.py 'all'
-PEOPLE_FILE = "data/quickicp_phones_raw.json"
-PASSED_COMPANIES_FILE = "data/companies_passed.json"   # passed companies: what this file and pipeline.py save
+PEOPLE_FILE = "data/quickicp_phones_raw.json"           # read by the read-only 'check' only
+PASSED_COMPANIES_FILE = "data/companies_passed.json"   # read by the read-only 'check' only
 
 # Words removed from company names before matching, so
 # "Maruti Suzuki India Limited" and "Maruti Suzuki" are treated as the same company.
@@ -505,21 +502,23 @@ def separation_test() -> bool:
 # ================= RUN =================
 
 if __name__ == "__main__":
-    command = sys.argv[1] if len(sys.argv) > 1 else "save"
-    try:
-        customer = current_customer()
-        if command == "save":
-            # Step 1: PASSED companies first (same as pipeline.py save), so people can be linked to them.
-            lookups = save_companies(load_json(PASSED_COMPANIES_FILE), customer)
-            # Step 2: people, linked to this customer's companies by domain, LinkedIn or name.
-            save_people(load_json(PEOPLE_FILE), lookups, customer)
-        elif command == "check":
-            check_save(customer)
-        elif command == "separation-test":
-            sys.exit(0 if separation_test() else 1)
-        else:
-            print("Usage: python supabase_store.py [save | check | separation-test]")
+    from quickicp import run_cli
+
+    def cli() -> None:
+        """The command line; run_cli turns a network drop into one STOPPED line (--debug: traceback)."""
+        command = sys.argv[1] if len(sys.argv) > 1 else ""
+        try:
+            customer = current_customer()
+            if command == "check":
+                check_save(customer)
+            elif command == "separation-test":
+                sys.exit(0 if separation_test() else 1)
+            else:
+                print("Usage: python supabase_store.py check | separation-test\n"
+                      "  Companies and people are saved only by the QuickICP runners (ledger first).")
+                sys.exit(1)
+        except ToolError as error:
+            print(error)
             sys.exit(1)
-    except ToolError as error:
-        print(error)
-        sys.exit(1)
+
+    run_cli(cli)

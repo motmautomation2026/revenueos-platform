@@ -2,26 +2,11 @@
 quickicp.py
 ===========
 
-Connects the Master Agent's QuickICP work orders to the QuickICP tools (n8n webhooks),
-and optionally saves results to Supabase.
-
-CHAIN
------
-    companies  : work order (accounts) -> keywords -> Prospeo exact names -> company search
-                 writes data/quickicp_payload.json, data/quickicp_raw.json
-    people     : company domains + job titles -> people search
-                 writes data/quickicp_people_raw.json
-    emails     : people -> email finder
-                 writes data/quickicp_emails_raw.json
-    phones     : people with emails -> phone finder
-                 writes data/quickicp_phones_raw.json
-    all        : all four (unvalidated), then saves to Supabase
-
-    For the VALIDATED flow (judges between the steps), use:  python pipeline.py
-
-RUN
----
-    python quickicp.py companies | people | emails | phones | all
+The QuickICP / Prospeo / OpenAI library the orchestrator's runners use: company search payloads
+(keywords -> Prospeo exact names), company and people search, email and phone finders, and the ONE LLM
+factory (llm / ask_llm / ask_llm_batch) for the whole brain. Every paid call goes through a runner, which
+saves it in the ledger (brain_tool_calls) first. No CLI any more: the old 'python quickicp.py companies |
+people | emails | phones | all' commands (paid calls outside the ledger) are in archive/legacy/quickicp_cli.py.
 
 REQUIRED IN .env
 ----------------
@@ -31,7 +16,6 @@ REQUIRED IN .env
     QUICKICP_PEOPLE_WEBHOOK_URL     people search
     QUICKICP_EMAIL_WEBHOOK_URL      email finder
     QUICKICP_PHONE_WEBHOOK_URL      phone finder
-    SUPABASE_URL, SUPABASE_KEY      only for 'all'
 
 PAGINATION (company search)
 ---------------------------
@@ -41,9 +25,13 @@ PAGINATION (company search)
 RELIABILITY
 -----------
     - Every web call goes through post_json(): timeout + 3 retries (5s, 15s, 45s).
-    - Every LLM call goes through ask_llm(): OpenAI retries + timeout, clear error on failure.
-    - Every step saves its result to a file, so a failure never loses earlier work.
-    - Failed batches are saved to *_failed.json and the remaining batches continue.
+    - Every LLM client comes from llm() (OPENAI_MODEL, temperature 0, LLM_MAX_RETRIES = 2, 120 s per attempt;
+      300 s for the month plan + work orders). ask_llm / ask_llm_batch turn a failure into ONE line:
+      "STOPPED: <step>: the LLM did not answer within N s (2 retries). Nothing was saved for this step; run it again."
+    - Every LLM call logs one usage line (call, model, input / cached input / output tokens, seconds):
+      printed and appended to data/llm_usage.jsonl (git-ignored). No prompt text, no secrets. Missing
+      usage -> 'n/a'; a logging problem never stops a run. usage_summary() = the total of this process.
+    - A failed enrichment batch is skipped by the runner; the remaining batches continue.
 
 TEST MODE
 ---------
@@ -51,16 +39,16 @@ TEST MODE
 """
 
 import json
-import math
 import os
 import re
 import sys
 import time
-import traceback
+from datetime import datetime, timezone
 from typing import Literal
 
 import httpx
 from dotenv import load_dotenv
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 
@@ -72,7 +60,7 @@ COMPANY_WEBHOOK = os.getenv("QUICKICP_WEBHOOK_URL")
 PEOPLE_WEBHOOK = os.getenv("QUICKICP_PEOPLE_WEBHOOK_URL")
 EMAIL_WEBHOOK = os.getenv("QUICKICP_EMAIL_WEBHOOK_URL")
 PHONE_WEBHOOK = os.getenv("QUICKICP_PHONE_WEBHOOK_URL")
-PROSPEO_URL = "https://api.prospeo.io/search-suggestions"
+PROSPEO_URL = os.getenv("PROSPEO_URL") or "https://api.prospeo.io/search-suggestions"   # env: selftests only
 PROSPEO_HEADERS = {"X-KEY": os.getenv("PROSPEO_API_KEY") or ""}
 
 RETRY_WAITS = [5, 15, 45]       # seconds to wait before retry 1, 2, 3
@@ -97,10 +85,9 @@ def staging_number(name: str, default: int) -> int:
     return int(value) if value.isdigit() and int(value) > 0 else default
 
 
-TEST_MODE_DEFAULT = False       # go-live 2026-10-12 (Rameshwar): real volumes, real recipients. True = test caps.
+TEST_MODE_DEFAULT = True        # used when BRAIN_TEST_MODE is not set (a script run by hand): test caps.
 TEST_MODE = staging_flag(TEST_MODE_DEFAULT)
 TEST_MAX_COMPANIES = staging_number("STAGING_COMPANIES", 40)   # test runs ask for 40; n8n splits into pages itself
-TEST_START = 3                  # which company to start from in the standalone people test
 TEST_MAX_PEOPLE_COMPANIES = 3
 TEST_PEOPLE_PER_COMPANY = 2
 TEST_MAX_EMAIL_PEOPLE = staging_number("STAGING_PEOPLE", 6)    # people sent to the email / phone finders in test mode
@@ -115,6 +102,100 @@ CompanySize = Literal[
 
 class ToolError(Exception):
     """A known, explained failure: printed as one clear line instead of a traceback."""
+
+
+# ================= NETWORK DROP: one clear STOPPED line at the entry points (run_cli) =================
+
+NETWORK_WINERRORS = {10054, 10060, 10061, 11001, 11004}   # reset, timed out, refused, host not found, no data
+
+
+def network_error(error: BaseException) -> BaseException | None:
+    """The network error in error's cause chain (DNS, connect, timeout, reset, proxy), or None."""
+    import socket
+    kinds = [socket.gaierror, ConnectionError, TimeoutError, httpx.TransportError]
+    for module, names in (("httpcore", ("NetworkError", "TimeoutException", "ProxyError")),
+                          ("requests.exceptions", ("ConnectionError", "Timeout")),
+                          ("openai", ("APIConnectionError",))):
+        try:
+            imported = __import__(module, fromlist=list(names))
+            kinds += [getattr(imported, name) for name in names if hasattr(imported, name)]
+        except ImportError:
+            pass
+    seen, current = 0, error
+    while current is not None and seen < 12:
+        if isinstance(current, tuple(kinds)) or getattr(current, "winerror", None) in NETWORK_WINERRORS:
+            return current
+        current, seen = current.__cause__ or current.__context__, seen + 1
+    return None
+
+
+def network_service(error: BaseException) -> str:
+    """Which service could not be reached, from the failing request's host (env URLs first)."""
+    from urllib.parse import urlparse
+    host = None
+    for item in (error, error.__cause__, error.__context__):
+        try:
+            request = getattr(item, "request", None)
+            url = getattr(request, "url", None)
+            host = getattr(url, "host", None) or (urlparse(str(url)).hostname if url else None)
+        except RuntimeError:                       # httpx: '.request' not set on this error
+            host = None
+        if host:
+            break
+    names = {"SUPABASE_URL": "Supabase", "QUICKHOWL_URL": "Quickhowl", "EMAIL_TOOL_URL": "email tool",
+             "QUICKICP_WEBHOOK_URL": "QuickICP (n8n)", "QUICKICP_PEOPLE_WEBHOOK_URL": "QuickICP (n8n)",
+             "QUICKICP_EMAIL_WEBHOOK_URL": "QuickICP (n8n)", "QUICKICP_PHONE_WEBHOOK_URL": "QuickICP (n8n)",
+             "PROSPEO_URL": "Prospeo", "OPENAI_BASE_URL": "OpenAI"}
+    for key, name in names.items():
+        if host and host == urlparse(os.getenv(key) or "").hostname:
+            return name
+    if host and "openai" in host:
+        return "OpenAI"
+    if host and "prospeo" in host:
+        return "Prospeo"
+    return host or "a service"
+
+
+def network_stop_line(error: BaseException, rerun: str) -> str:
+    """The one STOPPED line (+ what was saved, a paid call in flight, a lock left held), from what is known."""
+    short = str(error).strip().splitlines()[0][:120] if str(error).strip() else type(error).__name__
+    lines = [f"STOPPED: no network ({network_service(error)}, {short}). Nothing lost: check the internet, then {rerun}."]
+    store = sys.modules.get("state_store")
+    if store is not None:
+        writes = store.STATE_WRITES
+        if writes["pending"]:
+            lines.append(f"  The last change ({writes['pending']}) may or may not have been saved; the rerun "
+                         "checks what is there.")
+        if writes["done"]:
+            lines.append(f"  Saved before the drop: {writes['done']} state change(s) (last: {writes['last']}).")
+        elif not writes["pending"]:
+            lines.append("  Nothing was saved by this command.")
+        if store.HELD_LOCKS:
+            lines.append("  The run lock may still be held by this stopped command: it expires within 30 min, "
+                         "or free it with: python orchestrator.py unlock <YYYY-MM>.")
+    kit = sys.modules.get("runner_kit")
+    if kit is not None and kit.PAID_IN_FLIGHT:
+        lines.append(f"  A paid call was in progress ({kit.PAID_IN_FLIGHT[-1]}): the next 'run' marks it 'unknown' "
+                     "and asks you (paid_call_unknown). It is never repeated automatically.")
+    return "\n".join(lines)
+
+
+def run_cli(main, rerun: str = "rerun the same command") -> None:
+    """
+    Run an entry point's command. A network drop (DNS, connect, timeout, reset) anywhere in it -> one STOPPED
+    line (network_stop_line) and exit code 3, no traceback. '--debug' (removed from sys.argv first) shows the
+    full traceback instead. Every other error and exit behaves exactly as before.
+    """
+    debug = "--debug" in sys.argv
+    sys.argv[:] = [arg for arg in sys.argv if arg != "--debug"]
+    try:
+        main()
+    except Exception as error:
+        found = network_error(error)
+        if found is None or debug:
+            raise
+        print(network_stop_line(found, rerun))
+        sys.exit(3)
 
 
 def check_settings(*names: str) -> None:
@@ -159,17 +240,92 @@ def post_json(name: str, url: str, payload: dict, timeout: int, headers: dict | 
 
 # ================= RELIABLE LLM CALL =================
 
-def llm() -> ChatOpenAI:
-    """OpenAI chat model with built-in retries and a timeout."""
-    return ChatOpenAI(model=os.getenv("OPENAI_MODEL"), temperature=0, max_retries=3, timeout=120)
+# The ONE place LLM clients are made (master_agent, runners, judges, review, check_system).
+LLM_TIMEOUT_SECONDS = 120       # per attempt
+LLM_TIMEOUT_LONG = 300          # per attempt: the big outputs (month plan, work orders)
+LLM_MAX_RETRIES = 2             # after the first attempt; then STOPPED
 
 
-def ask_llm(schema, prompt: str, name: str):
-    """Ask the LLM for a structured answer; turn any failure into a clear ToolError."""
+USAGE_FILE = "data/llm_usage.jsonl"   # one JSON line per LLM call (git-ignored with data/); never prompt text
+USAGE_TOTAL = {"calls": 0, "input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0, "seconds": 0.0}
+
+
+class UsageLog(BaseCallbackHandler):
+    """Logs every LLM call made with this model: call name, model, tokens (input / cached / output), seconds."""
+
+    def __init__(self, name: str):
+        self.name, self.started = name, {}
+
+    def on_chat_model_start(self, serialized, messages, *, run_id, **kwargs):
+        self.started[run_id] = time.monotonic()
+
+    def on_llm_end(self, response, *, run_id, **kwargs):
+        log_usage(self.name, response, time.monotonic() - self.started.pop(run_id, time.monotonic()))
+
+
+def log_usage(name: str, response, seconds: float) -> None:
+    """Print + append one usage line. Missing usage -> 'n/a'. Never raises: logging must never stop a run."""
     try:
-        return llm().with_structured_output(schema).invoke(prompt)
+        message = response.generations[0][0].message
+        usage = getattr(message, "usage_metadata", None) or {}
+        model = (response.llm_output or {}).get("model_name") or message.response_metadata.get("model_name") or "n/a"
+        line = {"at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "call": name, "model": model,
+                "input_tokens": usage.get("input_tokens", "n/a"),
+                "cached_input_tokens": (usage.get("input_token_details") or {}).get("cache_read", "n/a"),
+                "output_tokens": usage.get("output_tokens", "n/a"), "seconds": round(seconds, 1)}
+        USAGE_TOTAL["calls"] += 1
+        USAGE_TOTAL["seconds"] += seconds
+        for key in ("input_tokens", "cached_input_tokens", "output_tokens"):
+            if isinstance(line[key], int):
+                USAGE_TOTAL[key] += line[key]
+        print(f"  [LLM] {name} | {model} | in {line['input_tokens']} (cached {line['cached_input_tokens']}) | "
+              f"out {line['output_tokens']} | {line['seconds']} s")
+        os.makedirs(os.path.dirname(USAGE_FILE) or ".", exist_ok=True)
+        with open(USAGE_FILE, "a", encoding="utf-8") as file:
+            file.write(json.dumps(line) + "\n")
+    except Exception as error:                    # never stop a run because of the usage log
+        print(f"  [LLM] {name}: usage not logged ({type(error).__name__})")
+
+
+def usage_summary() -> str:
+    """The total of every LLM call logged in this process, one line."""
+    t = USAGE_TOTAL
+    return (f"LLM usage total: {t['calls']} call(s) | in {t['input_tokens']} (cached {t['cached_input_tokens']}) | "
+            f"out {t['output_tokens']} | {t['seconds']:.0f} s")
+
+
+def llm(timeout: float = LLM_TIMEOUT_SECONDS, name: str = "LLM", **options) -> ChatOpenAI:
+    """OpenAI chat model: OPENAI_MODEL, temperature 0, a timeout per attempt and LLM_MAX_RETRIES retries.
+    Every call is usage-logged under 'name' (UsageLog)."""
+    return ChatOpenAI(model=os.getenv("OPENAI_MODEL"), temperature=0, max_retries=LLM_MAX_RETRIES,
+                      timeout=timeout, callbacks=[UsageLog(name)], **options)
+
+
+def llm_failure(name: str, error: Exception, timeout: float) -> ToolError:
+    """One clear STOPPED line for a failed LLM call (after the client's own retries)."""
+    import httpx
+    import openai
+    if isinstance(error, (openai.APITimeoutError, httpx.TimeoutException, TimeoutError)):
+        return ToolError(f"STOPPED: {name}: the LLM did not answer within {timeout:g} s ({LLM_MAX_RETRIES} retries). "
+                         "Nothing was saved for this step; run it again.")
+    return ToolError(f"STOPPED: {name}: LLM call failed after {LLM_MAX_RETRIES} retries: {str(error)[:300]}")
+
+
+def ask_llm(schema, prompt: str, name: str, timeout: float = LLM_TIMEOUT_SECONDS):
+    """Ask the LLM for a structured answer; any failure (after the retries) -> one clear STOPPED ToolError."""
+    try:
+        return llm(timeout, name=name).with_structured_output(schema).invoke(prompt)
     except Exception as error:
-        raise ToolError(f"{name}: LLM call failed: {error}") from error
+        raise llm_failure(name, error, timeout) from error
+
+
+def ask_llm_batch(schema, prompts: list[str], name: str, timeout: float = LLM_TIMEOUT_SECONDS,
+                  max_concurrency: int = 5) -> list:
+    """Several structured answers in parallel, ALL or nothing: one failure -> STOPPED (nothing is returned)."""
+    try:
+        return llm(timeout, name=name).with_structured_output(schema).batch(prompts, config={"max_concurrency": max_concurrency})
+    except Exception as error:
+        raise llm_failure(name, error, timeout) from error
 
 
 # ================= FILES =================
@@ -194,18 +350,42 @@ def save_json(path: str, data) -> None:
 
 # ================= SHARED HELPERS =================
 
-def load_quickicp_work_order(output_type: str) -> dict:
-    """Find the QuickICP work order for 'accounts' or 'contacts' in the Master Agent output."""
-    for work_order in load_json("data/work_orders.json"):
-        if work_order.get("agent") == "QuickICP" and work_order.get("output_type") == output_type:
-            return work_order
-    raise ToolError(f"No QuickICP work order with output_type '{output_type}' in data/work_orders.json.")
-
 
 def max_number(text: str, default: int) -> int:
     """Largest number in a text, e.g. '150-200 accounts' -> 200."""
     numbers = [int(n) for n in re.findall(r"\d+", text or "")]
     return max(numbers) if numbers else default
+
+
+# Tool tasks the orchestrator runs by a COUNT (their target needs a number, or a % of another counted task).
+COUNTED_TOOL_TASKS = {("QuickICP", "accounts"), ("QuickICP", "contacts"), ("Email Agent", "emails"),
+                      ("Quickhowl", "calls")}
+PERCENT = re.compile(r"(\d+(?:\.\d+)?)\s*%")
+
+
+def count_in(text: str | None) -> int | None:
+    """The largest COUNT in a target; a percent is a share and a task id is a name, neither is a count:
+    '100% of 250 contacts' -> 250, '50% of T4 contacts' -> None, '150-200 accounts' -> 200."""
+    number = max_number(re.sub(r"\bT\d+\b", " ", PERCENT.sub(" ", text or "")), -1)
+    return None if number < 0 else number
+
+
+def percent_of(text: str | None) -> float | None:
+    """The share in a target, '100% of T4 contacts' -> 100.0; None without a '%'."""
+    found = PERCENT.search(text or "")
+    return float(found.group(1)) if found else None
+
+
+def percent_base(text: str | None, depends_on: list[str], counted: set[str]) -> str | None:
+    """
+    The counted task a % target is a share OF (code): the counted task id named in the text that the task
+    depends on ('100% of T4 contacts' -> 'T4'); else its ONLY directly-dependent counted task; else None.
+    """
+    named = {task_id for task_id in re.findall(r"\bT\d+\b", text or "") if task_id in counted}
+    if named:
+        return named.pop() if len(named) == 1 and next(iter(named)) in depends_on else None
+    deps = [d for d in depends_on if d in counted]
+    return deps[0] if len(deps) == 1 else None
 
 
 def clean_domain(website: str | None) -> str:
@@ -350,22 +530,6 @@ def search_companies(payload: CompanyPayload) -> list[dict]:
     return result
 
 
-def run_companies() -> None:
-    check_settings("OPENAI_MODEL", "PROSPEO_API_KEY", "QUICKICP_WEBHOOK_URL")
-    understanding = load_json("data/understanding.json")
-    work_order = load_quickicp_work_order("accounts")
-    print("Work order:", work_order.get("work_order_id"), "|", work_order.get("target"), "|",
-          work_order.get("geography"))
-
-    payload = build_company_payload(work_order, understanding)
-    print("\n[4] Payload:", json.dumps(payload.model_dump(), indent=2, ensure_ascii=False))
-    save_json("data/quickicp_payload.json", payload.model_dump())
-
-    companies = search_companies(payload)
-    save_json("data/quickicp_raw.json", companies)
-    print(f"\n[5] Companies received: {len(companies)} -> saved to data/quickicp_raw.json")
-
-
 # ================= PEOPLE SEARCH =================
 
 class JobTitles(BaseModel):
@@ -380,16 +544,6 @@ class PeoplePayload(BaseModel):
     job_titles: list[str]
     locations: list[str]
     count_per_company: int
-
-
-def load_domains(companies_path: str = "data/quickicp_raw.json") -> list[str]:
-    """Cleaned, de-duplicated website domains from a companies file."""
-    domains = []
-    for company in load_json(companies_path):
-        domain = clean_domain(company.get("WEBSITE"))
-        if domain and domain not in domains:
-            domains.append(domain)
-    return domains
 
 
 def make_job_titles(work_order: dict) -> list[str]:
@@ -408,22 +562,6 @@ def make_job_titles(work_order: dict) -> list[str]:
     return titles
 
 
-def build_people_payloads(work_order: dict, domains: list[str]) -> list[PeoplePayload]:
-    """Split domains into batches, each with the same job titles and per-company count."""
-    job_titles = make_job_titles(work_order)
-    print("\n[2] Job titles:", job_titles)
-
-    contacts_wanted = max_number(work_order.get("target", ""), len(domains))
-    per_company = min(10, max(1, math.ceil(contacts_wanted / len(domains))))
-    if TEST_MODE:
-        per_company = TEST_PEOPLE_PER_COMPANY
-    print(f"[3] Contacts wanted: {contacts_wanted} for {len(domains)} companies -> {per_company} per company")
-
-    batches = [domains[i:i + DOMAIN_BATCH_SIZE] for i in range(0, len(domains), DOMAIN_BATCH_SIZE)]
-    return [PeoplePayload(domains=batch, job_titles=job_titles, locations=PEOPLE_LOCATIONS,
-                          count_per_company=per_company) for batch in batches]
-
-
 def search_people(payload: PeoplePayload) -> list[dict]:
     """Send one batch to QuickICP people search."""
     result = post_json("People search", PEOPLE_WEBHOOK, payload.model_dump(), 300)
@@ -432,43 +570,6 @@ def search_people(payload: PeoplePayload) -> list[dict]:
     if not isinstance(result, list):
         raise ToolError(f"People search: expected a list, got {type(result).__name__}")
     return result
-
-
-def run_people(companies_path: str = "data/quickicp_raw.json", test_start: int = TEST_START) -> None:
-    """
-    People search on the companies in companies_path.
-    The pipeline passes data/companies_passed.json, so only validated companies are searched.
-    """
-    check_settings("OPENAI_MODEL", "QUICKICP_PEOPLE_WEBHOOK_URL")
-    work_order = load_quickicp_work_order("contacts")
-    print("Work order:", work_order.get("work_order_id"), "|", work_order.get("target"))
-
-    domains = load_domains(companies_path)
-    if TEST_MODE:
-        domains = domains[test_start:test_start + TEST_MAX_PEOPLE_COMPANIES]
-    print(f"\n[1] Domains to search (from {companies_path}): {len(domains)}")
-    if not domains:
-        raise ToolError(f"No domains to search in {companies_path}. Run the company step first.")
-
-    payloads = build_people_payloads(work_order, domains)
-    print(f"[4] Sending {len(payloads)} batch(es) of up to {DOMAIN_BATCH_SIZE} domains")
-
-    people, failed = [], []
-    for number, payload in enumerate(payloads, start=1):
-        try:
-            batch_people = search_people(payload)
-            people.extend(batch_people)
-            print(f"  Batch {number}: {len(batch_people)} people")
-        except ToolError as error:
-            failed.append({"batch": number, "domains": payload.domains, "error": str(error)})
-            print(f"  Batch {number}: FAILED -> {error}")
-        save_json("data/quickicp_people_raw.json", people)
-
-    save_json("data/quickicp_people_failed.json", failed)
-    print(f"\n[5] People received: {len(people)} | failed batches: {len(failed)}")
-    print("Saved to data/quickicp_people_raw.json")
-    if people:
-        print("First record:", json.dumps(people[0], indent=2, ensure_ascii=False))
 
 
 # ================= EMAIL AND PHONE FINDERS =================
@@ -481,113 +582,3 @@ def enrich_people(name: str, webhook: str, people: list[dict]) -> list[dict]:
     if not isinstance(result, list):
         raise ToolError(f"{name}: expected a list, got {type(result).__name__}")
     return result
-
-
-def run_enrichment(name: str, webhook: str, input_path: str, output_path: str, failed_path: str) -> None:
-    """
-    Read people, send them in batches, save results after every batch, record failed batches.
-    Our own 'validation' block is removed before sending (the tool expects its own format)
-    and attached again to each returned record, matched by LinkedIn profile URL.
-    """
-    people = load_json(input_path)
-    if not people:
-        raise ToolError(f"No people found in {input_path}. Run the previous step first.")
-    if TEST_MODE:
-        people = people[:TEST_MAX_EMAIL_PEOPLE]
-    print(f"[1] {name}: {len(people)} people from {input_path}")
-
-    validations = {p.get("USER SOCIAL"): p["validation"] for p in people if "validation" in p}
-    to_send = [{k: v for k, v in p.items() if k != "validation"} for p in people]
-
-    batches = [to_send[i:i + PEOPLE_BATCH_SIZE] for i in range(0, len(to_send), PEOPLE_BATCH_SIZE)]
-    print(f"[2] Sending {len(batches)} batch(es) of up to {PEOPLE_BATCH_SIZE} people")
-
-    results, failed = [], []
-    for number, batch in enumerate(batches, start=1):
-        try:
-            batch_results = enrich_people(name, webhook, batch)
-            for record in batch_results:
-                if record.get("USER SOCIAL") in validations:
-                    record["validation"] = validations[record["USER SOCIAL"]]
-            results.extend(batch_results)
-            print(f"  Batch {number}: {len(batch_results)} records")
-        except ToolError as error:
-            failed.append({"batch": number, "people": [p.get("FULL NAME") for p in batch], "error": str(error)})
-            print(f"  Batch {number}: FAILED -> {error}")
-        save_json(output_path, results)
-
-    save_json(failed_path, failed)
-    print(f"\n[3] Records received: {len(results)} | failed batches: {len(failed)}")
-    print("Saved to", output_path)
-    if results:
-        print("First record:", json.dumps(results[0], indent=2, ensure_ascii=False))
-
-
-def run_emails(input_path: str = "data/quickicp_people_raw.json") -> None:
-    """Email finder. The pipeline passes data/people_passed.json, so only validated people are enriched."""
-    check_settings("QUICKICP_EMAIL_WEBHOOK_URL")
-    run_enrichment("Email finder", EMAIL_WEBHOOK, input_path,
-                   "data/quickicp_emails_raw.json", "data/quickicp_emails_failed.json")
-
-
-def run_phones() -> None:
-    """Phone finder on the email results, so each record ends with person + email + phone."""
-    check_settings("QUICKICP_PHONE_WEBHOOK_URL")
-    run_enrichment("Phone finder", PHONE_WEBHOOK,
-                   "data/quickicp_emails_raw.json", "data/quickicp_phones_raw.json",
-                   "data/quickicp_phones_failed.json")
-
-
-# ================= FULL CHAIN (UNVALIDATED) =================
-
-def run_all() -> None:
-    """Run companies -> people -> emails -> phones without judges, then save to Supabase.
-    For the validated flow, use: python pipeline.py"""
-    print("\n===== 1/5 COMPANIES =====")
-    run_companies()
-    print("\n===== 2/5 PEOPLE =====")
-    run_people()
-    print("\n===== 3/5 EMAILS =====")
-    run_emails()
-    print("\n===== 4/5 PHONES =====")
-    run_phones()
-
-    print("\n===== 5/5 SAVE TO SUPABASE =====")
-    check_settings("SUPABASE_URL", "SUPABASE_KEY")
-    try:
-        # Imported here, not at the top: supabase_store imports from this file (avoids a circular import).
-        from supabase_store import current_customer, save_companies, save_people, COMPANIES_FILE, PEOPLE_FILE
-        customer = current_customer()   # fixed CUSTOMER_KEY from .env
-        lookups = save_companies(load_json(COMPANIES_FILE), customer)
-        save_people(load_json(PEOPLE_FILE), lookups, customer)
-    except ToolError:
-        raise
-    except Exception as error:
-        print(f"Supabase save failed: {error}")
-        print("All results are still safe in the data/ JSON files. Fix the issue and run: python supabase_store.py")
-
-
-# ================= RUN =================
-
-MODES = {
-    "companies": run_companies,
-    "people": run_people,
-    "emails": run_emails,
-    "phones": run_phones,
-    "all": run_all,
-}
-
-if __name__ == "__main__":
-    mode = sys.argv[1] if len(sys.argv) > 1 else "companies"
-    if mode not in MODES:
-        print("Usage: python quickicp.py " + " | ".join(MODES))
-        sys.exit(1)
-    try:
-        MODES[mode]()
-    except ToolError as error:
-        print("\nSTOPPED:", error)
-        sys.exit(1)
-    except Exception:
-        print("\nUNEXPECTED ERROR (details below for debugging):")
-        traceback.print_exc()
-        sys.exit(1)
