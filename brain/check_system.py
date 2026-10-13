@@ -162,8 +162,8 @@ def check_files() -> None:
 
 def check_openai() -> None:
     try:
-        from langchain_openai import ChatOpenAI
-        reply = ChatOpenAI(model=os.getenv("OPENAI_MODEL"), temperature=0, max_tokens=5, timeout=30).invoke("Reply OK")
+        from quickicp import llm      # the one LLM factory (short timeout + tiny answer for a health check)
+        reply = llm(timeout=30, max_tokens=5).invoke("Reply OK")
         report("PASS", "OpenAI", f"model {os.getenv('OPENAI_MODEL')} replied: {reply.content.strip()[:20]}")
     except Exception as error:
         report("FAIL", "OpenAI", str(error)[:200])

@@ -24,7 +24,9 @@ READS
     knowledge/motm_context.md     MOTM context
     .env                          OPENAI_API_KEY, OPENAI_MODEL, PLAN_APPROVER
 
-WRITES (old versions are MOVED, never deleted, to data/archive/<YYYYMMDD-HHMMSS>/ at the start)
+WRITES (old versions are MOVED, never deleted, to data/archive/<YYYYMMDD-HHMMSS>/ only AFTER approval
+        and the work orders, just before the new files are saved; a stop or LLM timeout before that
+        leaves the old plan files in place)
 ------
     data/understanding.json, data/revenue_analysis.json, data/month_plan.json
     data/work_orders.json         approved work orders (one per plan task)
@@ -34,13 +36,17 @@ WRITES (old versions are MOVED, never deleted, to data/archive/<YYYYMMDD-HHMMSS>
 
 RUN
 ---
-    python master_agent.py        uses LLM calls; the current plan files are moved to data/archive/
+    python master_agent.py        uses LLM calls; after approval the current plan files are moved to data/archive/
     Importing this file runs nothing (the run is inside main()).
+    LLM: quickicp.ask_llm / ask_llm_batch (OPENAI_MODEL, temperature 0, 2 retries): 120 s per attempt,
+    300 s for the month plan and the work orders.
 
 DEBUGGING
 ---------
     "STOPPED: PLAN_APPROVER is missing"   -> add PLAN_APPROVER=<your name> to .env
     "N plan rule(s) are still broken"     -> give changes, or type 'override' on purpose
+    "STOPPED: Month plan: the LLM did not answer within 300 s (2 retries)" -> nothing was saved or moved;
+        run again (check the internet connection / OpenAI status)
     Validation errors are printed per attempt ("Validation attempt N: ...").
     "T4 (QuickICP / contacts) target '...' has no number" -> a QuickICP accounts/contacts, Email Agent emails
         or Quickhowl calls task needs a count in its target (the runners stop without one); the brain
@@ -56,7 +62,6 @@ import warnings
 from typing import TypedDict, Literal
 
 from dotenv import load_dotenv
-from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import interrupt, Command
 from langgraph.checkpoint.memory import MemorySaver
@@ -64,7 +69,7 @@ from pydantic import BaseModel, Field
 
 from plan_approval import (APPROVAL_FILE, archive_plan_files, ask_approval, describe, plan_approver,
                            write_proof)
-from quickicp import ToolError
+from quickicp import LLM_TIMEOUT_LONG, ToolError, ask_llm, ask_llm_batch
 
 load_dotenv()
 
@@ -72,10 +77,6 @@ warnings.filterwarnings("ignore", message=".*Deserializing unregistered type.*")
 logging.getLogger("langgraph").setLevel(logging.ERROR)
 
 MOTM_CONTEXT_PATH = "knowledge/motm_context.md"
-
-
-def make_llm() -> ChatOpenAI:
-    return ChatOpenAI(model=os.getenv("OPENAI_MODEL"), temperature=0)
 
 
 # ================= 1. UNDERSTANDING: what the document says =================
@@ -451,14 +452,13 @@ def read_document(state: MasterState) -> dict:
 
 
 def understand_document(state: MasterState) -> dict:
-    structured_llm = make_llm().with_structured_output(Understanding)
     prompt = (
         "You are the Master Agent of MOTM Revenue OS. "
         "Read this approved go-to-market strategy and extract the facts exactly as written. "
         "Do not invent numbers. If something is missing, list it in data_gaps.\n\n"
         + state["document_text"]
     )
-    return {"understanding": structured_llm.invoke(prompt)}
+    return {"understanding": ask_llm(Understanding, prompt, "Understanding")}
 
 
 def analyze_revenue(state: MasterState) -> dict:
@@ -489,7 +489,7 @@ def analyze_revenue(state: MasterState) -> dict:
         parts.append("Your previous analysis:\n" + previous.model_dump_json(indent=2))
         parts.append("The user asked for these corrections to the analysis. Apply them:\n" + analysis_fb)
 
-    inputs = make_llm().with_structured_output(RevenueInputs).invoke("\n\n".join(parts))
+    inputs = ask_llm(RevenueInputs, "\n\n".join(parts), "Revenue analysis")
 
     orders_low = orders_high = revenue_low = revenue_high = None
     opp_low, opp_high = inputs.qualified_opportunities_low, inputs.qualified_opportunities_high
@@ -590,8 +590,7 @@ def plan_month(state: MasterState) -> dict:
     if errors:
         parts.append("Your last plan failed these checks. Fix all of them:\n" + "\n".join(errors))
 
-    structured_llm = make_llm().with_structured_output(MonthPlan)
-    return {"month_plan": structured_llm.invoke("\n\n".join(parts))}
+    return {"month_plan": ask_llm(MonthPlan, "\n\n".join(parts), "Month plan", timeout=LLM_TIMEOUT_LONG)}
 
 
 def depends_on(task, check, tasks_by_id, seen):
@@ -756,8 +755,7 @@ def create_work_orders(state: MasterState) -> dict:
         for task in plan.tasks
     ]
 
-    structured_llm = make_llm().with_structured_output(WorkOrderDetails)
-    results = structured_llm.batch(prompts, config={"max_concurrency": 5})
+    results = ask_llm_batch(WorkOrderDetails, prompts, "Work orders", timeout=LLM_TIMEOUT_LONG, max_concurrency=5)
 
     work_orders = []
     for task, details in zip(plan.tasks, results):
@@ -894,12 +892,6 @@ def main(document_path: str = "data/extracted.txt") -> None:
     approver = plan_approver()
     check_document(document_path)
 
-    # Old plan files are MOVED (never deleted) to data/archive/<YYYYMMDD-HHMMSS>/, the proof first,
-    # so a stale proof can never sit next to a new plan.
-    archived = archive_plan_files()
-    if archived:
-        print(f"Old plan files moved to {archived}")
-
     config = {"configurable": {"thread_id": "month-1-run"}}
 
     state = graph.invoke({
@@ -925,6 +917,13 @@ def main(document_path: str = "data/extracted.txt") -> None:
         # Code decides: a plain 'yes' is refused while rules are broken; 'override' needs a reason.
         approval, errors_at_approval = ask_approval(errors), errors
         state = graph.invoke(Command(resume=approval["resume"]), config)
+
+    # Approved and the work orders written: only NOW are the old plan files MOVED (never deleted) to
+    # data/archive/<YYYYMMDD-HHMMSS>/, the proof first, so a stale proof never sits next to a new plan.
+    # An LLM timeout or a stop before this point leaves the old plan files exactly where they were.
+    archived = archive_plan_files()
+    if archived:
+        print(f"Old plan files moved to {archived}")
 
     for key, path in [("understanding", "data/understanding.json"),
                       ("revenue_analysis", "data/revenue_analysis.json"),

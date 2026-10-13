@@ -241,8 +241,12 @@ def rejection_summary(judged: list[dict]) -> dict:
 
 # ================= BRAIN ADJUSTS THE SEARCH (LLM) =================
 
-def brain_adjust(work_order: dict, log: list[dict], summary: dict, shortfall: int) -> SearchAdjustment:
-    """Ask the brain for new filters, used only when the current search is exhausted."""
+def brain_adjust(work_order: dict, log: list[dict], summary: dict, shortfall: int,
+                 context: dict | None = None) -> SearchAdjustment:
+    """
+    Ask the brain for new filters, used only when the current search is exhausted.
+    context: company_context of the run (orchestrator); None = the CLI files.
+    """
     previous_searches = [entry["payload"] for entry in log if entry.get("payload")]
     prompt = (
         "You are the Master Agent of MOTM Revenue OS. The current company search has run out of "
@@ -254,7 +258,7 @@ def brain_adjust(work_order: dict, log: list[dict], summary: dict, shortfall: in
         "- Only widen company size if many companies failed for being too small.\n"
         "- location_keywords must be plain city or state names.\n"
         "- Explain the change in one or two sentences.\n\n"
-        "Customer:\n" + json.dumps(company_context(), ensure_ascii=False)
+        "Customer:\n" + json.dumps(context if context is not None else company_context(), ensure_ascii=False)
         + "\n\nWork order:\n" + json.dumps(work_order, ensure_ascii=False)
         + "\n\nResults so far:\n" + json.dumps(summary, ensure_ascii=False)
         + "\n\nSearches already done:\n" + json.dumps(previous_searches, ensure_ascii=False)

@@ -200,6 +200,19 @@ def contacts_people_ids(ctx: RunnerContext) -> list[int]:
     return done[-1]["result"]["people_ids"]
 
 
+def run_understanding(run: dict) -> dict:
+    """
+    The brain's understanding saved IN the run (brain_customer_runs.understanding, from 'load').
+    Runners and judges use this, never data/understanding.json (that file belongs to the latest plan,
+    which may not be this run's). Missing -> STOPPED, never a silent fallback to the file.
+    """
+    understanding = run.get("understanding")
+    if not understanding:
+        raise ToolError(f"STOPPED: run {run['run_key']} has no understanding saved. Load the plan again "
+                        "(python orchestrator.py load <YYYY-MM>) so the run carries its own understanding.")
+    return understanding
+
+
 def target_for(task: dict, test_cap: int) -> int:
     """
     How many results a tool task needs (code):

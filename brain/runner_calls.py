@@ -26,6 +26,11 @@ FLOW (each step recorded in brain_tool_calls)
                  achieved = calls completed; outcomes per contact in the task output;
                  full transcripts in data/runs/<run_key>/<task>_call_results.json (backup)
 
+PLAN DATA
+---------
+    brain_customer_runs.understanding (runner_kit.run_understanding) + THIS task's work order.
+    Never data/understanding.json or data/work_orders.json: those belong to the latest plan.
+
 DEBUGGING
 ---------
     "STOPPED: no MOBILE number among T4's people"   -> T4 found only landlines; see the output 'skipped'
@@ -57,7 +62,9 @@ FINISHED_STATUSES = {"completed", "failed", "paused"}
 class RealCallTools:
     """The real calls: Supabase people, quickhowl profile + launch + status + results."""
 
-    def __init__(self, run_key: str, task_id: str):
+    def __init__(self, run_key: str, task_id: str, understanding: dict, work_order: dict):
+        """understanding: the run's (runner_kit.run_understanding); work_order: THIS task's. Never data/ files."""
+        self.understanding, self.work_order = understanding, work_order
         self.results_file = os.path.join("data", "runs", run_key, f"{task_id}_call_results.json")
 
     def people(self, customer: str, ids: list[int]) -> list[dict]:
@@ -91,7 +98,7 @@ class RealCallTools:
 
     def build_request(self, contacts: list[dict]) -> dict:
         import quickhowl
-        request = quickhowl.build_request(contacts)
+        request = quickhowl.build_request(contacts, understanding=self.understanding, work_order=self.work_order)
         quickhowl.assert_safe(request)
         return request
 
