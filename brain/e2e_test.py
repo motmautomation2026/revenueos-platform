@@ -157,7 +157,8 @@ def target_month(customer: str, latest: dict | None, month: str | None) -> str:
 def ask_allowed(steps: Steps, decision: dict, task_id: str) -> tuple[str, str] | None:
     """Ask YOU for an allowed answer + a note. None = you typed 'quit'."""
     from orchestrator import print_question
-    allowed = sorted(ALLOWED_ANSWERS[decision["kind"]])
+    # The question's own answers when it narrows them (e.g. no 'feedback' when no rounds are left).
+    allowed = sorted((decision["question"] or {}).get("allowed_answers") or ALLOWED_ANSWERS[decision["kind"]])
     print(f"\n#{decision['id']} {task_id} {decision['kind']}")
     print_question(decision)
     while True:
