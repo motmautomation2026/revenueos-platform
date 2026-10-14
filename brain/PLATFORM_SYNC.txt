@@ -1,0 +1,2 @@
+date       | direction             | platform commit | master-agent commit | note
+2026-10-14 | platform->ours (pull) | fb38bad         | 6c43f71             | version1 (base 6b4cc16 = our 3c7becc), unchanged

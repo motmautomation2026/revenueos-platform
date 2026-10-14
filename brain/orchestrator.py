@@ -437,6 +437,12 @@ def print_question(decision: dict) -> None:
     q = decision["question"] or {}
     print(f"      {q.get('text', '')}")
     if decision["kind"] == "email_approve":
+        if q.get("round"):
+            print(f"      Version {q['round']} | feedback rounds left: {q.get('feedback_rounds_left')}")
+        for number, note in enumerate(q.get("previous_feedback") or [], start=1):
+            print(f"      your feedback {number}: {note}")
+        for problem in q.get("checks") or []:
+            print(f"      CHECK FAILED: {problem}")
         for s in q.get("samples", []):
             print(f"      --- sample email {s.get('email')} for {s.get('for')}")
             print(f"      Subject: {s.get('subject')}")
@@ -472,8 +478,14 @@ def cmd_answer(customer: str, decision_id: int, answer: str, reason: str | None)
     if decision_id not in own_decisions:
         raise ToolError(f"STOPPED: decision {decision_id} does not exist or belongs to another customer "
                         f"(CUSTOMER_KEY is '{customer}').")
-    if own_decisions[decision_id]["kind"] in NOTE_REQUIRED_KINDS and not (reason or "").strip():
+    kind = own_decisions[decision_id]["kind"]
+    if kind in NOTE_REQUIRED_KINDS and not (reason or "").strip():
         raise ToolError(f'STOPPED: a note is required, e.g. answer {decision_id} done "meeting held 10 Oct"')
+    if (kind, answer) in NOTE_REQUIRED_ANSWERS and not (reason or "").strip():
+        raise ToolError(f'STOPPED: "{answer}" needs a note saying what to change, e.g. answer {decision_id} '
+                        f'{answer} "shorter, and mention the Pune plant"')
+    if len(reason or "") > MAX_NOTE_LENGTH:
+        raise ToolError(f"STOPPED: keep the note under {MAX_NOTE_LENGTH} characters (it has {len(reason)}).")
     answered = answer_decision(decision_id, answer, decided_by="user", reason=reason)
     if answered["kind"].startswith("review_action_"):
         print(f"Decision #{decision_id} ({answered['kind']}) answered '{answer}'. Recorded. Nothing runs automatically.")
@@ -492,6 +504,9 @@ GATE_TYPES = {"data_approval", "content", "client_training", "readiness"}
 HUMAN_KINDS = {"human_task", "human_gate_task"}
 # A note is required when a person answers these.
 NOTE_REQUIRED_KINDS = HUMAN_KINDS | {"review_action_1", "review_action_2", "review_action_3"}
+# ...and for these answers of other kinds (the note is what gets sent on). Same rules: lib/brain/answers.ts.
+NOTE_REQUIRED_ANSWERS = {("email_approve", "feedback")}
+MAX_NOTE_LENGTH = 1000
 
 # Tool tasks: (agent, output_type) -> runner name. A runner is wired when it is in WIRED_RUNNERS.
 TOOL_ROUTES = {
