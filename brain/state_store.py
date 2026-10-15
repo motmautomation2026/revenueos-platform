@@ -108,6 +108,7 @@ from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
 
+from orch import brain_log      # file only; never prints, never raises
 from quickicp import ToolError, count_in
 
 load_dotenv()
@@ -677,11 +678,14 @@ def start_step(task_row_id: int, step: str, idempotency_key: str, tool: str,
             # Never hand one task another task's call (its reply would be reused silently).
             raise ToolError(f"STOPPED: key {idempotency_key} is already used by another task "
                             f"(task row {existing['task_row_id']}). References must be unique.")
+        brain_log.ledger(existing, "seen before")
         return existing, False
     assert_no_secrets(request)
     row = {"task_row_id": task_row_id, "step": step, "idempotency_key": idempotency_key,
            "tool": tool, "paid": paid, "status": "running", "request": request}
-    return backend().insert(STEPS, row), True
+    saved = backend().insert(STEPS, row)
+    brain_log.ledger(saved, "started")
+    return saved, True
 
 
 def owned_rows_output(run: dict, company_ids: list[int] | None = None,
@@ -709,13 +713,17 @@ def finish_step(step_id: int, status: str, response: dict | None = None, output=
               "error": error, "finished_at": now_iso()}
     if external_ref is not None:
         fields["external_ref"] = external_ref
-    return backend().update(STEPS, fields, {"id": step_id})[0]
+    saved = backend().update(STEPS, fields, {"id": step_id})[0]
+    brain_log.ledger(saved, "finished", "INFO" if status == "done" else "WARNING")
+    return saved
 
 
 def mark_unknown(step_id: int, reason: str) -> dict:
     """A 'running' step found after a crash, for a tool with no reference: we cannot know if it ran."""
-    return backend().update(STEPS, {"status": "unknown", "error": reason, "finished_at": now_iso()},
-                            {"id": step_id})[0]
+    saved = backend().update(STEPS, {"status": "unknown", "error": reason, "finished_at": now_iso()},
+                             {"id": step_id})[0]
+    brain_log.ledger(saved, "marked unknown (crash during a paid call)", "WARNING")
+    return saved
 
 
 def get_steps(task_row_id: int) -> list[dict]:
