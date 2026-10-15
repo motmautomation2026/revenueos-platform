@@ -23,9 +23,10 @@ folder or `selftest-*` rows that are deleted at the end).
 
 ## Files
 
-- **Run path:** `intake_adapter.py` -> `master_agent.py` (+ `plan_approval.py`) -> `orchestrator.py` ->
+- **Run path:** `intake_adapter.py` -> `master_agent.py` (+ `plan_approval.py`) -> `orchestrator.py` (entry point; its code is in `orch/`, one file per job, all re-exported) ->
   `runner_quickicp_accounts.py`, `runner_quickicp_contacts.py`, `runner_email.py`, `runner_calls.py`
   (via `runner_kit.py`) -> `brain_review.py`. State: `state_store.py`, `supabase_store.py`.
+  Log: `orch/brain_log.py` -> `logs/brain-YYYY-MM-DD.log` (file only, masked; never stdout/stderr, never stops a run).
 - **Shared tool code:** `quickicp.py` (incl. the one LLM factory `llm()` / `ask_llm`), `company_loop.py`,
   `people_loop.py` (round code only, no CLI), `validator.py`, `email_tool.py`, `quickhowl.py`.
 - **Tests and checks:** `orchestrator_selftest.py` (run with `python orchestrator.py selftest`), `e2e_test.py selftest`,
@@ -54,9 +55,9 @@ Patches only. Every sync point is a line in `PLATFORM_SYNC.txt`
    then apply, write the files out, byte-compare every file with theirs (ignoring CRLF only), commit
    "Platform brain changes <sha>, unchanged", and add a line to `PLATFORM_SYNC.txt`.
 2. **Then push, as a patch on a PR branch.** `git diff <last master-agent sync point>..master` here;
-   in the platform clone a new branch `brain-sync-<date>` from their latest `origin/main`;
+   in the platform clone a new branch `brain-sync-<date>` from their latest `origin/version1`;
    `git apply --directory=brain --3way --check`, then apply and commit. Pushing that branch and
-   opening the PR need the developer's go. Never push to their main. After they merge, record the
+   opening the PR need the developer's go. PRs target `version1` (the developers' rule for now), never main. After they merge, record the
    merge commit as the new platform sync point (so the next pull does not bring our changes back).
 3. **Never:** copy whole files or folders over `brain/`, mirror, or `--delete`; apply a patch that
    touches their files or settings (see Scope): stop and ask. Any conflict: stop and report; it is

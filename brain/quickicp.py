@@ -186,16 +186,27 @@ def run_cli(main, rerun: str = "rerun the same command") -> None:
     line (network_stop_line) and exit code 3, no traceback. '--debug' (removed from sys.argv first) shows the
     full traceback instead. Every other error and exit behaves exactly as before.
     """
+    from orch import brain_log            # file only; never prints, never raises
     debug = "--debug" in sys.argv
     sys.argv[:] = [arg for arg in sys.argv if arg != "--debug"]
+    command = " ".join([os.path.basename(sys.argv[0])] + sys.argv[1:])
     try:
         main()
+    except SystemExit as stop:
+        brain_log.write("INFO" if stop.code in (0, None) else "WARNING", f"{command}: exit {stop.code}")
+        raise
     except Exception as error:
         found = network_error(error)
         if found is None or debug:
+            brain_log.write("ERROR", f"{command}: crashed", error=error)
             raise
+        brain_log.write("ERROR", f"{command}: network drop -> STOPPED, exit 3", error=error)
         print(network_stop_line(found, rerun))
         sys.exit(3)
+    except BaseException as error:        # Ctrl+C, a simulated crash: logged, then exactly as before
+        brain_log.write("ERROR", f"{command}: interrupted", error=error)
+        raise
+    brain_log.write("INFO", f"{command}: exit 0")
 
 
 def check_settings(*names: str) -> None:
