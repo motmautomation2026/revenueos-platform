@@ -72,6 +72,15 @@ If Caddy runs **in Docker**: use `reverse_proxy 172.17.0.1:3000` in the block, a
 **Site URL** to `https://revenueos.b2botix.ai` and add it to **Redirect URLs**, so sign-in and
 password e-mails point to the live site.
 
+### 6b. Instead of 6: the IP address only (no domain yet)
+Plain HTTP on port 3000, for testing; switch to the domain (HTTPS) before others use it.
+1. Add `APP_BIND=0.0.0.0:3000` to `.env.local`, then `./deploy/deploy.sh --no-pull`.
+2. Hostinger hPanel → VPS → **Firewall**: if a firewall is active, allow **TCP 3000**.
+3. Open **http://&lt;VPS-IP&gt;:3000** and sign in.
+4. Supabase → Authentication → URL Configuration: add `http://<VPS-IP>:3000` to **Redirect URLs**.
+
+Later, to move to the domain: remove the `APP_BIND` line, do step 6, and `./deploy/deploy.sh --no-pull`.
+
 ### 7. Move the worker (the cut-over)
 On **Windows** (PowerShell as the same user), stop the old worker for good and pack the customer folders:
 ```powershell
