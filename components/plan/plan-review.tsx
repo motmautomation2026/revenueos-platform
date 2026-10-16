@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { Download, Eye, EyeOff, Loader2, Printer, RefreshCw } from "lucide-react";
+import { Download, Eye, EyeOff, Loader2, Lock, Printer, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 import {
   AlertDialog,
@@ -22,7 +22,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import type { PlanDocument } from "@/lib/plan/document";
-import { PlanParts, sectionAnchor } from "./plan-document";
+import { cn } from "@/lib/utils";
+import { PlanParts } from "./plan-document";
 
 export function PlanReview({
   projectId,
@@ -43,11 +44,22 @@ export function PlanReview({
 }) {
   const router = useRouter();
   const [showInternal, setShowInternal] = useState(false);
+  const [activeId, setActiveId] = useState(doc.parts[0]?.id ?? "");
   const [confirmRerun, setConfirmRerun] = useState(false);
   const [starting, setStarting] = useState(false);
 
   const parts = doc.parts.filter((part) => showInternal || !part.internal);
+  const active = parts.find((part) => part.id === activeId) ?? parts[0];
   const versionItems = versions.map((v) => ({ value: String(v.version), label: v.label }));
+
+  const toggleInternal = () => {
+    const next = !showInternal;
+    setShowInternal(next);
+    const internal = doc.parts.find((part) => part.internal);
+    // Turning it on takes you there; turning it off while on it returns to the first part.
+    if (next && internal) setActiveId(internal.id);
+    if (!next && active?.internal) setActiveId(doc.parts[0]?.id ?? "");
+  };
 
   const rerun = async () => {
     setConfirmRerun(false);
@@ -74,83 +86,100 @@ export function PlanReview({
 
   return (
     <div className="grid gap-6">
-      <div className="flex flex-wrap items-center gap-2 print:hidden">
-        {versions.length > 1 && (
-          <Select
-            items={versionItems}
-            value={String(version)}
-            onValueChange={(value) => router.push(`/projects/${projectId}/plan?v=${value}`)}
-          >
-            <SelectTrigger size="sm" className="w-44" aria-label="Plan version">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {versionItems.map((item) => (
-                <SelectItem key={item.value} value={item.value}>
-                  {item.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        )}
-        <a
-          href={`/api/plans/${planId}/html${showInternal ? "?internal=1" : ""}`}
-          className={buttonVariants({ variant: "outline", size: "sm" })}
-        >
-          <Download aria-hidden />
-          Download HTML
-        </a>
-        <Button variant="outline" size="sm" onClick={() => window.print()}>
-          <Printer aria-hidden />
-          Download PDF
-        </Button>
-        <Button variant="outline" size="sm" onClick={() => setShowInternal((shown) => !shown)}>
-          {showInternal ? <EyeOff aria-hidden /> : <Eye aria-hidden />}
-          {showInternal ? "Hide internal section" : "Show internal section"}
-        </Button>
-        <Button variant="outline" size="sm" disabled={starting} onClick={() => setConfirmRerun(true)}>
-          {starting ? <Loader2 className="animate-spin" aria-hidden /> : <RefreshCw aria-hidden />}
-          Re-run plan
-        </Button>
-      </div>
+      {/* Title, what this version is, and what you can do with it. */}
+      <header className="flex flex-wrap items-start justify-between gap-x-6 gap-y-4 print:hidden">
+        <div className="min-w-0 flex-1 basis-80">
+          <h2 className="text-2xl leading-tight font-semibold tracking-tight">GTM {doc.customerName}</h2>
+          <p className="mt-1 text-xs text-muted-foreground">{footer}</p>
+        </div>
 
-      <div className="grid items-start gap-8 lg:grid-cols-[14rem_minmax(0,1fr)] print:block">
-        <nav
-          aria-label="Table of contents"
-          className="hidden max-h-[calc(100svh-5.5rem)] overflow-y-auto text-sm lg:sticky lg:top-18 lg:block print:hidden"
-        >
-          {parts.map((part) => (
-            <div key={part.id} className="mb-4">
-              <a href={`#${part.id}`} className="font-semibold hover:underline">
+        <div className="grid justify-items-end gap-2">
+          <div className="flex flex-wrap justify-end gap-2">
+            <a
+              href={`/api/plans/${planId}/html${showInternal ? "?internal=1" : ""}`}
+              className={buttonVariants({ size: "lg" })}
+            >
+              <Download aria-hidden />
+              Download HTML
+            </a>
+            <Button variant="outline" size="lg" onClick={() => window.print()}>
+              <Printer aria-hidden />
+              Download PDF
+            </Button>
+          </div>
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            {versions.length > 1 && (
+              <Select
+                items={versionItems}
+                value={String(version)}
+                onValueChange={(value) => router.push(`/projects/${projectId}/plan?v=${value}`)}
+              >
+                <SelectTrigger className="w-44" aria-label="Plan version">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {versionItems.map((item) => (
+                    <SelectItem key={item.value} value={item.value}>
+                      {item.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
+            <Button variant="ghost" onClick={toggleInternal} aria-pressed={showInternal}>
+              {showInternal ? <EyeOff aria-hidden /> : <Eye aria-hidden />}
+              {showInternal ? "Hide internal notes" : "Show internal notes"}
+            </Button>
+            <Button variant="ghost" disabled={starting} onClick={() => setConfirmRerun(true)}>
+              {starting ? <Loader2 className="animate-spin" aria-hidden /> : <RefreshCw aria-hidden />}
+              Re-run plan
+            </Button>
+          </div>
+        </div>
+      </header>
+
+      {/* One part at a time, so the page is a third as long and has a single navigation. */}
+      <div className="sticky top-14 z-20 -mx-4 border-b bg-background/95 px-4 py-2 backdrop-blur sm:-mx-6 sm:px-6 xl:-mx-8 xl:px-8 print:hidden">
+        <div role="tablist" aria-label="Parts of the plan" className="flex gap-1 overflow-x-auto">
+          {parts.map((part) => {
+            const selected = part.id === active?.id;
+            return (
+              <button
+                key={part.id}
+                type="button"
+                role="tab"
+                aria-selected={selected}
+                onClick={() => {
+                  setActiveId(part.id);
+                  window.scrollTo({ top: 0 });
+                }}
+                className={cn(
+                  "flex items-center gap-1.5 rounded-lg px-3.5 py-2 text-sm font-semibold whitespace-nowrap outline-none focus-visible:ring-3 focus-visible:ring-ring/50",
+                  selected
+                    ? part.internal
+                      ? "bg-amber-500 text-white"
+                      : "bg-primary text-primary-foreground"
+                    : "text-muted-foreground hover:bg-muted hover:text-foreground"
+                )}
+              >
+                {part.internal && <Lock className="size-3.5" aria-hidden />}
                 {part.title}
-              </a>
-              <ul className="mt-1.5 grid gap-1 border-l pl-3">
-                {part.sections.map((section) => (
-                  <li key={section.id}>
-                    <a
-                      href={`#${sectionAnchor(part, section.id)}`}
-                      className="text-muted-foreground hover:text-foreground"
-                    >
-                      {section.title}
-                    </a>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          ))}
-        </nav>
-
-        <article className="grid min-w-0 gap-8">
-          <header className="border-b-2 border-foreground pb-4">
-            <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">{doc.title}</h1>
-            <p className="mt-1 text-muted-foreground">
-              {[doc.customerName, doc.subtitle].filter(Boolean).join(" · ")}
-            </p>
-          </header>
-          <PlanParts parts={parts} />
-          <footer className="border-t pt-3 text-xs text-muted-foreground">{footer}</footer>
-        </article>
+              </button>
+            );
+          })}
+        </div>
       </div>
+
+      <div className="print:hidden">{active && <PlanParts parts={[active]} />}</div>
+
+      {/* The PDF is the whole document, whichever part is on screen. */}
+      <article className="hidden gap-8 print:grid">
+        <header className="border-b-2 border-foreground pb-4">
+          <h1 className="text-3xl font-semibold tracking-tight">GTM {doc.customerName}</h1>
+        </header>
+        <PlanParts parts={parts} mode="print" />
+        <footer className="border-t pt-3 text-xs text-muted-foreground">{footer}</footer>
+      </article>
 
       <AlertDialog open={confirmRerun} onOpenChange={setConfirmRerun}>
         <AlertDialogContent>

@@ -108,6 +108,7 @@ from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
 
+from orch import brain_log      # file only; never prints, never raises
 from quickicp import ToolError, count_in
 
 load_dotenv()
@@ -129,7 +130,7 @@ STEP_STATUSES = {"running", "done", "failed", "unknown"}
 ALLOWED_ANSWERS = {
     "plan_approval": {"yes", "no"},
     "goal_check": {"continue", "more", "stop"},
-    "email_approve": {"yes", "no"},
+    "email_approve": {"yes", "no", "feedback"},       # feedback = a note to the email tool (needs a note)
     "call_start": {"yes", "no"},
     "paid_call_unknown": {"rerun", "skip", "stop"},   # crash during a QuickICP call
     "task_failed": {"retry", "skip", "stop"},          # tool kept failing after its retries
@@ -677,11 +678,14 @@ def start_step(task_row_id: int, step: str, idempotency_key: str, tool: str,
             # Never hand one task another task's call (its reply would be reused silently).
             raise ToolError(f"STOPPED: key {idempotency_key} is already used by another task "
                             f"(task row {existing['task_row_id']}). References must be unique.")
+        brain_log.ledger(existing, "seen before")
         return existing, False
     assert_no_secrets(request)
     row = {"task_row_id": task_row_id, "step": step, "idempotency_key": idempotency_key,
            "tool": tool, "paid": paid, "status": "running", "request": request}
-    return backend().insert(STEPS, row), True
+    saved = backend().insert(STEPS, row)
+    brain_log.ledger(saved, "started")
+    return saved, True
 
 
 def owned_rows_output(run: dict, company_ids: list[int] | None = None,
@@ -709,13 +713,17 @@ def finish_step(step_id: int, status: str, response: dict | None = None, output=
               "error": error, "finished_at": now_iso()}
     if external_ref is not None:
         fields["external_ref"] = external_ref
-    return backend().update(STEPS, fields, {"id": step_id})[0]
+    saved = backend().update(STEPS, fields, {"id": step_id})[0]
+    brain_log.ledger(saved, "finished", "INFO" if status == "done" else "WARNING")
+    return saved
 
 
 def mark_unknown(step_id: int, reason: str) -> dict:
     """A 'running' step found after a crash, for a tool with no reference: we cannot know if it ran."""
-    return backend().update(STEPS, {"status": "unknown", "error": reason, "finished_at": now_iso()},
-                            {"id": step_id})[0]
+    saved = backend().update(STEPS, {"status": "unknown", "error": reason, "finished_at": now_iso()},
+                             {"id": step_id})[0]
+    brain_log.ledger(saved, "marked unknown (crash during a paid call)", "WARNING")
+    return saved
 
 
 def get_steps(task_row_id: int) -> list[dict]:
@@ -745,12 +753,17 @@ def get_open_decision(run_id: int, kind: str, task_row_id: int | None = None) ->
 
 
 def open_decision(run_id: int, kind: str, question: dict, task_row_id: int | None = None) -> dict:
-    """Ask a human: save an open decision. If the same question is already open, return that one."""
+    """
+    Ask a human: save an open decision. If the same question is already open, return that one.
+    question['allowed_answers'] may narrow the answers for THIS question (e.g. no 'feedback' when no rounds
+    are left); it is always kept inside the kind's ALLOWED_ANSWERS, and answer_decision enforces it.
+    """
     check_value(kind, set(ALLOWED_ANSWERS) - {"brain_review", "run_review"}, "decision kind to ask")
     existing = get_open_decision(run_id, kind, task_row_id)
     if existing:
         return existing
-    question = {**question, "allowed_answers": sorted(ALLOWED_ANSWERS[kind])}
+    offered = set(question.get("allowed_answers") or ALLOWED_ANSWERS[kind]) & ALLOWED_ANSWERS[kind]
+    question = {**question, "allowed_answers": sorted(offered or ALLOWED_ANSWERS[kind])}
     return backend().insert(DECISIONS, {"run_id": run_id, "task_row_id": task_row_id,
                                         "kind": kind, "question": question})
 
@@ -767,6 +780,10 @@ def answer_decision(decision_id: int, answer: str, decided_by: str = "user", rea
         raise ToolError(f"STOPPED: decision {decision_id} is not open (answered '{decision['answer']}' "
                         f"by {decision['decided_by']} at {decision['answered_at']}).")
     check_value(answer, ALLOWED_ANSWERS[decision["kind"]], f"answer for {decision['kind']}")
+    offered = (decision.get("question") or {}).get("allowed_answers")
+    if offered and answer not in offered:
+        raise ToolError(f"STOPPED: '{answer}' is not offered for decision {decision_id}; "
+                        f"answer one of: {', '.join(offered)}.")
     fields = {"status": "answered", "answer": answer, "decided_by": decided_by,
               "reason": reason, "answered_at": now_iso()}
     updated = backend().update(DECISIONS, fields, {"id": decision_id, "status": "open"})
@@ -986,7 +1003,7 @@ def write_test() -> bool:
         expect("same open question (no task) returns the same row",
                open_decision(run["id"], "plan_approval", {"text": "again"})["id"] == plan_q["id"])
         email_q = open_decision(run["id"], "email_approve", {"text": "Approve samples?"}, t2["id"])
-        expect("open_decision stores allowed answers", email_q["question"]["allowed_answers"] == ["no", "yes"])
+        expect("open_decision stores allowed answers", email_q["question"]["allowed_answers"] == ["feedback", "no", "yes"])
         expect("2 open decisions listed", len(list_open_decisions(run["id"])) == 2)
         expect("wrong answer refused", raises(lambda: answer_decision(email_q["id"], "maybe")))
         answered = answer_decision(email_q["id"], "yes", reason="samples look right")
@@ -995,6 +1012,13 @@ def write_test() -> bool:
         expect("missing decision refused", raises(lambda: answer_decision(-1, "yes")))
         reopened = open_decision(run["id"], "email_approve", {"text": "New samples?"}, t2["id"])
         expect("new question allowed after the old one was answered", reopened["id"] != email_q["id"])
+        answer_decision(reopened["id"], "no", reason="selftest")
+        narrow = open_decision(run["id"], "email_approve", {"text": "No rounds left", "allowed_answers": ["yes", "no", "x"]},
+                               t2["id"])
+        expect("a question may narrow its answers (never beyond the kind's), and only those are accepted",
+               narrow["question"]["allowed_answers"] == ["no", "yes"]
+               and raises(lambda: answer_decision(narrow["id"], "feedback", reason="more")))
+        answer_decision(narrow["id"], "no", reason="selftest")
         brain = record_decision(run["id"], "brain_review", "done", "brain", "200 of 200", task_row_id=t1["id"])
         expect("brain decision recorded as answered", brain["status"] == "answered")
         expect("brain_review cannot be left open", raises(lambda: open_decision(run["id"], "brain_review", {})))

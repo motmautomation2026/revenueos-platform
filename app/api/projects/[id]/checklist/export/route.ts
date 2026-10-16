@@ -1,4 +1,5 @@
 import { requireProject } from "@/lib/auth";
+import { answerForSharing } from "@/lib/checklist-secrets";
 import { buildChecklistWorkbook, type ExportItem } from "@/lib/files/excel";
 import { sanitizeFileName } from "@/lib/files/rules";
 import { TABLES } from "@/lib/supabase/tables";
@@ -23,7 +24,10 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
     .order("position", { ascending: true })
     .returns<ExportItem[]>();
 
-  const workbook = await buildChecklistWorkbook(items ?? []);
+  // A secret answer (a mailbox password, say) is shown as provided, never written out.
+  const workbook = await buildChecklistWorkbook(
+    (items ?? []).map((item) => ({ ...item, answer: answerForSharing(item.question, item.answer) }))
+  );
   const fileName = sanitizeFileName(`${project.customer_name} checklist.xlsx`);
 
   return new Response(new Uint8Array(workbook), {

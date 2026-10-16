@@ -76,6 +76,7 @@ from plan_approval import (APPROVAL_FILE, archive_plan_files, ask_approval, desc
                            write_proof)
 from quickicp import (COUNTED_TOOL_TASKS, LLM_TIMEOUT_LONG, ToolError, ask_llm, ask_llm_batch, count_in,
                       percent_base, percent_of, usage_summary)
+import platform_approval
 
 load_dotenv()
 
@@ -655,6 +656,8 @@ def plan_month(state: MasterState) -> dict:
         "- A target whose period spans several months must be written as 'contributes to X over <period>'.\n"
         "- Outreach must come after data_build, data_approval, content and client_training. "
         "Qualification must come after outreach and readiness. Handover must come after qualification.\n"
+        "- CAM data approval, Email Agent emails and Quickhowl calls tasks list the QuickICP contacts task "
+        "directly in depends_on.\n"
         "- Only recurring weekly meetings get the 'review' type, and they start in week 1.\n"
         "- Never assign customer responsibilities (proposals, pricing, closing) to MOTM agents.\n"
         "- kpis_to_track must cover the full path from contact to order and revenue.\n"
@@ -744,6 +747,38 @@ def target_number_errors(tasks) -> list[str]:
     return errors
 
 
+# These tasks work on the contacts a QuickICP contacts task finds, so they must list it DIRECTLY in depends_on
+# (reaching it through another task is not enough: the plan must say which contacts they use).
+CONTACTS_USERS = {("Email Agent", "emails"): "it emails those contacts", ("Quickhowl", "calls"): "it calls those contacts"}
+
+
+def contacts_dependency_errors(tasks) -> list[str]:
+    """
+    Every CAM data-approval task, Email Agent emails task and Quickhowl calls task that does not list a
+    QuickICP contacts task directly in depends_on (code). With no contacts task in the plan at all, an
+    outreach task already gets the 'no earlier QuickICP task outputs contacts' error, so only data approval
+    is reported here.
+    """
+    contacts = [t.task_id for t in tasks if (t.agent, t.output_type) == ("QuickICP", "contacts")]
+    names = contacts[0] if len(contacts) == 1 else "one of " + ", ".join(contacts)
+    errors = []
+    for task in tasks:
+        approval = task.agent == "CAM" and "data_approval" in task.task_types
+        why = "it approves those contacts" if approval else CONTACTS_USERS.get((task.agent, task.output_type))
+        if not why or set(task.depends_on) & set(contacts):
+            continue
+        head = f"{task.task_id} ({task.agent} / {'data_approval' if approval else task.output_type})"
+        if not contacts:
+            if approval:
+                errors.append(f"{head} needs a QuickICP contacts task to approve: add one and list it in depends_on.")
+            continue
+        now = ", ".join(task.depends_on) + " only" if task.depends_on else "nothing"
+        errors.append(f"{head} must list the QuickICP contacts task {names} directly in depends_on ({why}); "
+                      f"it now depends on {now}. Add {contacts[0] if len(contacts) == 1 else 'one of them'} "
+                      "to its depends_on.")
+    return errors
+
+
 def validate_plan(state: MasterState) -> dict:
     plan = state["month_plan"]
     enabled = enabled_agents(state["engagement_settings"])
@@ -786,6 +821,7 @@ def validate_plan(state: MasterState) -> dict:
                 errors.append(f"{task.task_id} contacts prospects but no earlier QuickICP task outputs 'contacts'.")
 
     errors += target_number_errors(plan.tasks)
+    errors += contacts_dependency_errors(plan.tasks)
 
     planned_agents = {task.agent for task in plan.tasks}
     lead_engine = " ".join(state["understanding"].motm_channels).lower()
@@ -1000,7 +1036,10 @@ def check_document(path: str) -> None:
 def main(document_path: str = "data/extracted.txt") -> None:
     """Plan a month: read the document, plan, ask the human to approve, write work orders + approval proof."""
     # Who approves must be known BEFORE planning, so we never plan for nothing.
-    approver = plan_approver()
+    # Started for a platform request (run_for.py sets BRAIN_REQUEST_ID): the plan is approved in the
+    # platform, and the approver is whoever approves it there. Otherwise: the typed prompt, as before.
+    platform = platform_approval.from_environment()
+    approver = platform.PENDING if platform else plan_approver()
     check_document(document_path)
 
     config = {"configurable": {"thread_id": "month-1-run"}}
@@ -1026,7 +1065,12 @@ def main(document_path: str = "data/extracted.txt") -> None:
             for error in errors:
                 print("  -", error)
         # Code decides: a plain 'yes' is refused while rules are broken; 'override' needs a reason.
-        approval, errors_at_approval = ask_approval(errors), errors
+        if platform:
+            reader = platform.reader(state, errors)
+            approval, errors_at_approval = ask_approval(errors, read=reader), errors
+            approver = reader.approved_by or approver
+        else:
+            approval, errors_at_approval = ask_approval(errors), errors
         state = graph.invoke(Command(resume=approval["resume"]), config)
 
     # Approved and the work orders written: only NOW are the old plan files MOVED (never deleted) to
@@ -1077,7 +1121,7 @@ if __name__ == "__main__":
         """The command line; run_cli turns a network drop into one STOPPED line (--debug: traceback)."""
         try:
             main(choose_document(sys.argv))
-        except ToolError as error:
+        except (ToolError, platform_approval.Stop) as error:
             print(error)
             sys.exit(1)
         finally:

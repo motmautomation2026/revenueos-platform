@@ -1,14 +1,7 @@
 import Link from "next/link";
-import { LogOut } from "lucide-react";
 import { Brand } from "@/components/brand";
-import { Button } from "@/components/ui/button";
+import { UserMenu } from "@/components/user-menu";
 import { requireUser } from "@/lib/auth";
-import { signOut } from "@/app/(auth)/actions";
-
-function initials(name: string) {
-  const words = name.trim().split(/\s+/).filter(Boolean);
-  return ((words[0]?.[0] ?? "") + (words.length > 1 ? words[words.length - 1][0] : "")).toUpperCase() || "?";
-}
 
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
   const { user } = await requireUser();
@@ -23,30 +16,14 @@ export default async function AppLayout({ children }: { children: React.ReactNod
         Skip to content
       </a>
       <header className="sticky top-0 z-30 border-b bg-background/90 backdrop-blur print:hidden">
-        <div className="mx-auto flex h-14 w-full max-w-6xl items-center justify-between gap-4 px-4">
+        <div className="mx-auto flex h-14 w-full max-w-[1800px] items-center justify-between gap-4 px-4 sm:px-6 lg:px-8">
           <Link href="/projects" aria-label="RevenueOS — projects">
             <Brand />
           </Link>
-          <nav className="flex items-center gap-1">
-            <Link
-              href="/account"
-              className="flex items-center gap-2 rounded-lg px-2 py-1 text-sm hover:bg-muted"
-              title="Account"
-            >
-              <span className="flex size-7 items-center justify-center rounded-full bg-primary/10 text-xs font-semibold text-primary">
-                {initials(name)}
-              </span>
-              <span className="hidden max-w-40 truncate sm:inline">{name}</span>
-            </Link>
-            <form action={signOut}>
-              <Button type="submit" variant="ghost" size="icon" aria-label="Sign out" title="Sign out">
-                <LogOut aria-hidden />
-              </Button>
-            </form>
-          </nav>
+          <UserMenu name={name} />
         </div>
       </header>
-      <main id="main" className="mx-auto w-full max-w-6xl flex-1 px-4 py-6 sm:py-8">
+      <main id="main" className="mx-auto w-full max-w-[1800px] flex-1 px-4 py-6 sm:px-6 sm:py-8 lg:px-8">
         {children}
       </main>
     </div>

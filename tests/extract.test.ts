@@ -99,3 +99,73 @@ test("content that does not match the extension is rejected", async () => {
 test("empty files give a readable error", async () => {
   await assert.rejects(extractText(Buffer.from("  \n"), "empty.txt"), /No text found/);
 });
+
+test("a PowerPoint is read slide by slide, in order, with its speaker notes", async () => {
+  const JSZip = (await import("jszip")).default;
+  const zip = new JSZip();
+  const slide = (lines: string[]) =>
+    `<p:sld xmlns:a="a" xmlns:p="p"><p:cSld><p:spTree>${lines
+      .map((line) => `<a:p><a:r><a:t>${line}</a:t></a:r></a:p>`)
+      .join("")}</p:spTree></p:cSld></p:sld>`;
+  zip.file("[Content_Types].xml", "<Types/>");
+  zip.file("ppt/slides/slide2.xml", slide(["Products", "HDPE welding machines &amp; tools"]));
+  zip.file("ppt/slides/slide10.xml", slide(["Contact"]));
+  zip.file("ppt/slides/slide1.xml", slide(["Durel International"]));
+  zip.file("ppt/notesSlides/notesSlide2.xml", slide(["Mention the 2-year warranty", "2"]));
+  const buffer = Buffer.from(await zip.generateAsync({ type: "uint8array" }));
+
+  const text = await extractText(buffer, "deck.pptx");
+  assert.equal(
+    text,
+    "--- Slide 1 ---\nDurel International\n\n" +
+      "--- Slide 2 ---\nProducts\nHDPE welding machines & tools\nNotes: Mention the 2-year warranty\n\n" +
+      "--- Slide 10 ---\nContact"
+  );
+  await assert.rejects(extractText(Buffer.from("not a zip"), "deck.pptx"), ExtractionError);
+});
+
+/** A one-page PDF whose only content is a JPEG picture of the given lines: what a flattened brochure is. */
+async function makeImageOnlyPdf(lines: string[]) {
+  const { createCanvas } = await import("@napi-rs/canvas");
+  const canvas = createCanvas(1200, 400);
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, 1200, 400);
+  ctx.fillStyle = "#000000";
+  ctx.font = "48px sans-serif";
+  lines.forEach((line, i) => ctx.fillText(line, 60, 110 + i * 90));
+  const jpeg = canvas.toBuffer("image/jpeg");
+
+  const parts: (string | Buffer)[] = [];
+  const offsets: number[] = [];
+  let length = 0;
+  const add = (part: string | Buffer) => {
+    parts.push(part);
+    length += typeof part === "string" ? Buffer.byteLength(part, "latin1") : part.length;
+  };
+  const object = (n: number, body: string | (string | Buffer)[]) => {
+    offsets[n] = length;
+    add(`${n} 0 obj\n`);
+    for (const piece of Array.isArray(body) ? body : [body]) add(piece);
+    add("\nendobj\n");
+  };
+  const content = "q 600 0 0 200 0 0 cm /Im1 Do Q";
+  add("%PDF-1.4\n");
+  object(1, "<< /Type /Catalog /Pages 2 0 R >>");
+  object(2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>");
+  object(3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 200] /Resources << /XObject << /Im1 4 0 R >> >> /Contents 5 0 R >>");
+  object(4, [`<< /Type /XObject /Subtype /Image /Width 1200 /Height 400 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${jpeg.length} >>\nstream\n`, jpeg, "\nendstream"]);
+  object(5, `<< /Length ${content.length} >>\nstream\n${content}\nendstream`);
+  const xref = length;
+  add(`xref\n0 6\n0000000000 65535 f \n${offsets.slice(1).map((o) => `${String(o).padStart(10, "0")} 00000 n \n`).join("")}`);
+  add(`trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`);
+  return Buffer.concat(parts.map((p) => (typeof p === "string" ? Buffer.from(p, "latin1") : p)));
+}
+
+test("a PDF page that is only a picture of text is read with free OCR, and marked", { timeout: 120_000 }, async () => {
+  const pdf = await makeImageOnlyPdf(["HDPE Welding Machines", "Pipe sizes 63 to 630 mm"]);
+  const text = await extractText(pdf, "brochure.pdf");
+  assert.match(text, /^\[Page 1, read from an image: may contain reading errors\]/);
+  assert.match(text, /HDPE Welding Machines/i);
+  assert.match(text, /630/);
+});

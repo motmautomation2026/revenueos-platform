@@ -74,7 +74,10 @@ from validator import company_context, judge_companies
 
 MAX_EXTRA_ROUNDS = 2      # extra requests after round 0 (and per "try more")
 MAX_USER_RETRIES = 2      # how many times the human may choose "try more"
-TEST_TARGET = 40          # in test mode: more than one page, to force an extra round
+# In test mode: 40 = more than one page, to force an extra round. The platform's Staging switch
+# passes the person's own number as STAGING_COMPANIES (run_for.py).
+from quickicp import staging_number
+TEST_TARGET = staging_number("STAGING_COMPANIES", 40)
 OVERSAMPLE = 2            # real runs: ask for 2x the shortfall, since some will fail the judge
 
 

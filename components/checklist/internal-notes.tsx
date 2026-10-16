@@ -21,7 +21,7 @@ export function InternalNotes({ flags, camNotes }: { flags: unknown; camNotes: u
   const notes = asNotes(camNotes);
 
   return (
-    <details className="group rounded-xl border bg-muted/30 lg:sticky lg:top-18 print:hidden">
+    <details className="group rounded-xl border border-amber-500/40 bg-amber-500/5 print:hidden">
       <summary className="flex cursor-pointer list-none items-center gap-2 px-4 py-3 font-medium [&::-webkit-details-marker]:hidden">
         <Lock className="size-4 text-muted-foreground" aria-hidden />
         <span className="flex-1">Internal notes (MOTM only)</span>
@@ -36,7 +36,7 @@ export function InternalNotes({ flags, camNotes }: { flags: unknown; camNotes: u
             <p className="text-muted-foreground">No flags raised.</p>
           ) : (
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[28rem] text-left align-top">
+              <table className="w-full min-w-[36rem] text-left align-top">
                 <thead className="text-xs text-muted-foreground">
                   <tr className="border-b">
                     <th className="py-1.5 pr-2 font-medium">Type</th>

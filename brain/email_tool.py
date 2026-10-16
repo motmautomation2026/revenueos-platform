@@ -104,10 +104,12 @@ NEVER_SAY_DEFAULTS = ["guaranteed", "cheapest", "100%", "last chance"]
 EMAIL3_RULE = ("Email 3 is a polite final follow-up to our earlier emails: calm and helpful (e.g. a last useful "
                "idea, or an easy way to reply later). It must never use urgency or deadline wording ('last chance', "
                "'final chance', 'act now', 'hurry', 'don't miss out', 'limited time') in its subject, preheader or body.")
-# Every email is cold: the prospect has never spoken with us (prompt rule for all emails).
+# Every email is cold: the prospect has never spoken with us. One list, used by the prompt rule below
+# AND by the sample check (sample_problems), so the two can never drift apart.
+COLD_PHRASES = ["continuing our conversation", "as discussed", "following up on our call",
+                "great speaking with you", "as promised"]
 COLD_EMAIL_RULE = ("Every email is a cold email to someone who has never spoken with us. Never imply an earlier "
-                   "conversation, meeting, call or reply (e.g. 'continuing our conversation', 'as discussed', "
-                   "'following up on our call', 'great speaking with you', 'as promised').")
+                   "conversation, meeting, call or reply (e.g. " + ", ".join(f"'{p}'" for p in COLD_PHRASES) + ").")
 # Ordinary words the LLM may NOT put in its own never_say list: polite writing needs them ('feel free').
 # Code drops them from the LLM's list; our fixed NEVER_SAY_DEFAULTS are never dropped.
 ORDINARY_WORDS = ["free", "help", "easy", "quick", "simple"]
@@ -464,7 +466,7 @@ def campaign_reference(customer: str) -> tuple[str, str]:
 def smtp_settings() -> dict:
     """Mailbox details, only for a brand-new client (no CLIENT_REFERENCE yet)."""
     check_settings("SMTP_HOST", "SMTP_PORT", "SMTP_SECURITY", "SMTP_USERNAME", "SMTP_PASSWORD", "SMTP_DISPLAY_NAME")
-    return {
+    settings = {
         "host": os.getenv("SMTP_HOST"),
         "security_mode": os.getenv("SMTP_SECURITY"),
         "port": int(os.getenv("SMTP_PORT")),
@@ -473,6 +475,108 @@ def smtp_settings() -> dict:
         "email_address": os.getenv("SMTP_USERNAME"),
         "sender_display_name": os.getenv("SMTP_DISPLAY_NAME"),
     }
+    if os.getenv("SMTP_IMAP_HOST"):
+        # Lets the tool read replies. The IMAP login defaults to the SMTP one.
+        settings.update({"imap_host": os.getenv("SMTP_IMAP_HOST"), "imap_port": 993, "imap_security_mode": "IMPLICIT_TLS"})
+    return settings
+
+
+def with_sender(body: dict) -> dict:
+    """
+    The request as it is SENT. A customer whose own mailbox details were handed to this process
+    (run_for.py, from the platform's checklist) gets them added here, at send time only, next to
+    client_reference: the tool connects the mailbox on the first campaign and updates it after
+    that. The request that is saved and resent therefore never holds the mailbox password.
+    """
+    if "smtp" in body or not os.getenv("SMTP_HOST"):
+        return body
+    return {**body, "smtp": smtp_settings()}
+
+
+def without_password(text: str) -> str:
+    """A tool reply can echo what it was sent: never let the mailbox password into a message or a log."""
+    password = os.getenv("SMTP_PASSWORD")
+    return text.replace(password, "********") if password else text
+
+
+# ================= STANDARD OR HYPER-PERSONALIZED (code decides) =================
+
+HYPER, STANDARD = "HYPER_PERSONALIZED", "STANDARD"
+THIN_SHARE = 0.5          # more than this share of thin recipients -> the whole campaign goes STANDARD
+
+
+def is_thin(recipient: dict) -> bool:
+    """Too little to write a personal email from: no name or company, or none of title / industry / website."""
+    return (not (recipient.get("first_name") and recipient.get("company"))
+            or not any(recipient.get(key) for key in ("title", "company_industry", "company_website")))
+
+
+def choose_campaign_type(recipients: list[dict], wanted: str | None = None) -> tuple[str, str]:
+    """
+    (campaign type, the reason in plain words). Code decides, never the LLM.
+        wanted STANDARD (the customer's email style, EMAIL_CAMPAIGN_TYPE)  -> STANDARD
+        more than THIN_SHARE of the recipients are thin                    -> STANDARD (the tool would send
+                                                                              them the plain email anyway)
+        otherwise                                                          -> HYPER_PERSONALIZED
+    """
+    wanted = (wanted or os.getenv("EMAIL_CAMPAIGN_TYPE") or HYPER).strip().upper()
+    thin = sum(1 for recipient in recipients if is_thin(recipient))
+    if wanted == STANDARD:
+        return STANDARD, "This customer's email style is: the same email for everyone."
+    if recipients and thin > len(recipients) * THIN_SHARE:
+        return STANDARD, (f"{thin} of {len(recipients)} recipients have too few details for a personal email, "
+                          "so everyone gets the same email.")
+    if thin:
+        return HYPER, f"{thin} of {len(recipients)} recipients have too few details and get the plain version."
+    return HYPER, ""
+
+
+def campaign_kind(body: dict) -> dict:
+    """{'type', 'note'} of a built request. Read from the request itself, so it is the same on every later run."""
+    kind = body.get("campaign_type") or STANDARD
+    chosen, note = choose_campaign_type(body.get("recipients") or [], kind)
+    return {"type": kind, "note": note if chosen == kind else ""}
+
+
+def fill(text: str, recipient: dict) -> str:
+    """A reference text with the recipient's own values in place of {{first_name}} and {{company}}."""
+    for name in ("first_name", "last_name", "company", "title"):
+        text = text.replace("{{" + name + "}}", str(recipient.get(name) or ""))
+    return text
+
+
+def preview(body: dict) -> list[dict]:
+    """A STANDARD campaign's emails as its first recipient will read them (the tool writes no samples for it)."""
+    first = (body.get("recipients") or [{}])[0]
+    who = f"{first.get('first_name') or 'the first recipient'} at {first.get('company') or 'their company'}"
+    return [{"email": number, "for": who, "subject": fill(email.get("subject") or "", first),
+             "text": plain_text(fill(email.get("body_html") or "", first))}
+            for number, email in enumerate(body.get("emails") or [], start=1)]
+
+
+SAMPLE_PEOPLE = 4         # how many people the tool writes sample emails for (HYPER only)
+
+
+def pick_samples(recipients: list[dict], n: int = SAMPLE_PEOPLE) -> list[str]:
+    """
+    The emails of the people the tool writes samples for. Code only, deterministic (same input, same output).
+    People with enough details first (not is_thin); then greedy: each next pick differs most from those
+    already picked: a new company first, then a new title, then a new city. Ties keep the input order.
+    Fewer than 3 recipients -> all of them.
+    """
+    if len(recipients) < 3:
+        return [r["email"] for r in recipients]
+    pool = sorted(recipients, key=is_thin)          # stable: thin people last, input order kept otherwise
+    picked: list[dict] = []
+    while pool and len(picked) < n:
+        def difference(person: dict) -> tuple:
+            seen = lambda key: {(p.get(key) or "").strip().lower() for p in picked}
+            new = lambda key: (person.get(key) or "").strip().lower() not in seen(key)
+            return (not is_thin(person), new("company"), new("title"), new("city"))
+        best = max(pool, key=difference)            # max keeps the FIRST of equals: input order breaks ties
+        picked.append(best)
+        pool.remove(best)
+    return [p["email"] for p in picked]
 
 
 def build_launch_request(rows: list[dict], *, understanding: dict, work_order: dict,
@@ -484,17 +588,20 @@ def build_launch_request(rows: list[dict], *, understanding: dict, work_order: d
     """
     check_settings("EMAIL_TOOL_USER_EMAIL")
     customer = understanding.get("customer_name", "Customer")
-    workspace = (os.getenv("TEST_WORKSPACE_NAME") or customer) if TEST_MODE else customer
+    # EMAIL_WORKSPACE_NAME (run_for.py: the platform's customer name) never changes between months;
+    # the understanding's name can, and the tool refuses a different user block for the same account.
+    workspace = ((os.getenv("TEST_WORKSPACE_NAME") or customer) if TEST_MODE
+                 else (os.getenv("EMAIL_WORKSPACE_NAME") or customer))
     reference, run_tag = campaign_reference(customer)
     content = write() if write else write_content(understanding=understanding, work_order=work_order)
     pairs = recipients_for(rows, run_tag)
 
+    recipients = [recipient for _, recipient in pairs]
+    kind, _ = choose_campaign_type(recipients)
     body = {
         "reference": reference,
-        "campaign_type": "HYPER_PERSONALIZED",
         "user": {"email": os.getenv("EMAIL_TOOL_USER_EMAIL"), "workspace_name": workspace, "role": "ADMIN"},
-        "objective": {**content.objective.model_dump(), "email_format": "TEXT"},
-        "recipients": [recipient for _, recipient in pairs],
+        "recipients": recipients,
         "campaign": {"name": content.campaign_name, "description": content.campaign_description},
         "emails": [email.model_dump() for email in content.emails],
         "schedule": {
@@ -505,6 +612,15 @@ def build_launch_request(rows: list[dict], *, understanding: dict, work_order: d
             "daily_limit": DAILY_LIMIT,
         },
     }
+    if kind == HYPER:
+        # The emails are then reference emails; the tool rewrites each one for every recipient.
+        body["campaign_type"] = HYPER
+        body["objective"] = {**content.objective.model_dump(), "email_format": "TEXT"}
+        # Saved once with the request (the runner's free_call 'request'): the picks never change after a crash.
+        body["sample_recipients"] = pick_samples(recipients)
+    else:
+        # Everyone gets these emails as written. Stored as a DRAFT: a person approves before it starts.
+        body["auto_start"] = False
     if os.getenv("CLIENT_REFERENCE"):
         body["client_reference"] = os.getenv("CLIENT_REFERENCE")    # existing account: no smtp
     else:
@@ -539,6 +655,188 @@ def campaign_url(state: dict, action: str) -> str:
             f"campaigns/{state['campaign_id']}/{action}")
 
 
+# ---- The samples / feedback / approve contract: every field name and path in ONE place ----
+# (agreed with the email tool's developer; a rename there is a one-line edit here)
+
+FEEDBACK_ACTION, SAMPLES_ACTION, APPROVE_ACTION = "feedback", "samples", "approve"
+CHANGED = "SAMPLES CHANGED: "             # error prefix, so the ledger row shows a 409 (never resent)
+REFUSED = "FEEDBACK REFUSED: "            # error prefix: the tool did not take the note (never counted as a round)
+
+# The tool's error codes ({"error": {"code", "message", "request_id", "details"}}) -> what the Brain does.
+CHANGED_CODES = {"approve": {"batch_not_latest", "approval_stale"},          # read samples again, ask again
+                 "feedback": {"batch_not_latest", "conflict"}}
+FEEDBACK_REFUSALS = {                                                         # ask again; NOT a round
+    "feedback_too_long": "The feedback is too long for the email tool (all notes together must stay under "
+                         "4000 characters). Give a shorter note, or answer yes or no.",
+    "validation_error": "The email tool did not accept that note (empty or over 1000 characters). "
+                        "Give a valid note, or answer yes or no.",
+    "preview_budget_exhausted": "The daily sample limit of the email tool is reached: try feedback again "
+                                "tomorrow, or answer yes or no.",
+}
+FEEDBACK_STOPS = {"state_conflict": "STOPPED: the campaign is no longer a DRAFT in the email tool, so feedback "
+                                    "cannot be sent (state_conflict). Check the campaign in the app."}
+
+
+class SamplesChanged(ToolError):
+    """The samples the person saw are no longer the latest (409). Never approve them; never resend the call."""
+
+    def __init__(self, message: str):
+        super().__init__(CHANGED + message)
+
+
+class FeedbackRefused(ToolError):
+    """The tool did not take the note (422 / 429). The person is asked again; it is not a feedback round."""
+
+    def __init__(self, message: str):
+        super().__init__(REFUSED + message)
+
+
+def error_code(reply: dict) -> str | None:
+    """The tool's error code: reply['error']['code'] (None when there is none)."""
+    error = reply.get("error") if isinstance(reply, dict) else None
+    return error.get("code") if isinstance(error, dict) else None
+
+
+def refusal(call: str, status: int, reply: dict) -> ToolError:
+    """
+    The exception for a refused 'feedback' or 'approve' (status >= 400). ONE mapping, used by the real
+    tools and the selftest fakes alike:
+        SamplesChanged    batch_not_latest, approval_stale (approve) / batch_not_latest, conflict (feedback)
+        FeedbackRefused   feedback_too_long, validation_error, preview_budget_exhausted (feedback)
+        ToolError         anything else, e.g. state_conflict, previews_incomplete: the task fails (retry/skip/stop)
+    """
+    code = error_code(reply)
+    if code in CHANGED_CODES.get(call, set()):
+        return SamplesChanged(f"{call} refused ({status} {code}): the samples changed. Read them again.")
+    if call == "feedback" and code in FEEDBACK_REFUSALS:
+        return FeedbackRefused(FEEDBACK_REFUSALS[code])
+    if call == "feedback" and code in FEEDBACK_STOPS:
+        return ToolError(FEEDBACK_STOPS[code])
+    text = APPROVE_MESSAGES.get(code) if call == "approve" else None
+    return ToolError(f"{call.capitalize()} rejected ({status} {code or ''}). " + (text or str(reply)[:300]))
+
+
+def samples_shape(reply: dict) -> str:
+    """'new' (sample batches: feedback rounds possible) or 'old' (a flat samples list, no batch)."""
+    # shortcut: old samples shape still supported, remove once the email tool ships batch_id.
+    # The KEY counts, not its value: status 'none' has batch_id null and is still the new shape.
+    return "new" if "batch_id" in reply or "recipients" in reply else "old"
+
+
+def batch_of(reply: dict) -> dict:
+    """{'batch_id', 'config_digest'} of a samples reply (None for the old shape)."""
+    return {"batch_id": reply.get("batch_id"), "config_digest": reply.get("config_digest")}
+
+
+def feedback_body(batch_id: str, text: str) -> dict:
+    return {"batch_id": batch_id, "feedback": text}
+
+
+def approve_body(batch_id: str | None, config_digest: str | None) -> dict | None:
+    """The approve body: the exact version the person saw; None (no body) for the old shape."""
+    return {"batch_id": batch_id, "config_digest": config_digest} if batch_id else None
+
+
+def new_batch_id(reply: dict) -> str | None:
+    """The batch the tool is writing after feedback (a duplicate reply names the same one)."""
+    return reply.get("batch_id")
+
+
+# The tool puts the preheader as the FIRST element of body_html (their rendering.py inject_preheader):
+# <div style="display:none;...">TEXT&zwnj;&nbsp;&zwnj;&nbsp;...</div><p>Hi Name,</p>...
+PREHEADER_DIV = re.compile(r'^\s*<div\s+style="display:\s*none[^"]*"\s*>(.*?)</div>', re.IGNORECASE | re.DOTALL)
+
+
+def split_preheader(body_html: str) -> tuple[str, str]:
+    """
+    (preheader text, the rest of body_html). The preheader is the content of a LEADING hidden
+    <div style="display:none...">; without one it is "" and body_html is returned as it is.
+    The &zwnj; / &nbsp; padding is removed from the preheader text.
+    """
+    match = PREHEADER_DIV.match(body_html or "")
+    if not match:
+        return "", body_html or ""
+    text = plain_text(match.group(1)).replace("\u200c", "").replace("\u00a0", " ")
+    return " ".join(text.split()), body_html[match.end():]
+
+
+def sample_people(reply: dict) -> list[dict]:
+    """
+    The samples as [{'name', 'company', 'title', 'emails': [{number, state, subject, preheader, body_html,
+    failure_codes}]}], one entry per person, in the tool's order. The old flat list is grouped the same way.
+    'preheader' is taken out of body_html (split_preheader); a separate preheader field wins if one appears.
+    """
+    def email(e: dict, number: int | None) -> dict:
+        preheader, rest = split_preheader(e.get("body_html") or "")
+        return {"number": number, "state": e.get("state"), "subject": e.get("subject"),
+                "preheader": e.get("preheader") or preheader, "body_html": rest,
+                "fallback_used": e.get("fallback_used"), "failure_codes": e.get("failure_codes") or []}
+    if samples_shape(reply) == "new":
+        return [{"name": r.get("first_name") or "", "company": r.get("company") or "", "title": r.get("title") or "",
+                 "emails": [email(e, e.get("email_number")) for e in r.get("emails") or []]}
+                for r in reply.get("recipients") or []]
+    return [{"name": s.get("recipient_first_name") or "", "company": s.get("recipient_company") or "", "title": "",
+             "emails": [email(s, s.get("email_number"))]}
+            for s in reply.get("samples") or []]
+
+
+def who(person: dict) -> str:
+    """'Rahul, CTO at Acme' (or 'Rahul at Acme' with no title)."""
+    return f"{person['name']}{', ' + person['title'] if person['title'] else ''} at {person['company']}"
+
+
+def flat_samples(reply: dict) -> list[dict]:
+    """What the person is shown, for both shapes: [{'for', 'email', 'subject', 'preheader', 'text'}], per person."""
+    return [{"for": who(person), "email": e["number"], "subject": e["subject"], "preheader": e["preheader"],
+             "text": plain_text(e["body_html"])}
+            for person in sample_people(reply) for e in person["emails"]]
+
+
+def compact(text: str) -> str:
+    return " ".join((text or "").split()).lower()
+
+
+def sample_problems(reply: dict, body: dict) -> list[str]:
+    """
+    Our checks on every sample of a NEW-shape batch (code, no LLM). One readable line per problem, e.g.
+    "Rahul (email 2): never_say 'guaranteed' in body". Empty = nothing found.
+        never_say    NEVER_SAY_DEFAULTS + the request's never_say, whole phrases: subject, preheader AND body
+        cold         no earlier-conversation wording (COLD_PHRASES): subject, preheader AND body
+        CTA          the request's exact CTA question is in the BODY (case and spacing ignored)
+        must_mention every phrase is in the BODY (case ignored)
+        greeting     the BODY starts with 'Hi <first_name>,' (skipped only when the tool gave no first name)
+        tool state   state exactly 'OK' (not PENDING / FAILED) and no failure_codes
+    """
+    objective = body.get("objective") or {}
+    never_say = list(dict.fromkeys(p.strip().lower() for p in NEVER_SAY_DEFAULTS + (objective.get("never_say") or [])
+                                   if p.strip()))
+    problems = []
+    for person in sample_people(reply):
+        for e in person["emails"]:
+            where = f"{person['name'] or person['company'] or 'a recipient'} (email {e['number']})"
+            text = plain_text(e["body_html"])
+            fields = {"subject": e["subject"] or "", "preheader": e["preheader"] or "", "body": text}
+            for field, value in fields.items():
+                for phrase in never_say:
+                    if phrase_pattern(phrase).search(value):
+                        problems.append(f"{where}: never_say '{phrase}' in {field}")
+                for phrase in COLD_PHRASES:
+                    if phrase_pattern(phrase).search(value):
+                        problems.append(f"{where}: implies an earlier conversation ('{phrase}') in {field}")
+            if objective.get("cta") and compact(objective["cta"]) not in compact(text):
+                problems.append(f"{where}: the call to action '{objective['cta']}' is missing")
+            for phrase in objective.get("must_mention") or []:
+                if phrase.strip() and phrase.strip().lower() not in text.lower():
+                    problems.append(f"{where}: must mention '{phrase}'")
+            if "{{" in text or "{{" in (e["subject"] or "") or "{{" in (e["preheader"] or ""):
+                problems.append(f"{where}: a placeholder like '{{{{first_name}}}}' was left in")
+            if person["name"] and not text.startswith(f"Hi {person['name']},"):
+                problems.append(f"{where}: does not start with 'Hi {person['name']},'")
+            if e["state"] != "OK" or e["failure_codes"]:
+                problems.append(f"{where}: the tool reports state '{e['state']}', issues {e['failure_codes']}")
+    return problems
+
+
 # ================= STEP 1: LAUNCH =================
 
 def send_launch(body: dict, wait_seconds: int = 20) -> tuple[int, dict]:
@@ -547,10 +845,11 @@ def send_launch(body: dict, wait_seconds: int = 20) -> tuple[int, dict]:
     PENDING_RETRIES times. Same reference + same content is safe to resend (duplicate: true).
     """
     url = os.getenv("EMAIL_TOOL_URL")
+    payload = with_sender(body)
     for attempt in range(1, PENDING_RETRIES + 1):
-        status, reply = call_tool("POST", url, body)
+        status, reply = call_tool("POST", url, payload)
         if status >= 400:
-            raise ToolError(f"Launch rejected ({status}): {json.dumps(reply)[:500]}")
+            raise ToolError(f"Launch rejected ({status}): {without_password(json.dumps(reply))[:500]}")
         if reply.get("start_status") != "pending":
             break
         print(f"  Audience not ready yet (pending), sending the same request again in {wait_seconds}s "
@@ -558,7 +857,12 @@ def send_launch(body: dict, wait_seconds: int = 20) -> tuple[int, dict]:
         time.sleep(wait_seconds)
     start = reply.get("start_status")
     if start in ("blocked", "failed", "pending") or not reply.get("campaign_id"):
-        raise ToolError(f"Launch did not complete: start_status={start}, error={reply.get('start_error')}")
+        raise ToolError("Launch did not complete: "
+                        + without_password(f"start_status={start}, error={reply.get('start_error')}"))
+    if reply.get("mailbox_status") == "failed":
+        # The account's earlier mailbox is used instead; the reason is kept with the reply.
+        print("  WARNING: the mailbox could not be connected or updated: "
+              + without_password(str(reply.get("mailbox_error"))))
     return status, reply
 
 
@@ -576,8 +880,11 @@ def plain_text(body_html: str) -> str:
 APPROVE_MESSAGES = {
     "previews_incomplete": "Samples are still being written. Run 'samples' again, then approve.",
     "previews_failed": "The sample failed and cannot be approved. Check the campaign in the app.",
-    "approval_stale": "Content changed after the samples were made. Run 'samples' again.",
+    "approval_stale": "The campaign settings changed after these samples were made. Review the new samples.",
     "preflight_failed": "Something blocks the start; see the reason above.",
+    "samples_not_ready": "Samples are not ready yet. Run 'samples' again, then approve.",
+    # 409s handled by asking again (email_tool.refusal -> SamplesChanged), named here for the messages
+    "batch_not_latest": "These samples are no longer the latest version. Review the new samples.",
 }
 
 
@@ -619,13 +926,14 @@ def run_samples(campaign: dict, sleep=time.sleep) -> dict:
             break
         print("  Samples still generating, checking again in 5s...")
         sleep(5)
-    print(f"\nSamples status: {samples_status} | approval: {reply.get('approval_status')}\n")
-    for sample in reply.get("samples", []):
-        print(f"--- Email {sample.get('email_number')} | state {sample.get('state')} | "
-              f"for {sample.get('recipient_first_name')} at {sample.get('recipient_company')} | "
-              f"fallback: {sample.get('fallback_used')} | issues: {sample.get('failure_codes')}")
-        print(f"Subject: {sample.get('subject')}\n")
-        print(plain_text(sample.get("body_html")) + "\n")
+    print(f"\nSamples status: {samples_status} | approval: {reply.get('approval_status')}"
+          + (f" | batch {reply.get('batch_id')}" if samples_shape(reply) == "new" else "") + "\n")
+    for person in sample_people(reply):
+        for sample in person["emails"]:
+            print(f"--- Email {sample['number']} | state {sample['state']} | for {who(person)} | "
+                  f"fallback: {sample['fallback_used']} | issues: {sample['failure_codes']}")
+            print(f"Subject: {sample['subject']}" + (f"\nPreheader: {sample['preheader']}" if sample["preheader"] else "") + "\n")
+            print(plain_text(sample["body_html"]) + "\n")
     print("Approving happens only through the orchestrator: python orchestrator.py decisions, then answer "
           "the email_approve decision.")
     return reply

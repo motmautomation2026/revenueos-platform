@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import Ajv from "ajv";
-import { buildFilledChecklistBlock, buildDocumentBlock } from "../lib/agents/build-inputs";
+import { SOURCE_RULES, buildFilledChecklistBlock, buildDocumentBlock, laterStepFiles } from "../lib/agents/build-inputs";
+import { DOC_TYPES, TRUST, guessDocType, trustOf } from "../lib/files/rules";
 import { normalize } from "../lib/agents/normalize";
 import { buildPlanDocument, formatRange } from "../lib/plan/document";
 import { renderPlanHtml } from "../lib/plan/render-html";
@@ -92,9 +93,11 @@ test("agent inputs follow the document and checklist block formats", () => {
   assert.equal(
     block,
     "CUSTOMER: Example Co\nENGAGEMENT TYPE: Full funnel\n\n" +
-      "=== BD HANDOVER FORM (h.pdf) ===\nHandover text\n\n" +
-      "=== BD PROPOSAL (p.pdf) ===\nProposal text\n\n" +
-      "=== OTHER DOCUMENT (misc.txt) ===\nMisc"
+      SOURCE_RULES +
+      "\n\n" +
+      `=== BD HANDOVER FORM (h.pdf) ===\n[How to use: ${TRUST.agreed.rule}]\nHandover text\n\n` +
+      `=== BD PROPOSAL (p.pdf) ===\n[How to use: ${TRUST.agreed.rule}]\nProposal text\n\n` +
+      `=== OTHER DOCUMENT (misc.txt) ===\n[How to use: ${TRUST.reference.rule}]\nMisc`
   );
   assert.equal(
     buildFilledChecklistBlock([
@@ -104,4 +107,89 @@ test("agent inputs follow the document and checklist block formats", () => {
     "=== FILLED CHECKLIST ===\nQ-1 [Business basics] Legal name?\nAnswer: Example Pvt Ltd\n" +
       "Q-2 [Buyers] Who decides?\nAnswer: (not answered)"
   );
+});
+
+test("a password answer is never sent to the AI", () => {
+  const block = buildFilledChecklistBlock([
+    { code: "Q-41", category: "Email sender setup", question: "What is the SMTP host?", answer: "smtp.example.com" },
+    { code: "Q-42", category: "Email sender setup", question: "What is the SMTP password (or app password)?", answer: "s3cret-value" },
+    { code: "Q-43", category: "Email sender setup", question: "What is the SMTP password for the backup mailbox?", answer: "" },
+  ]);
+  assert.ok(block.includes("Answer: smtp.example.com"));
+  assert.ok(!block.includes("s3cret-value"));
+  assert.ok(block.includes("Q-42 [Email sender setup] What is the SMTP password (or app password)?\nAnswer: (provided; kept hidden)"));
+  assert.ok(block.endsWith("Answer: (not answered)"));
+});
+
+test("each kind of document tells the agents how far to trust it", () => {
+  const block = buildDocumentBlock({ customer_name: "Example Co", engagement_type: "Full funnel" }, [
+    { doc_type: "email_templates", file_name: "old-emails.docx", extracted_text: "Dear sir, 50% off this week" },
+    { doc_type: "brochure", file_name: "brochure.pdf", extracted_text: "The best welding machines in India" },
+    { doc_type: "bd_proposal", file_name: "p.pdf", extracted_text: "Proposal text" },
+  ]);
+  // Agreed documents first, the customer's own material next; style examples are not given to planning.
+  assert.ok(block.indexOf("BD PROPOSAL") < block.indexOf("BROCHURE"));
+  assert.match(block, /=== BROCHURE \(brochure\.pdf\) ===\n\[How to use: The customer's own material.*not commitments/);
+  assert.ok(!block.includes("EXISTING EMAIL TEMPLATES"));
+  assert.match(TRUST.style.rule, /Never take facts/);
+  assert.match(block, /write 'not stated'/);
+  // With no documents there is nothing to explain.
+  assert.ok(!buildDocumentBlock({ customer_name: "X", engagement_type: "Full funnel" }, []).includes(SOURCE_RULES));
+});
+
+test("every document type has a trust level, and the database update adds the new ones", () => {
+  for (const type of DOC_TYPES) assert.ok(TRUST[trustOf(type.value)], type.value);
+  assert.equal(trustOf("bd_handover"), "agreed");
+  assert.equal(trustOf("product_catalogue"), "customer");
+  assert.equal(trustOf("email_templates"), "style");
+  const sql = readFileSync("supabase/migrations/0001_init.sql", "utf8") + readFileSync("supabase/migrations/0010_more_document_types.sql", "utf8");
+  for (const type of DOC_TYPES) assert.ok(sql.includes(`'${type.value}'`), type.value);
+});
+
+test("a document's type is guessed from its file name", () => {
+  assert.equal(guessDocType("Durel Product Catalogue 2026.pdf"), "product_catalogue");
+  assert.equal(guessDocType("company-profile.pdf"), "company_profile");
+  assert.equal(guessDocType("Brochure_HDPE.pdf"), "brochure");
+  assert.equal(guessDocType("Case Study - Water Utility.docx"), "case_study");
+  assert.equal(guessDocType("cold email templates.docx"), "email_templates");
+  assert.equal(guessDocType("Sales deck.pptx"), "presentation");
+  assert.equal(guessDocType("BD Handover.pdf"), "bd_handover");
+  assert.equal(guessDocType("notes.txt"), "other");
+});
+
+test("planning agents read a large customer document as its fact sheet, and never the email templates", () => {
+  const long = "x".repeat(25_000);
+  const block = buildDocumentBlock({ customer_name: "Example Co", engagement_type: "Full funnel" }, [
+    { doc_type: "bd_proposal", file_name: "p.pdf", extracted_text: "Proposal text" },
+    { doc_type: "product_catalogue", file_name: "catalogue.pdf", extracted_text: long, ai_summary: "Products and services\nCNC router R-630 (page 4)" },
+    { doc_type: "email_templates", file_name: "old-emails.docx", extracted_text: "Dear sir, 50% off" },
+  ]);
+  assert.match(block, /=== PRODUCT CATALOGUE \(catalogue\.pdf\): FACT SHEET ===\n\[How to use: .*fact sheet of a 25,000-character document/);
+  assert.ok(block.includes("CNC router R-630 (page 4)"));
+  assert.ok(!block.includes(long), "the full catalogue is not repeated");
+  assert.ok(!block.includes("50% off") && !block.includes("EXISTING EMAIL TEMPLATES"), "email templates are kept for the email writer only");
+  assert.ok(block.includes("Proposal text"), "agreed documents are always read in full");
+});
+
+test("the agents' instructions name the customer's own material as a source", () => {
+  const checklist = readFileSync("prompts/checklist.md", "utf8");
+  const diagnosis = readFileSync("prompts/diagnose.md", "utf8");
+  assert.match(checklist, /customer's own material \(company profile, product catalogue, brochure, presentation, case study\)/);
+  assert.match(diagnosis, /"catalogue", "brochure", "presentation:<slide>", "case_study"/);
+  assert.match(diagnosis, /marketing claims are not facts/);
+});
+
+test("strategy and execution do not read the customer's material again", () => {
+  const files = [
+    { doc_type: "bd_proposal" as const, file_name: "p.pdf", extracted_text: "Proposal text" },
+    { doc_type: "cam_notes" as const, file_name: "cam.txt", extracted_text: "CAM text" },
+    { doc_type: "product_catalogue" as const, file_name: "c.pdf", extracted_text: "Catalogue text" },
+    { doc_type: "brochure" as const, file_name: "b.pdf", extracted_text: "Brochure text" },
+    { doc_type: "other" as const, file_name: "o.txt", extracted_text: "Other text" },
+  ];
+  assert.deepEqual(laterStepFiles(files).map((f) => f.file_name), ["p.pdf", "cam.txt", "o.txt"]);
+  const pipeline = readFileSync("lib/agents/pipeline.ts", "utf8");
+  assert.match(pipeline, /case "strategy":\n\s+return `\$\{inputs\.later\}/);
+  assert.match(pipeline, /case "execution":\n\s+return `\$\{inputs\.later\}/);
+  assert.match(pipeline, /case "diagnosis":\n\s+return `\$\{inputs\.diagnosis\}/);
 });

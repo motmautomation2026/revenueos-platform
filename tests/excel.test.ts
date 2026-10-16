@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import ExcelJS from "exceljs";
+import { SECRET_PROVIDED, answerForSharing, isSecretQuestion } from "../lib/checklist-secrets";
 import { buildChecklistWorkbook, parseChecklistWorkbook, questionNumber } from "../lib/files/excel";
 
 const items = [
@@ -48,4 +49,16 @@ test("question numbers are read from several spellings", () => {
   assert.equal(questionNumber("q 7"), 7);
   assert.equal(questionNumber("3"), 3);
   assert.equal(questionNumber("Question"), null);
+});
+
+test("secret questions are recognised by their wording, and their answers are masked for sharing", () => {
+  for (const q of ["What is the SMTP password (or app password)?", "Mailbox Password", "API key for the CRM?", "Authentication token"]) {
+    assert.ok(isSecretQuestion(q), q);
+  }
+  for (const q of ["What is the SMTP host?", "What is the SMTP username?", "Who passes leads to sales?", "Sender email address"]) {
+    assert.ok(!isSecretQuestion(q), q);
+  }
+  assert.equal(answerForSharing("SMTP password?", "abc"), SECRET_PROVIDED);
+  assert.equal(answerForSharing("SMTP password?", "  "), null);
+  assert.equal(answerForSharing("SMTP host?", "smtp.example.com"), "smtp.example.com");
 });

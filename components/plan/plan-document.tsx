@@ -143,30 +143,33 @@ function BlockView({ block }: { block: Block }) {
   }
 }
 
-export const sectionAnchor = (part: Part, sectionId: string) => `${part.id}-${sectionId}`;
-
-export function PlanParts({ parts }: { parts: Part[] }) {
+/**
+ * `screen` shows parts as cards with link anchors (the page shows one part at a time).
+ * `print` is the plain flowing document used for PDF, with every part and no anchors.
+ */
+export function PlanParts({ parts, mode = "screen" }: { parts: Part[]; mode?: "screen" | "print" }) {
+  const screen = mode === "screen";
   return (
-    <div className="grid gap-12">
+    <div className={screen ? "grid gap-4" : "grid gap-12"}>
       {parts.map((part) => (
         <div
           key={part.id}
           className={cn(
-            "grid gap-8",
-            part.internal &&
-              "rounded-xl border border-amber-500/40 bg-amber-500/5 p-4 sm:p-6 print:break-before-page"
+            screen ? "grid gap-4" : "grid gap-8",
+            !screen && part.internal && "rounded-xl border border-amber-500/40 bg-amber-500/5 p-4 print:break-before-page"
           )}
         >
-          <h2 id={part.id} className="scroll-mt-20 border-b pb-2 text-xl font-semibold tracking-tight">
-            {part.title}
-          </h2>
+          {!screen && <h2 className="border-b pb-2 text-xl font-semibold tracking-tight">{part.title}</h2>}
           {part.sections.map((section) => (
             <section
               key={section.id}
-              id={sectionAnchor(part, section.id)}
-              className="grid scroll-mt-20 gap-3"
+              className={cn(
+                "grid gap-3",
+                screen && "rounded-xl border p-4 sm:p-5",
+                screen && part.internal && "border-amber-500/40 bg-amber-500/5"
+              )}
             >
-              <h3 className="text-base font-semibold">{section.title}</h3>
+              <h3 className={screen ? "text-lg font-semibold" : "text-base font-semibold"}>{section.title}</h3>
               {section.blocks.map((block, i) => (
                 <BlockView key={i} block={block} />
               ))}

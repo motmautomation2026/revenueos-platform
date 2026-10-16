@@ -78,7 +78,7 @@ function getAgent(agent: AgentName) {
 }
 
 let openai: OpenAI | null = null;
-function getOpenAI() {
+export function getOpenAI() {
   if (!process.env.OPENAI_API_KEY) {
     throw new AgentError("OPENAI_API_KEY is not set on the server.");
   }

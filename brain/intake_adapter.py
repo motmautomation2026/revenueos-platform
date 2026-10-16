@@ -69,7 +69,9 @@ DEBUGGING
                                                     execution: this file copies, never computes
 """
 
+import contextlib
 import hashlib
+import io
 import json
 import os
 import re
@@ -152,9 +154,20 @@ def read_platform(reader: ReadOnly, project: str) -> dict:
 
 # ================= THE FOUR FIELDS (code) =================
 
+# The checklist may ask for a secret (e.g. the SMTP password of the customer's sending mailbox).
+# Such an answer must never reach data/intake_document.txt or the LLM. Same wording rule as the
+# platform (lib/checklist-secrets.ts): keep the two in step.
+SECRET_QUESTION = re.compile(
+    r"\b(pass\s?word|pass\s?code|app\s?password|secret\s?key|api\s?key|auth(?:entication)?\s?token)\b", re.I)
+SECRET_PROVIDED = "(provided; kept hidden)"
+
+
 def answer_of(item: dict) -> str | None:
-    """The customer's answer, else the prefilled answer marked as not confirmed, else None."""
+    """The customer's answer, else the prefilled answer marked as not confirmed, else None.
+    A secret answer (see SECRET_QUESTION) is replaced by SECRET_PROVIDED and never returned."""
     answer = (item.get("answer") or "").strip()
+    if SECRET_QUESTION.search(item.get("question") or ""):
+        return SECRET_PROVIDED if answer else None
     if answer:
         return answer
     prefilled = (item.get("prefilled_answer") or "").strip()
@@ -884,6 +897,70 @@ def selftest() -> bool:
         expect("a % is a share, not a count: '100% of contacts' -> no count; '100% of 250 contacts' -> 250",
                target_number("100% of contacts") is None and target_number("100% of 250 contacts") == 250
                and target_number("150-200 accounts") == 200)
+
+        # Plan rule: CAM data approval, Email Agent emails and Quickhowl calls list the contacts task DIRECTLY
+        def task(task_id, agent, output, types, deps, week=1, target="no numeric target"):
+            return SimpleNamespace(task_id=task_id, agent=agent, output_type=output, task_types=types,
+                                   depends_on=deps, week=week, target=target)
+
+        def plan_of(approval, calls, emails, contacts=("T4",)):
+            """The r6 / r7 shape: T4 contacts, T5 data approval, T6 calls, T7 emails, with the given depends_on."""
+            return [task("T1", "CAM", "coordination", ["requirements", "coordination"], []),
+                    task("T2", "Content & Training", "client_training", ["client_training", "content"], ["T1"]),
+                    task("T3", "QuickICP", "accounts", ["data_build"], ["T1"], target="150-200 accounts"),
+                    *[task(c, "QuickICP", "contacts", ["data_build"], ["T3"], target="250-350 contacts") for c in contacts],
+                    task("T5", "CAM", "coordination", ["data_approval", "coordination"], approval),
+                    task("T6", "Quickhowl", "calls", ["outreach"], calls, week=2, target="Calls to 250-350 contacts"),
+                    task("T7", "Email Agent", "emails", ["outreach"], emails, week=2, target="Emails to 250-350 contacts")]
+
+        def flagged(tasks):
+            return [e.split(" ")[0] for e in master_agent.contacts_dependency_errors(tasks)]
+        r6 = plan_of(["T2"], ["T4", "T5"], ["T6"])                     # anvixa r6: T5 on T2 only, T7 on T6 only
+        r6_errors = master_agent.contacts_dependency_errors(r6)
+        expect("plan rule (direct contacts dependency), r6 shape: T5 data approval (on T2 only) and T7 emails (on T6 "
+               "only) flagged; T6 calls (lists T4) fine; each error names T4 and says to add it",
+               flagged(r6) == ["T5", "T7"]
+               and r6_errors[0] == "T5 (CAM / data_approval) must list the QuickICP contacts task T4 directly in "
+                                   "depends_on (it approves those contacts); it now depends on T2 only. Add T4 to its "
+                                   "depends_on."
+               and r6_errors[1].startswith("T7 (Email Agent / emails) must list the QuickICP contacts task T4 directly"))
+        r7 = plan_of(["T4"], ["T5", "T2"], ["T6"])                     # anvixa r7: calls after approval, emails after calls
+        expect("plan rule, r7 shape: data approval lists the contacts task (fine); calls on the approval only and "
+               "emails on the calls only -> both flagged (strict: reaching it through another task is not enough)",
+               flagged(r7) == ["T6", "T7"])
+        good = plan_of(["T4"], ["T4", "T5"], ["T4", "T6"])
+        expect("plan rule: a correct plan (approval, calls and emails each list T4) -> no error",
+               master_agent.contacts_dependency_errors(good) == [])
+        two = plan_of(["T9"], ["T4", "T5"], ["T9", "T6"], contacts=("T4", "T9"))
+        two_bad = plan_of(["T2"], ["T4"], ["T6"], contacts=("T4", "T9"))
+        expect("plan rule with two contacts tasks: either one is enough; the error names both",
+               flagged(two) == [] and "the QuickICP contacts task one of T4, T9 directly" in
+               master_agent.contacts_dependency_errors(two_bad)[0])
+        none = [t for t in plan_of(["T2"], ["T5"], ["T6"]) if t.task_id != "T4"]
+        expect("plan rule with NO contacts task: data approval -> 'needs a QuickICP contacts task to approve'; calls / "
+               "emails only get the existing 'no earlier QuickICP task outputs contacts' error (not twice)",
+               master_agent.contacts_dependency_errors(none)
+               == ["T5 (CAM / data_approval) needs a QuickICP contacts task to approve: add one and list it in depends_on."])
+
+        # The same rule inside validate_plan, and its text in the RETRY prompt (fake LLM: no network, no model)
+        state = {"month_plan": SimpleNamespace(tasks=r6), "engagement_settings": {},
+                 "understanding": SimpleNamespace(motm_channels=[], model_dump_json=lambda indent=2: "{}"),
+                 "revenue_analysis": SimpleNamespace(model_dump_json=lambda indent=2: "{}"),
+                 "motm_context": "selftest", "plan_feedback": ""}
+        with contextlib.redirect_stdout(io.StringIO()):
+            checked = master_agent.validate_plan(state)
+        prompts, real_ask = [], master_agent.ask_llm
+        master_agent.ask_llm = lambda schema, prompt, name, timeout=None: prompts.append(prompt) or SimpleNamespace(tasks=[])
+        try:
+            master_agent.plan_month({**state, "plan_errors": checked["plan_errors"]})
+        finally:
+            master_agent.ask_llm = real_ask
+        retry = prompts[0].split("Your last plan failed these checks. Fix all of them:\n", 1)[-1] if prompts else ""
+        expect("validate_plan reports both r6 errors; the retry prompt (fake LLM) sends exactly that text, and the "
+               "planning rules tell the brain the rule up front",
+               r6_errors[0] in checked["plan_errors"] and r6_errors[1] in checked["plan_errors"]
+               and r6_errors[0] in retry and r6_errors[1] in retry
+               and "Quickhowl calls tasks list the QuickICP contacts task directly in depends_on" in prompts[0])
         revenue_selftest(expect, folder)
         llm_selftest(expect, raises)
     finally:

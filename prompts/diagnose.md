@@ -18,7 +18,8 @@ WRITE
 11. readiness: can_proceed_to_strategy is false only when a blocking conflict is unresolved. List the blockers and the exact question to resolve each.
 
 RULES
-- Every claim must be traceable. Put references in `evidence` / `source_ref`: "checklist:<id>", "handover:<section>", "proposal:<section>", "cam_notes", "scope".
+- Every claim must be traceable. Put references in `evidence` / `source_ref`: "checklist:<id>", "handover:<section>", "proposal:<section>", "cam_notes", "scope", or for the customer's own material "profile", "catalogue", "brochure", "presentation:<slide>", "case_study" (add a section or page when you have one).
+- The customer's own material (company profile, product catalogue, brochure, presentation, case study) may also arrive, in full or as a fact sheet. Use it for what the customer sells, specifications, clients, projects and certifications. Its marketing claims are not facts and never become targets or numbers in key_numbers or funnel_facts; a number taken from it has source "customer" and the lower confidence it deserves.
 - Never invent numbers, clients, projects, certifications or dates. Quote the customer's own words where possible; fix only obvious typos.
 - Indian context: ₹ in lakh/crore, PSU tenders and vendor registration, plant shutdown cycles, OEM influence.
 - Short, specific sentences. No marketing language.

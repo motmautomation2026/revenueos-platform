@@ -40,17 +40,15 @@ export default async function ChecklistPage({ params }: { params: Promise<{ id: 
       : null;
 
   return (
-    <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_22rem]">
-      <ChecklistForm
-        key={checklist.id}
-        projectId={project.id}
-        items={items ?? []}
-        submitted={checklist.status === "submitted"}
-        canReopen={project.status === "checklist_submitted"}
-        canRegenerate={project.status === "checklist_ready" || project.status === "checklist_submitted"}
-        countWarning={countWarning}
-      />
-      <InternalNotes flags={checklist.flags} camNotes={checklist.cam_notes} />
-    </div>
+    <ChecklistForm
+      key={checklist.id}
+      projectId={project.id}
+      items={items ?? []}
+      submitted={checklist.status === "submitted"}
+      canReopen={project.status === "checklist_submitted"}
+      canRegenerate={project.status === "checklist_ready" || project.status === "checklist_submitted"}
+      countWarning={countWarning}
+      internalNotes={<InternalNotes flags={checklist.flags} camNotes={checklist.cam_notes} />}
+    />
   );
 }

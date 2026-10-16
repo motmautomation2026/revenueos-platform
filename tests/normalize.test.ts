@@ -94,3 +94,23 @@ test("checklist schema: a sloppy but recoverable answer validates after repair",
   assert.equal(out.flags[0].handover_says, null);
   assert.deepEqual(out.cam_notes, []);
 });
+
+test("a checklist fact from the brochure or catalogue is filed as the customer's own material", async () => {
+  const { readFileSync } = await import("node:fs");
+  const schema = JSON.parse(readFileSync("schemas/checklist.schema.json", "utf8"));
+  const raw = JSON.stringify({
+    customer_name: "Example Co",
+    known_facts: [
+      { topic: "Product", fact: "Browser agent", source: "brochure", source_quote: "x" },
+      { topic: "Range", fact: "630 mm", source: "Product Catalogue", source_quote: "x" },
+      { topic: "Note", fact: "y", source: "signed contract", source_quote: "x" },
+      { topic: "Scope", fact: "z", source: "Proposal", source_quote: "x" },
+    ],
+    flags: [],
+    cam_notes: [],
+    checklist_items: [],
+  });
+  const { data } = normalize(raw, schema);
+  const sources = (data as { known_facts: { source: string }[] }).known_facts.map((f) => f.source);
+  assert.deepEqual(sources, ["customer_material", "customer_material", "other", "proposal"]);
+});

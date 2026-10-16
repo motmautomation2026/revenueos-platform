@@ -226,6 +226,9 @@ def target_for(task: dict, test_cap: int) -> int:
         a % target ('100% of T4 contacts')            -> percent_target: share x T4's achieved number
         TEST_MODE                                     -> min(target_number, test_cap)
         real                                          -> target_number
+    Then the platform's Staging limit, if the person set one for this customer (run_for.py):
+        STAGING_COMPANIES for an 'accounts' task, STAGING_PEOPLE for a 'contacts' task
+                                                      -> never more than that, in test OR real mode
     """
     from quickicp import TEST_MODE
     import os
@@ -241,7 +244,19 @@ def target_for(task: dict, test_cap: int) -> int:
         number = percent_target(task)[0]                  # '100% of T4 contacts': a share, resolved now
     if number is None:
         raise ToolError(f"STOPPED: {task['task_id']} target has no number: '{task['work_order'].get('target')}'.")
-    return min(number, test_cap) if TEST_MODE else number
+    target = min(number, test_cap) if TEST_MODE else number
+    limit = staging_limit(task)
+    return min(target, limit) if limit else target
+
+
+STAGING_LIMITS = {"accounts": "STAGING_COMPANIES", "contacts": "STAGING_PEOPLE"}
+
+
+def staging_limit(task: dict) -> int | None:
+    """The person's own limit for this kind of task in the platform's Staging mode, or None."""
+    import os
+    value = (os.getenv(STAGING_LIMITS.get(task.get("output_type") or "", "")) or "").strip()
+    return int(value) if value.isdigit() and int(value) > 0 else None
 
 
 def percent_target(task: dict) -> tuple[int, str]:

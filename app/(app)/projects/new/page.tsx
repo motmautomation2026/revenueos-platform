@@ -1,29 +1,20 @@
 "use client";
 
 import Link from "next/link";
-import { Controller, useForm } from "react-hook-form";
+import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { ArrowLeft } from "lucide-react";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { FormField } from "@/components/form-field";
-import { ENGAGEMENT_TYPES } from "@/lib/projects";
 import { newProjectSchema, type NewProjectInput } from "@/lib/validation";
 import { createProject } from "../actions";
 
 export default function NewProjectPage() {
   const {
     register,
-    control,
     handleSubmit,
     setError,
     formState: { errors, isSubmitting },
@@ -55,33 +46,12 @@ export default function NewProjectPage() {
             </FormField>
 
             <FormField
-              id="engagementType"
-              label="Engagement type"
-              error={errors.engagementType?.message}
+              id="customerEmail"
+              label="Customer email"
+              error={errors.customerEmail?.message}
+              hint="This customer's email and calling accounts are opened with it. It cannot be changed once execution has started."
             >
-              <Controller
-                control={control}
-                name="engagementType"
-                render={({ field }) => (
-                  <Select value={field.value ?? null} onValueChange={field.onChange}>
-                    <SelectTrigger
-                      id="engagementType"
-                      className="w-full"
-                      aria-invalid={!!errors.engagementType}
-                      onBlur={field.onBlur}
-                    >
-                      <SelectValue placeholder="Choose one" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {ENGAGEMENT_TYPES.map((type) => (
-                        <SelectItem key={type} value={type}>
-                          {type}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                )}
-              />
+              <Input id="customerEmail" type="email" autoComplete="off" {...register("customerEmail")} />
             </FormField>
 
             <FormField

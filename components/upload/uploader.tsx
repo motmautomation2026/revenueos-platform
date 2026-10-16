@@ -4,10 +4,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
-  AlertTriangle,
   ArrowRight,
   CheckCircle2,
-  FileText,
+  Circle,
   Loader2,
   RotateCw,
   Sparkles,
@@ -16,6 +15,15 @@ import {
   XCircle,
 } from "lucide-react";
 import { toast } from "sonner";
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Button, buttonVariants } from "@/components/ui/button";
 import {
   Select,
@@ -33,8 +41,11 @@ import {
   MAX_FILES_PER_PROJECT,
   TOTAL_CHARS_WARNING,
   canGenerateChecklist,
+  fileExtension,
   fileProblem,
   guessDocType,
+  TRUST,
+  trustOf,
   sanitizeFileName,
   type DocType,
   type ProjectFileRow,
@@ -107,6 +118,7 @@ export function Uploader({
 }) {
   const router = useRouter();
   const [generating, setGenerating] = useState(false);
+  const [confirming, setConfirming] = useState(false);
 
   // Nothing here is waiting on the other run, so poll until the project status moves on.
   useEffect(() => {
@@ -280,166 +292,267 @@ export function Uploader({
     }))
   );
 
-  return (
-    <div className="grid gap-6">
-      <div
-        role="button"
-        tabIndex={0}
-        aria-label="Add documents"
-        onClick={() => inputRef.current?.click()}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault();
-            inputRef.current?.click();
-          }
-        }}
-        onDragOver={(e) => {
+  const hasBrief = items.some((it) => it.docType === "bd_handover" || it.docType === "bd_proposal");
+  const hasText = items.some((it) => it.phase === "ready");
+  const working = generating || generatingElsewhere;
+  const overLimit = totalChars > TOTAL_CHARS_WARNING;
+  const fill = Math.min(100, Math.round((totalChars / TOTAL_CHARS_WARNING) * 100));
+
+  const dropZone = (
+    <div
+      role="button"
+      tabIndex={0}
+      aria-label="Add documents"
+      onClick={() => inputRef.current?.click()}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
-          setDragging(true);
-        }}
-        onDragLeave={() => setDragging(false)}
-        onDrop={(e) => {
-          e.preventDefault();
-          setDragging(false);
-          addFiles(e.dataTransfer.files);
-        }}
+          inputRef.current?.click();
+        }
+      }}
+      onDragOver={(e) => {
+        e.preventDefault();
+        setDragging(true);
+      }}
+      onDragLeave={() => setDragging(false)}
+      onDrop={(e) => {
+        e.preventDefault();
+        setDragging(false);
+        addFiles(e.dataTransfer.files);
+      }}
+      className={cn(
+        "flex cursor-pointer items-center gap-4 rounded-xl border-2 border-dashed text-left outline-none transition-colors focus-visible:border-ring",
+        // Large and central while empty; a slim "add more" strip once documents are in.
+        items.length === 0 ? "flex-col px-6 py-14 text-center" : "px-4 py-3",
+        dragging ? "border-primary bg-primary/5" : "hover:border-primary/50 hover:bg-muted/50"
+      )}
+    >
+      <span
         className={cn(
-          "flex cursor-pointer flex-col items-center gap-2 rounded-xl border-2 border-dashed px-6 py-10 text-center outline-none transition-colors focus-visible:border-ring",
-          dragging ? "border-primary bg-muted" : "hover:bg-muted/50"
+          "flex shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary",
+          items.length === 0 ? "size-14" : "size-10"
         )}
       >
-        <UploadCloud className="size-8 text-muted-foreground" aria-hidden />
-        <p className="font-medium">Drop documents here, or click to choose</p>
-        <p className="text-sm text-muted-foreground">
-          PDF, DOCX, XLSX, CSV, TXT or MD · up to 20 MB each · up to {MAX_FILES_PER_PROJECT} files
+        <UploadCloud className={items.length === 0 ? "size-7" : "size-5"} aria-hidden />
+      </span>
+      <div className="min-w-0 flex-1">
+        <p className="font-medium">
+          {items.length === 0 ? "Drop documents here, or click to choose" : "Add more documents"}
         </p>
-        <input
-          ref={inputRef}
-          type="file"
-          multiple
-          accept={ACCEPT_ATTRIBUTE}
-          className="hidden"
-          onChange={(e) => {
-            if (e.target.files) addFiles(e.target.files);
-            e.target.value = "";
-          }}
-        />
+        <p className="text-sm text-muted-foreground">
+          PDF, DOCX, PPTX, XLSX, CSV, TXT or MD · up to 20 MB each · up to {MAX_FILES_PER_PROJECT} files
+        </p>
       </div>
+      {items.length > 0 && <span className={buttonVariants({ variant: "outline" })}>Choose files</span>}
+      <input
+        ref={inputRef}
+        type="file"
+        multiple
+        accept={ACCEPT_ATTRIBUTE}
+        className="hidden"
+        onChange={(e) => {
+          if (e.target.files) addFiles(e.target.files);
+          e.target.value = "";
+        }}
+      />
+    </div>
+  );
 
-      {items.length > 0 && (
-        <ul className="divide-y rounded-xl border">
-          {items.map((item) => (
-            <li key={item.key} className="grid gap-2 px-4 py-3 sm:grid-cols-[1fr_auto] sm:items-center">
-              <div className="flex min-w-0 items-start gap-3">
-                <FileText className="mt-0.5 size-5 shrink-0 text-muted-foreground" aria-hidden />
-                <div className="min-w-0">
-                  <p className="truncate font-medium" title={item.fileName}>
-                    {item.fileName}
-                  </p>
-                  <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-sm text-muted-foreground">
-                    <span>{formatBytes(item.sizeBytes)}</span>
-                    <PhaseLabel item={item} />
+  return (
+    <div className="grid gap-6">
+      {items.length === 0 ? (
+        dropZone
+      ) : (
+        <>
+          <div className="grid gap-3 md:grid-cols-3">
+            <div className="grid content-start gap-1 rounded-xl border p-4">
+              <p className="text-sm text-muted-foreground">Documents</p>
+              <p className="text-2xl leading-none font-semibold tabular-nums">
+                {items.length}
+                <span className="text-base font-normal text-muted-foreground"> / {MAX_FILES_PER_PROJECT}</span>
+              </p>
+            </div>
+
+            <div className={cn("grid content-start gap-2 rounded-xl border p-4", overLimit && "border-amber-500/60 bg-amber-500/5")}>
+              <p className="text-sm text-muted-foreground">Text for the AI to read</p>
+              <p className="text-2xl leading-none font-semibold tabular-nums">
+                {number.format(totalChars)}
+                <span className="text-base font-normal text-muted-foreground"> characters</span>
+              </p>
+              <div className="h-1.5 overflow-hidden rounded-full bg-muted" aria-hidden>
+                <div className={cn("h-full rounded-full", overLimit ? "bg-amber-600" : "bg-primary")} style={{ width: `${fill}%` }} />
+              </div>
+              <p className="text-xs text-muted-foreground">
+                {overLimit
+                  ? "More than the AI reads well in one go. Remove files that are not needed."
+                  : `Comfortable up to ${number.format(TOTAL_CHARS_WARNING)}`}
+              </p>
+            </div>
+
+            <div className="grid content-start gap-2 rounded-xl border p-4">
+              <p className="text-sm text-muted-foreground">Needed for the checklist</p>
+              <ul className="grid gap-1.5 text-sm">
+                {[
+                  { met: hasBrief, label: "A BD handover or a BD proposal" },
+                  { met: hasText, label: "At least one document read successfully" },
+                ].map((need) => (
+                  <li key={need.label} className="flex items-start gap-2">
+                    {need.met ? (
+                      <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-emerald-700" aria-hidden />
+                    ) : (
+                      <Circle className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden />
+                    )}
+                    <span className={need.met ? undefined : "text-muted-foreground"}>
+                      {need.label}
+                      <span className="sr-only">{need.met ? " (done)" : " (missing)"}</span>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </div>
+
+          <section className="grid gap-3">
+            <h3 className="text-base font-semibold">Uploaded documents</h3>
+            <ul className="divide-y rounded-xl border">
+              {items.map((item) => (
+                <li key={item.key} className="grid gap-3 px-4 py-3 sm:grid-cols-[1fr_auto] sm:items-center">
+                  <div className="flex min-w-0 items-center gap-3">
+                    <span
+                      aria-hidden
+                      className="flex h-10 w-11 shrink-0 items-center justify-center rounded-lg bg-muted text-[0.65rem] font-bold tracking-wide text-muted-foreground uppercase"
+                    >
+                      {fileExtension(item.fileName) || "file"}
+                    </span>
+                    <div className="min-w-0">
+                      <p className="truncate font-medium" title={item.fileName}>
+                        {item.fileName}
+                      </p>
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-sm text-muted-foreground">
+                        <span>{formatBytes(item.sizeBytes)}</span>
+                        <PhaseLabel item={item} />
+                      </div>
+                      {item.error && (
+                        <p role="alert" className="mt-1 text-sm text-destructive">
+                          {item.error}
+                        </p>
+                      )}
+                    </div>
                   </div>
-                  {item.error && (
-                    <p role="alert" className="mt-1 text-sm text-destructive">
-                      {item.error}
-                    </p>
-                  )}
-                </div>
-              </div>
-              <div className="flex items-center gap-2 pl-8 sm:pl-0">
-                {(item.phase === "failed" || item.phase === "pending") &&
-                  (item.fileId || item.source) && (
-                    <Button variant="outline" size="sm" onClick={() => retry(item)}>
-                      <RotateCw aria-hidden />
-                      {item.phase === "pending" ? "Extract text" : "Retry"}
+                  <div className="flex items-end gap-2">
+                    {(item.phase === "failed" || item.phase === "pending") && (item.fileId || item.source) && (
+                      <Button variant="outline" onClick={() => retry(item)}>
+                        <RotateCw aria-hidden />
+                        {item.phase === "pending" ? "Extract text" : "Retry"}
+                      </Button>
+                    )}
+                    <div className="grid gap-1">
+                      <span className="text-xs text-muted-foreground">Document type</span>
+                      <Select
+                        items={DOC_TYPES}
+                        value={item.docType}
+                        onValueChange={(value) => changeDocType(item, value as DocType)}
+                      >
+                        <SelectTrigger className="w-52" aria-label={`Document type of ${item.fileName}`}>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {DOC_TYPES.map((type) => (
+                            <SelectItem key={type.value} value={type.value}>
+                              {type.label}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <span className="text-xs text-muted-foreground" title={TRUST[trustOf(item.docType)].rule}>
+                        AI uses it as: {TRUST[trustOf(item.docType)].label.toLowerCase()}
+                      </span>
+                    </div>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      aria-label={`Delete ${item.fileName}`}
+                      title="Delete"
+                      disabled={item.phase === "uploading" || item.phase === "extracting"}
+                      onClick={() => remove(item)}
+                    >
+                      <Trash2 aria-hidden />
                     </Button>
-                  )}
-                <Select
-                  items={DOC_TYPES}
-                  value={item.docType}
-                  onValueChange={(value) => changeDocType(item, value as DocType)}
-                >
-                  <SelectTrigger size="sm" className="w-40" aria-label="Document type">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {DOC_TYPES.map((type) => (
-                      <SelectItem key={type.value} value={type.value}>
-                        {type.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  aria-label={`Delete ${item.fileName}`}
-                  disabled={item.phase === "uploading" || item.phase === "extracting"}
-                  onClick={() => remove(item)}
-                >
-                  <Trash2 aria-hidden />
-                </Button>
-              </div>
-            </li>
-          ))}
-        </ul>
+                  </div>
+                </li>
+              ))}
+            </ul>
+            {dropZone}
+          </section>
+        </>
       )}
 
-      {items.length > 0 && (
-        <div className="grid gap-3">
-          <p className="text-sm text-muted-foreground">
-            {items.length} of {MAX_FILES_PER_PROJECT} files · {number.format(totalChars)} characters
-            in total
+      <div className="flex flex-wrap items-center gap-x-6 gap-y-3 rounded-xl border bg-muted/40 p-4">
+        <div className="min-w-0 flex-1 basis-72">
+          <p className="font-semibold">
+            {working
+              ? "Writing the checklist…"
+              : hasChecklist
+                ? "The checklist is already written"
+                : ready
+                  ? "Ready to write the checklist"
+                  : "Not ready yet"}
           </p>
-          {totalChars > TOTAL_CHARS_WARNING && (
-            <p className="flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-sm">
-              <AlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-600" aria-hidden />
-              The documents add up to more than {number.format(TOTAL_CHARS_WARNING)} characters,
-              which is a lot for the AI to read in one go. Consider removing files that are not
-              needed.
-            </p>
+          <p className="text-sm text-muted-foreground">
+            {working
+              ? "The AI is reading the documents. This usually takes one to three minutes."
+              : hasChecklist
+                ? "Continue to the checklist. Generate a new one only if the documents have changed."
+                : ready
+                  ? "The AI reads every document above and writes 40 to 50 questions for this customer."
+                  : "Add a BD handover or BD proposal, and wait until at least one document shows Ready."}
+          </p>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          {hasChecklist ? (
+            <>
+              <Button variant="outline" disabled={!ready || busy || working} onClick={() => setConfirming(true)}>
+                {working ? <Loader2 className="animate-spin" aria-hidden /> : <Sparkles aria-hidden />}
+                {working ? "Writing…" : "Generate a new checklist"}
+              </Button>
+              <Link href={`/projects/${projectId}/checklist`} className={buttonVariants({ size: "lg" })}>
+                Go to checklist
+                <ArrowRight aria-hidden />
+              </Link>
+            </>
+          ) : (
+            <Button size="lg" disabled={!ready || busy || working} onClick={generate}>
+              {working ? <Loader2 className="animate-spin" aria-hidden /> : <Sparkles aria-hidden />}
+              {working ? "Writing checklist…" : "Generate checklist"}
+            </Button>
           )}
         </div>
-      )}
-
-      <div className="flex flex-wrap items-center gap-3">
-        <Button disabled={!ready || busy || generating || generatingElsewhere} onClick={generate}>
-          {generating || generatingElsewhere ? (
-            <Loader2 className="animate-spin" aria-hidden />
-          ) : (
-            <Sparkles aria-hidden />
-          )}
-          {generating || generatingElsewhere
-            ? "Writing checklist…"
-            : hasChecklist
-              ? "Generate a new checklist"
-              : "Generate checklist"}
-        </Button>
-        {generating || generatingElsewhere ? (
-          <p className="text-sm text-muted-foreground">
-            The AI is reading the documents. This usually takes one to three minutes.
-          </p>
-        ) : !ready ? (
-          <p className="text-sm text-muted-foreground">
-            Needs at least one file with extracted text, and at least one BD handover or BD
-            proposal.
-          </p>
-        ) : hasChecklist ? (
-          <p className="text-sm text-muted-foreground">
-            This replaces the current checklist; the old one is kept on record.
-          </p>
-        ) : null}
-        {hasChecklist && !generating && !generatingElsewhere && (
-          <Link
-            href={`/projects/${projectId}/checklist`}
-            className={buttonVariants({ variant: "outline", className: "ml-auto" })}
-          >
-            Go to checklist
-            <ArrowRight aria-hidden />
-          </Link>
-        )}
       </div>
+
+      <AlertDialog open={confirming} onOpenChange={setConfirming}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Write a new checklist?</AlertDialogTitle>
+            <AlertDialogDescription>
+              The AI reads the documents again and writes a fresh checklist. The current checklist and its
+              answers are kept on record but will no longer be the active one, so the answers must be filled in
+              again. The plan already written is not changed.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <Button
+              onClick={() => {
+                setConfirming(false);
+                void generate();
+              }}
+            >
+              Generate a new checklist
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

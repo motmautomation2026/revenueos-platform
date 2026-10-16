@@ -131,7 +131,7 @@ from quickicp import TEST_MODE, ToolError, ask_llm, check_settings, clean_domain
 load_dotenv()
 
 # ---- Safety ----
-REAL_CALLS_ENABLED = False      # stays False; the developer switches it on at go-live (+ QUICKHOWL_DND_HANDLED=true)
+REAL_CALLS_ENABLED = True       # switched on at go-live 2026-10-12 (Rameshwar). Also needs QUICKHOWL_DND_HANDLED=true in .env
 MAX_TEST_CALLS = 3              # never more than this many contacts in test mode
 
 # ---- Agent (the voice) ----
@@ -330,6 +330,17 @@ def customer_display_name(understanding: dict) -> str:
     return os.getenv("CUSTOMER_DISPLAY_NAME") or understanding.get("customer_name") or "our company"
 
 
+def internal_words_in(profile) -> dict:
+    """{field: [internal words found]} for a call profile; empty when it is clean. Code decides, not the LLM."""
+    found = {}
+    for name, value in profile.model_dump().items():
+        text = " ".join(value) if isinstance(value, list) else str(value or "")
+        words = INTERNAL_WORDS.findall(text)
+        if words:
+            found[name] = words
+    return found
+
+
 def make_profile(understanding: dict, work_order: dict) -> dict:
     """LLM writes the profile from the brain; code adds name, website and the fixed tone rules."""
     company = customer_display_name(understanding)
@@ -352,9 +363,15 @@ def make_profile(understanding: dict, work_order: dict) -> dict:
         "Documents:\n" + json.dumps(facts, ensure_ascii=False)
     )
     profile = ask_llm(CallProfile, prompt, "Call profile")
-
-    leaks = {name: INTERNAL_WORDS.findall(value) for name, value in profile.model_dump().items()}
-    leaks = {name: words for name, words in leaks.items() if words}
+    leaks = internal_words_in(profile)
+    if leaks:
+        # One rewrite, shown exactly what leaked (the same rule as the email step's forbidden phrases).
+        print(f"  Call profile contains internal words {leaks}: asking for one rewrite.")
+        profile = ask_llm(CallProfile, prompt + "\n\nYour previous answer used internal words that the person "
+                          f"being called must never hear: {json.dumps(leaks, ensure_ascii=False)}. Write it again "
+                          "without them. Say who the customers are in plain words (for example 'companies that "
+                          "build water pipelines'), never 'segments' or 'clusters'.", "Call profile (rewrite)")
+        leaks = internal_words_in(profile)
     if leaks:
         raise ToolError(f"Call profile contains internal words {leaks}. Run 'preview' again.")
 

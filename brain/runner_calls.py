@@ -96,6 +96,10 @@ class RealCallTools:
         import quickhowl
         return quickhowl.dnd_handled(), quickhowl.dnd_note()
 
+    def account(self) -> str | None:
+        """The calling account chosen for this customer NOW (run_for.py, from the platform)."""
+        return (os.getenv("QUICKHOWL_CLIENT_REFERENCE") or "").strip() or None
+
     def build_request(self, contacts: list[dict]) -> dict:
         import quickhowl
         request = quickhowl.build_request(contacts, understanding=self.understanding, work_order=self.work_order)
@@ -271,6 +275,20 @@ def run_calls(ctx: RunnerContext, tools) -> RunnerResult:
     request = ctx.free_call("request", lambda: tools.build_request(picked["contacts"]), tool="quickhowl")
     reference = request["reference"]
 
+    # WHICH calling account the campaign goes to is chosen in the platform, and can still be changed
+    # while the campaign has not been stored (for example: the customer's new account turned out to
+    # have no phone number, so an existing account is used instead). Until the store has succeeded
+    # it goes to the account chosen NOW; once stored, it stays with the account it was stored in.
+    stored = [r for r in ctx.steps("store") if r["status"] == "done"]
+    account = ((stored[-1]["response"] or {}).get("client_reference_used") if stored
+               else getattr(tools, "account", lambda: None)())
+    if account and request.get("client_reference") != account:
+        request = {**request, "client_reference": account}
+
+    def store():
+        reply = tools.launch(request, auto_start=False)
+        return {**reply, "client_reference_used": request.get("client_reference")} if isinstance(reply, dict) else reply
+
     if ctx.dry:
         lines = [f"Contacts:               {len(request['contacts'])} (mobile only"
                  + (", TEST MODE: our TEST_CALL_NUMBERS only" if TEST_MODE else "") + ")",
@@ -281,7 +299,7 @@ def run_calls(ctx: RunnerContext, tools) -> RunnerResult:
                                            "lines": lines})
 
     # 3. store (PAID, auto_start false; the tool de-duplicates by our reference)
-    ctx.resendable_call("store", f"{reference}:store", lambda: tools.launch(request, auto_start=False),
+    ctx.resendable_call("store", f"{reference}:store", store,
                         {"reference": reference, "auto_start": False}, tool="quickhowl")
 
     # 4. a human decides before anyone is called

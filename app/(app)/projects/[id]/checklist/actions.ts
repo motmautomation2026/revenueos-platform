@@ -4,6 +4,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { z } from "zod";
 import { generateChecklist, type GenerateChecklistResult } from "@/lib/agents/checklist";
 import { requireProject } from "@/lib/auth";
+import { SECRET_PROVIDED } from "@/lib/checklist-secrets";
 import { ExcelFormatError, parseChecklistWorkbook } from "@/lib/files/excel";
 import { TABLES } from "@/lib/supabase/tables";
 
@@ -153,7 +154,8 @@ export async function importChecklistExcel(
     }
     seen.add(item.position);
     const answer = row.answer.slice(0, 10_000);
-    if (answer === (item.answer ?? "")) {
+    // The placeholder written in place of a secret means "leave it as it is".
+    if (answer === SECRET_PROVIDED || answer === (item.answer ?? "")) {
       unchanged++;
       continue;
     }

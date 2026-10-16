@@ -69,11 +69,28 @@ DOMAIN_BATCH_SIZE = 20          # companies per people-search request
 PEOPLE_BATCH_SIZE = 25          # people per email/phone request
 PEOPLE_LOCATIONS = ["India"]
 
-TEST_MODE = True
-TEST_MAX_COMPANIES = 40         # test runs ask for 40; n8n splits into pages itself
+def staging_flag(default: bool) -> bool:
+    """
+    Test mode for THIS process. run_for.py sets BRAIN_TEST_MODE=true|false per customer, from the
+    platform's Staging / Production switch (and, once a run exists, from that run's own mode), so
+    one customer can be tried in staging while another runs for real. Unset = the default below.
+    """
+    value = (os.getenv("BRAIN_TEST_MODE") or "").strip().lower()
+    return value == "true" if value in ("true", "false") else default
+
+
+def staging_number(name: str, default: int) -> int:
+    """A staging limit the person chose in the platform (STAGING_COMPANIES, STAGING_PEOPLE), or the default."""
+    value = (os.getenv(name) or "").strip()
+    return int(value) if value.isdigit() and int(value) > 0 else default
+
+
+TEST_MODE_DEFAULT = True        # used when BRAIN_TEST_MODE is not set (a script run by hand): test caps.
+TEST_MODE = staging_flag(TEST_MODE_DEFAULT)
+TEST_MAX_COMPANIES = staging_number("STAGING_COMPANIES", 40)   # test runs ask for 40; n8n splits into pages itself
 TEST_MAX_PEOPLE_COMPANIES = 3
 TEST_PEOPLE_PER_COMPANY = 2
-TEST_MAX_EMAIL_PEOPLE = 6
+TEST_MAX_EMAIL_PEOPLE = staging_number("STAGING_PEOPLE", 6)    # people sent to the email / phone finders in test mode
 
 CompanySize = Literal[
     "1-10", "11-20", "21-50", "51-100", "101-200", "201-500",
@@ -169,16 +186,27 @@ def run_cli(main, rerun: str = "rerun the same command") -> None:
     line (network_stop_line) and exit code 3, no traceback. '--debug' (removed from sys.argv first) shows the
     full traceback instead. Every other error and exit behaves exactly as before.
     """
+    from orch import brain_log            # file only; never prints, never raises
     debug = "--debug" in sys.argv
     sys.argv[:] = [arg for arg in sys.argv if arg != "--debug"]
+    command = " ".join([os.path.basename(sys.argv[0])] + sys.argv[1:])
     try:
         main()
+    except SystemExit as stop:
+        brain_log.write("INFO" if stop.code in (0, None) else "WARNING", f"{command}: exit {stop.code}")
+        raise
     except Exception as error:
         found = network_error(error)
         if found is None or debug:
+            brain_log.write("ERROR", f"{command}: crashed", error=error)
             raise
+        brain_log.write("ERROR", f"{command}: network drop -> STOPPED, exit 3", error=error)
         print(network_stop_line(found, rerun))
         sys.exit(3)
+    except BaseException as error:        # Ctrl+C, a simulated crash: logged, then exactly as before
+        brain_log.write("ERROR", f"{command}: interrupted", error=error)
+        raise
+    brain_log.write("INFO", f"{command}: exit 0")
 
 
 def check_settings(*names: str) -> None:
@@ -406,7 +434,8 @@ def make_keywords(work_order: dict, understanding: dict) -> Keywords:
     """Step 1: LLM turns the work order into short search keywords."""
     prompt = (
         "Turn this work order into search keywords for Prospeo.\n"
-        "- industry_keywords: short keywords for the target segment.\n"
+        "- industry_keywords: short keywords for the target segment. Prospeo matches single industry words, "
+        "so prefer ONE word each (e.g. 'water', 'chemical', 'construction', 'utilities'), not phrases.\n"
         "- location_keywords: plain city or state names from the geography. "
         "Split regions into cities, e.g. 'Delhi NCR' -> 'Delhi', 'Gurugram', 'Noida'.\n"
         "- company_size: ranges matching the ideal company size; if none given, 201-500 and above.\n\n"
@@ -439,7 +468,8 @@ INDUSTRY_SYNONYMS = {
 def industry_options(keywords: list[str], lookup=None) -> dict[str, list[str]]:
     """
     {keyword: Prospeo industry names}. A keyword with no names is retried once with its synonyms
-    (INDUSTRY_SYNONYMS); what they return is listed under the original keyword. Only names Prospeo
+    (INDUSTRY_SYNONYMS), then, if it is a phrase, once with each of its words; what they return is
+    listed under the original keyword. Only names Prospeo
     really returned end up here, so the exact-name check after the LLM's pick stays the same.
     lookup: prospeo_suggestions (default); a selftest passes a fake.
     """
@@ -452,6 +482,14 @@ def industry_options(keywords: list[str], lookup=None) -> dict[str, list[str]]:
             for synonym in synonyms:
                 names += [name for name in lookup("industry_search", synonym) if name not in names]
             print(f"  Industry '{keyword}': no Prospeo names; synonyms {synonyms} -> {names or 'still none'}")
+        words = [word for word in re.split(r"[\s/&,]+", keyword.strip()) if len(word) >= 4]
+        if not names and len(words) > 1:
+            # Prospeo knows industries by single words: 'water projects' finds nothing, 'water' finds
+            # 'Water Supply and Irrigation Systems'. Try each word of the phrase once; the LLM's pick
+            # and the exact-name check still decide which of these really match.
+            for word in words:
+                names += [name for name in lookup("industry_search", word) if name not in names]
+            print(f"  Industry '{keyword}': no Prospeo names; its words {words} -> {names or 'still none'}")
         options[keyword] = names
     return options
 
