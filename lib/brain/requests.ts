@@ -50,6 +50,7 @@ export type PlanTask = {
   id: string;
   week: number | null;
   agent: string;
+  outputType: string;
   task: string;
   target: string;
   dependsOn: string[];
@@ -95,6 +96,7 @@ export function readMonthPlan(plan: unknown, revenueAnalysis: unknown): MonthPla
         id: text(task.task_id) || `T${index + 1}`,
         week: Number.isInteger(week) && week > 0 ? week : null,
         agent: text(task.agent),
+        outputType: text(task.output_type),
         task: text(task.task),
         target: text(task.target),
         dependsOn: list(task.depends_on),
@@ -128,6 +130,8 @@ export type RequestView = {
   plan: MonthPlanView | null;
   /** Plan rules the month plan still breaks. A plain approval is refused while there are any. */
   planErrors: string[];
+  /** Problems that stop the plan from being approved at all (compulsoryProblems). */
+  compulsory: string[];
   /** What the Brain last said, e.g. why an answer was refused. */
   brainMessage: string | null;
   approvedBy: string | null;
@@ -145,6 +149,7 @@ const EMPTY: RequestView = {
   requestedBy: null,
   plan: null,
   planErrors: [],
+  compulsory: [],
   brainMessage: null,
   approvedBy: null,
   failedStep: null,
@@ -189,6 +194,10 @@ export function buildRequestView(row: BrainRequestRow | null, now: number = Date
     requestedBy: row.requested_by_name,
     plan: row.status === "awaiting_approval" ? readMonthPlan(row.plan, row.revenue_analysis) : null,
     planErrors: row.status === "awaiting_approval" ? list(row.plan_errors) : [],
+    compulsory:
+      row.status === "awaiting_approval"
+        ? compulsoryProblems(readMonthPlan(row.plan, row.revenue_analysis)?.tasks ?? [], list(row.plan_errors))
+        : [],
     brainMessage: text(row.brain_message) || null,
     approvedBy: row.approved_by,
     failedStep: row.failed_step,
@@ -204,9 +213,98 @@ export function buildRequestView(row: BrainRequestRow | null, now: number = Date
  *   override   only when rules are broken, and only with a reason
  *   changes    needs the changes in words
  */
-export function planAnswerProblem(answer: string, note: string, brokenRules: number): string | null {
+// ----- Compulsory steps -----
+//
+// Every month plan must use all four connected tools, in this order:
+//   find companies (QuickICP accounts) -> find people with email and phone (QuickICP contacts)
+//   -> email campaign (Email Agent) and AI calls (Quickhowl)
+// and must not contain a task that could never run (a tool task with no number to aim for, a task
+// waiting on one that does not exist). Such a plan cannot be approved, not even "anyway"; only
+// changed. The Brain's worker applies the same rule (brain/platform_approval.py, compulsory_problems).
+
+/** The four tool steps every month plan must have, in this order. */
+export const REQUIRED_STEPS = [
+  { agent: "QuickICP", outputType: "accounts", words: "find companies (QuickICP)" },
+  { agent: "QuickICP", outputType: "contacts", words: "find people with email and phone (QuickICP contacts)" },
+  { agent: "Email Agent", outputType: "emails", words: "an email campaign (Email Agent)" },
+  { agent: "Quickhowl", outputType: "calls", words: "AI calls (Quickhowl)" },
+] as const;
+
+/** Tools that email or call people, so they need a list of people found before them. */
+export const NEEDS_PEOPLE = ["Quickhowl", "Email Agent"];
+/** Rule errors from the Brain's own check that mean a task can never run. */
+export const COMPULSORY_ERRORS =
+  /has no number\. Tool tasks run by a count|which does not exist|is not enabled for this customer|only has:/;
+
+/** Plain sentences, one per compulsory problem. Empty: the plan can be approved (perhaps "anyway"). */
+export function compulsoryProblems(tasks: Pick<PlanTask, "id" | "agent" | "outputType" | "dependsOn">[], planErrors: string[]): string[] {
+  const byId = new Map(tasks.map((task) => [task.id, task]));
+  /** True when a task matching `test` comes earlier in this task's chain of "after". */
+  const comesAfter = (task: (typeof tasks)[number], test: (before: (typeof tasks)[number]) => boolean): boolean => {
+    const seen = new Set<string>();
+    const stack = [...task.dependsOn];
+    while (stack.length) {
+      const id = stack.pop()!;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const before = byId.get(id);
+      if (!before) continue;
+      if (test(before)) return true;
+      stack.push(...before.dependsOn);
+    }
+    return false;
+  };
+  const findsPeopleBefore = (task: (typeof tasks)[number]) =>
+    comesAfter(task, (before) => before.agent === "QuickICP" && before.outputType === "contacts");
+
+  const missingSteps = REQUIRED_STEPS.filter(
+    (step) => !tasks.some((task) => task.agent === step.agent && task.outputType === step.outputType)
+  ).map((step) => `The plan has no step to ${step.words}. Every month plan must have it.`);
+  const peopleBeforeCompanies = tasks
+    .filter(
+      (task) =>
+        task.agent === "QuickICP" &&
+        task.outputType === "contacts" &&
+        tasks.some((t) => t.agent === "QuickICP" && t.outputType === "accounts") &&
+        !comesAfter(task, (before) => before.agent === "QuickICP" && before.outputType === "accounts")
+    )
+    .map((task) => `${task.id} (find people) must come after the step that finds companies.`);
+  const missingPeople = tasks
+    .filter((task) => NEEDS_PEOPLE.includes(task.agent) && !findsPeopleBefore(task))
+    .map(
+      (task) =>
+        `${task.id} (${task.agent === "Email Agent" ? "email campaign" : "AI calls"}) has no earlier step that finds people's ` +
+        "email and phone. A QuickICP contacts task must come before it."
+    );
+  return [
+    ...missingSteps,
+    ...peopleBeforeCompanies,
+    ...missingPeople,
+    ...planErrors.filter((error) => COMPULSORY_ERRORS.test(error)),
+  ];
+}
+
+/** A change request the person can send as it is, when compulsory steps are missing. */
+export function suggestedChange(tasks: Pick<PlanTask, "id" | "agent" | "outputType" | "dependsOn">[]): string {
+  return (
+    "plan: Every month plan must use all four tools in this order: 1) a QuickICP accounts task that finds " +
+    "companies, 2) a QuickICP contacts task after it that finds decision makers with email and phone, " +
+    "3) an Email Agent emails task and 4) a Quickhowl calls task, both after the contacts task. " +
+    // Same rule as the Brain's planner check (master_agent.contacts_dependency_errors).
+    "The emails task, the calls task and any CAM data approval task list the contacts task directly in " +
+    "depends_on. " +
+    "Give every tool task a number target: from the document, or for email and calls a share of the " +
+    "contacts found, written like '100% of T2 contacts'." +
+    (tasks.length ? ` Keep the other tasks (${tasks.map((task) => task.id).join(", ")}) where they fit.` : "")
+  );
+}
+
+export function planAnswerProblem(answer: string, note: string, brokenRules: number, compulsory = 0): string | null {
   const words = note.trim();
   if (words.length > MAX_ANSWER_TEXT) return `Keep it under ${MAX_ANSWER_TEXT} characters.`;
+  if (compulsory > 0 && (answer === "yes" || answer === "override")) {
+    return "This plan is missing a compulsory step, so some tasks could never run. It cannot be approved: ask for changes.";
+  }
   if (answer === "yes") {
     return brokenRules > 0
       ? `${brokenRules} plan rule${brokenRules === 1 ? " is" : "s are"} still broken. Ask for changes, or approve anyway with a reason.`

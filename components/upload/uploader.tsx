@@ -44,6 +44,8 @@ import {
   fileExtension,
   fileProblem,
   guessDocType,
+  TRUST,
+  trustOf,
   sanitizeFileName,
   type DocType,
   type ProjectFileRow,
@@ -338,7 +340,7 @@ export function Uploader({
           {items.length === 0 ? "Drop documents here, or click to choose" : "Add more documents"}
         </p>
         <p className="text-sm text-muted-foreground">
-          PDF, DOCX, XLSX, CSV, TXT or MD · up to 20 MB each · up to {MAX_FILES_PER_PROJECT} files
+          PDF, DOCX, PPTX, XLSX, CSV, TXT or MD · up to 20 MB each · up to {MAX_FILES_PER_PROJECT} files
         </p>
       </div>
       {items.length > 0 && <span className={buttonVariants({ variant: "outline" })}>Choose files</span>}
@@ -451,7 +453,7 @@ export function Uploader({
                         value={item.docType}
                         onValueChange={(value) => changeDocType(item, value as DocType)}
                       >
-                        <SelectTrigger className="w-44" aria-label={`Document type of ${item.fileName}`}>
+                        <SelectTrigger className="w-52" aria-label={`Document type of ${item.fileName}`}>
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
@@ -462,6 +464,9 @@ export function Uploader({
                           ))}
                         </SelectContent>
                       </Select>
+                      <span className="text-xs text-muted-foreground" title={TRUST[trustOf(item.docType)].rule}>
+                        AI uses it as: {TRUST[trustOf(item.docType)].label.toLowerCase()}
+                      </span>
                     </div>
                     <Button
                       variant="ghost"

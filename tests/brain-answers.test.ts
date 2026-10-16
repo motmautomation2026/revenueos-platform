@@ -22,7 +22,8 @@ test("the app allows exactly the answers the Brain's own code allows", () => {
 });
 
 test("the app requires a note for the same kinds the Brain does", () => {
-  const source = readFileSync("brain/orchestrator.py", "utf8");
+  // The orchestrator's code now lives in brain/orch/ (HUMAN_KINDS in run.py, NOTE_REQUIRED_KINDS in answer.py).
+  const source = ["brain/orch/run.py", "brain/orch/answer.py"].map((file) => readFileSync(file, "utf8")).join("\n");
   assert.match(source, /HUMAN_KINDS = \{"human_task", "human_gate_task"\}/);
   assert.match(source, /NOTE_REQUIRED_KINDS = HUMAN_KINDS \| \{"review_action_1", "review_action_2", "review_action_3"\}/);
   for (const kind of ["human_task", "human_gate_task", "review_action_1", "review_action_2", "review_action_3"]) {
@@ -72,4 +73,18 @@ test("fallback: projects are matched to Brain customers from settings", () => {
   assert.equal(settingsCustomerFor(b), "second-customer");
   assert.equal(settingsCustomerFor(c), "third-customer");
   assert.equal(settingsCustomerFor("44444444-4444-4444-8444-444444444444"), null);
+});
+
+test("email samples can be sent back with a note, as the Brain's feedback rounds expect", () => {
+  assert.equal(answerProblem("email_approve", "feedback", ""), "Write what should change in the emails.");
+  assert.equal(answerProblem("email_approve", "feedback", "Shorter, please"), null);
+  assert.equal(answerProblem("email_approve", "yes", ""), null, "approving needs no note");
+  // Same limit as the Brain's runner (MAX_NOTE_LENGTH there).
+  const runner = readFileSync("brain/runner_email.py", "utf8");
+  assert.match(runner, /^MAX_NOTE_LENGTH = 1000\b/m);
+  // The button is offered only when the Brain offers it for this question.
+  const offered = answerOptions("email_approve", ["no", "yes"]).map((o) => o.answer);
+  assert.deepEqual(offered.sort(), ["no", "yes"]);
+  const withRounds = answerOptions("email_approve", ["feedback", "no", "yes"]);
+  assert.equal(withRounds.find((o) => o.answer === "feedback")?.label, "Ask for changes");
 });

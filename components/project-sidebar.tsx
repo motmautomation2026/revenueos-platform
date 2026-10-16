@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import Link from "next/link";
 import { usePathname, useSearchParams } from "next/navigation";
 import {
@@ -10,11 +11,14 @@ import {
   ListChecks,
   Lock,
   Mail,
+  PanelLeftClose,
+  PanelLeftOpen,
   Phone,
   Search,
   UsersRound,
   type LucideIcon,
 } from "lucide-react";
+import { SIDEBAR_COOKIE } from "@/lib/sidebar";
 import { cn } from "@/lib/utils";
 
 export type SidebarBadges = {
@@ -44,20 +48,31 @@ type Item = {
 
 /**
  * The project's left panel: Planning (how the plan is built), then Execution (the Brain's
- * live work) with one entry per tool. On small screens it becomes a scrolling strip.
+ * live work) with one entry per tool. On large screens it can be collapsed to a rail of icons;
+ * on small screens it is a scrolling strip.
  */
 export function ProjectSidebar({
   projectId,
   reached,
   planReady,
   badges,
+  initiallyCollapsed = false,
 }: {
   projectId: string;
   /** Highest planning step reached: 1 inputs, 2 checklist, 3 plan, 4 plan finished. */
   reached: number;
   planReady: boolean;
   badges: SidebarBadges | null;
+  initiallyCollapsed?: boolean;
 }) {
+  const [collapsed, setCollapsed] = useState(initiallyCollapsed);
+  const toggle = () => {
+    const next = !collapsed;
+    setCollapsed(next);
+    document.cookie = `${SIDEBAR_COOKIE}=${next ? "collapsed" : "open"}; path=/; max-age=31536000; samesite=lax`;
+  };
+  // Text that only shows on large screens while the panel is open.
+  const wide = collapsed ? "lg:hidden" : "";
   const pathname = usePathname();
   const run = useSearchParams().get("run");
   const base = `/projects/${projectId}`;
@@ -164,17 +179,40 @@ export function ProjectSidebar({
   return (
     <nav
       aria-label="Project sections"
-      className="flex gap-1 overflow-x-auto rounded-xl border bg-background p-2 lg:sticky lg:top-18 lg:grid lg:gap-0 lg:overflow-visible lg:p-2 print:hidden"
+      className={cn(
+        "flex gap-1 overflow-x-auto rounded-xl border bg-background p-2 lg:sticky lg:top-18 lg:grid lg:gap-0 lg:overflow-visible lg:p-2 lg:transition-[width] print:hidden",
+        collapsed ? "lg:w-[3.75rem]" : "lg:w-[15.5rem] xl:w-[17rem]"
+      )}
     >
+      <button
+        type="button"
+        onClick={toggle}
+        aria-expanded={!collapsed}
+        title={collapsed ? "Show the panel" : "Collapse the panel"}
+        className={cn(
+          "hidden items-center gap-2 rounded-lg px-2 py-1.5 text-xs font-medium text-muted-foreground outline-none hover:bg-muted hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50 lg:flex",
+          collapsed ? "justify-center" : "justify-end"
+        )}
+      >
+        {collapsed ? <PanelLeftOpen className="size-4" aria-hidden /> : <PanelLeftClose className="size-4" aria-hidden />}
+        <span className={wide}>Collapse</span>
+        {collapsed && <span className="sr-only">Show the panel</span>}
+      </button>
       {groups.map((group, index) => (
         <div
           key={group.title}
           className={cn(
             "flex shrink-0 gap-1 lg:grid lg:min-w-0 lg:gap-0.5 lg:px-1 lg:py-3",
-            index > 0 && "lg:border-t"
+            index > 0 && "lg:border-t",
+            collapsed && "lg:px-0"
           )}
         >
-          <p className="hidden px-2 pb-1.5 text-[0.6875rem] font-semibold tracking-wider text-muted-foreground uppercase lg:block">
+          <p
+            className={cn(
+              "hidden px-2 pb-1.5 text-[0.6875rem] font-semibold tracking-wider text-muted-foreground uppercase lg:block",
+              collapsed && "lg:hidden"
+            )}
+          >
             {group.title}
           </p>
           {group.items.map((item) => {
@@ -192,8 +230,17 @@ export function ProjectSidebar({
                   )}
                 >
                   <Icon className="size-4" aria-hidden />
+                  {/* Collapsed: the count and the live dot sit on the icon instead. */}
+                  {collapsed && item.badge && (
+                    <span className="absolute -top-1.5 -right-1.5 hidden h-4 min-w-4 items-center justify-center rounded-full bg-amber-500 px-1 text-[0.625rem] font-semibold text-white tabular-nums lg:flex">
+                      {item.badge.text}
+                    </span>
+                  )}
+                  {collapsed && item.live && !item.badge && (
+                    <span className="absolute -top-0.5 -right-0.5 hidden size-2 animate-pulse rounded-full bg-emerald-600 ring-2 ring-background lg:block" />
+                  )}
                 </span>
-                <span className="min-w-0 lg:flex-1">
+                <span className={cn("min-w-0 lg:flex-1", wide)}>
                   <span
                     className={cn(
                       "block truncate text-sm leading-tight whitespace-nowrap",
@@ -210,11 +257,14 @@ export function ProjectSidebar({
                   </span>
                 </span>
                 {item.live && (
-                  <span className="size-2 shrink-0 animate-pulse rounded-full bg-emerald-600" title="Running now" />
+                  <span className={cn("size-2 shrink-0 animate-pulse rounded-full bg-emerald-600", wide)} title="Running now" />
                 )}
                 {item.badge && (
                   <span
-                    className="flex h-5 min-w-5 shrink-0 items-center justify-center rounded-full bg-amber-500 px-1.5 text-xs font-semibold text-white tabular-nums"
+                    className={cn(
+                      "flex h-5 min-w-5 shrink-0 items-center justify-center rounded-full bg-amber-500 px-1.5 text-xs font-semibold text-white tabular-nums",
+                      wide
+                    )}
                     title="Waiting for a person"
                   >
                     {item.badge.text}
@@ -222,24 +272,43 @@ export function ProjectSidebar({
                 )}
               </>
             );
+            // Collapsed, the name (and anything waiting) is the tooltip.
+            const tooltip = collapsed
+              ? [item.label, item.result ?? item.hint, item.badge ? `${item.badge.text} waiting` : ""].filter(Boolean).join(" · ")
+              : undefined;
             const className = cn(
               "relative flex min-w-0 items-center gap-2.5 rounded-lg px-2 py-1.5 outline-none",
+              collapsed && "lg:justify-center",
               // The current page: tinted, with a bar on the left edge.
               active && "bg-primary/10 lg:before:absolute lg:before:inset-y-1.5 lg:before:-left-1 lg:before:w-1 lg:before:rounded-full lg:before:bg-primary",
               locked ? "cursor-not-allowed opacity-60" : "hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50"
             );
 
             return locked ? (
-              <span key={item.key} className={className} aria-disabled title={group.note ?? "Finish the previous step first"}>
+              <span
+                key={item.key}
+                className={className}
+                aria-disabled
+                title={[collapsed ? item.label : "", group.note ?? "Finish the previous step first"].filter(Boolean).join(" · ")}
+              >
                 {body}
               </span>
             ) : (
-              <Link key={item.key} href={item.href} className={className} aria-current={active ? "page" : undefined}>
+              <Link
+                key={item.key}
+                href={item.href}
+                className={className}
+                aria-current={active ? "page" : undefined}
+                aria-label={collapsed ? item.label : undefined}
+                title={tooltip}
+              >
                 {body}
               </Link>
             );
           })}
-          {group.note && <p className="hidden px-2 pt-1 text-xs text-muted-foreground lg:block">{group.note}</p>}
+          {group.note && (
+            <p className={cn("hidden px-2 pt-1 text-xs text-muted-foreground lg:block", collapsed && "lg:hidden")}>{group.note}</p>
+          )}
         </div>
       ))}
     </nav>

@@ -6,6 +6,7 @@ import { buildChecklistMessage } from "@/lib/agents/build-inputs";
 import { canGenerateChecklist, type ExtractionStatus } from "@/lib/files/rules";
 import { TABLES } from "@/lib/supabase/tables";
 import { CHECKLIST_MAX_QUESTIONS, CHECKLIST_MIN_QUESTIONS } from "./config";
+import { withFactSheets } from "./fact-sheet";
 import { AgentError, runAgent } from "./run-agent";
 
 export type ChecklistFlag = {
@@ -57,10 +58,10 @@ export async function generateChecklist(projectId: string): Promise<GenerateChec
 
   const { data: files } = await supabase
     .from(TABLES.projectFiles)
-    .select("doc_type, file_name, extracted_text, extraction_status")
+    .select("id, doc_type, file_name, extracted_text, extraction_status")
     .eq("project_id", project.id)
     .order("created_at", { ascending: true })
-    .returns<(InputFile & { extraction_status: ExtractionStatus })[]>();
+    .returns<(InputFile & { id: string; extraction_status: ExtractionStatus })[]>();
   if (!files || !canGenerateChecklist(files)) {
     return {
       ok: false,
@@ -84,7 +85,10 @@ export async function generateChecklist(projectId: string): Promise<GenerateChec
   try {
     const userMessage = buildChecklistMessage(
       project,
-      files.filter((f) => f.extraction_status === "done")
+      await withFactSheets(
+        supabase,
+        files.filter((f) => f.extraction_status === "done")
+      )
     );
     let run = await runAgent<ChecklistOutput>({ agent: "checklist", projectId: project.id, userMessage });
 

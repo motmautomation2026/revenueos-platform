@@ -15,7 +15,7 @@
         "properties": {
           "topic": { "type": "string" },
           "fact": { "type": "string" },
-          "source": { "type": "string", "enum": ["handover", "proposal"] },
+          "source": { "type": "string", "enum": ["handover", "proposal", "customer_material", "other"] },
           "source_quote": { "type": "string" }
         }
       }

@@ -693,16 +693,55 @@ def read_work(client) -> list[dict]:
         work.append({
             "customer": customer, "run_key": run["run_key"], "month": month_of(run["run_key"], customer),
             "test_mode": run.get("test_mode"),
-            "open_decisions": open_count,
+            "open_decisions": open_count, "last_answer": last_answer,
             "fingerprint": json.dumps([run.get("status"), own_tasks, open_count, last_answer]),
         })
     return sorted(work, key=lambda item: item["customer"])
 
 
-def due(work: list[dict], seen: dict, busy: set) -> list[dict]:
-    """Customers to start a step for now: something changed since their last step, and none is running."""
+def running_since() -> tuple:
+    """What 'seen' holds for a customer while its step runs: when that step started (UTC)."""
+    return ("running", datetime.datetime.now(datetime.timezone.utc).isoformat())
+
+
+def is_running_marker(value) -> bool:
+    return isinstance(value, tuple) and len(value) == 2 and value[0] == "running"
+
+
+def answered_after(answered_at: str | None, started_at: str) -> bool:
+    """True when the latest answer came in after the step started (the step could not have seen it)."""
+    if not answered_at:
+        return False
+    try:
+        parse = lambda text: datetime.datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return parse(answered_at) > parse(started_at)
+    except ValueError:
+        return True                       # unsure: look again rather than miss an answer
+
+
+TOOL_STILL_RUNNING = re.compile(r"a tool is still running")    # orchestrator.py: 'run again later'
+RECHECK_SECONDS = 60
+
+
+def recheck_at(seconds: float = RECHECK_SECONDS) -> tuple:
+    """What 'seen' holds for a customer whose tool is still working outside our tables: when to look again.
+    Nothing in the database changes while e.g. the email tool writes samples, so the fingerprint cannot be used."""
+    return ("recheck", time.time() + seconds)
+
+
+def is_recheck_marker(value) -> bool:
+    return isinstance(value, tuple) and len(value) == 2 and value[0] == "recheck"
+
+
+def due(work: list[dict], seen: dict, busy: set, now: float | None = None) -> list[dict]:
+    """Customers to start a step for now: something changed since their last step (or a tool asked to be
+    looked at again and that time has come), and none is running."""
+    now = time.time() if now is None else now
+    def waiting(marker) -> bool:
+        return is_recheck_marker(marker) and marker[1] > now
     return [item for item in work
-            if item["customer"] not in busy and seen.get(item["customer"]) != item["fingerprint"]]
+            if item["customer"] not in busy and not waiting(seen.get(item["customer"]))
+            and seen.get(item["customer"]) != item["fingerprint"]]
 
 
 BUYS_DATA = re.compile(r"next would buy data \((T\d+)\)")     # orchestrator.py --until-wait, when it stops for this
@@ -769,15 +808,20 @@ def work_once(client, seen: dict, running: dict, dotenv_key: str | None, popen=s
         job["log"].close()
         del running[customer]
         print(f"[{time.strftime('%H:%M:%S')}] {customer}: step finished (exit {code}); log: {job['log_path']}")
+        text = read_log(job["log_path"])
+        if code == 0 and TOOL_STILL_RUNNING.search(last_stopped_line(text)):
+            seen[customer] = recheck_at()
+            print(f"[{time.strftime('%H:%M:%S')}] {customer}: a tool is still working; looking again in {RECHECK_SECONDS} s")
+            job["recheck"] = True
         if not paid_steps:
             continue
-        text = read_log(job["log_path"])
         if job.get("paid_step"):
             # The one step a person started: say how it ended. The run itself carries on below.
             ended = ({"status": "done"} if code == 0 else
                      {"status": "failed", "error": (last_stopped_line(text) or f"The step stopped (exit code {code}).")[:REQUEST_ERROR_MAX]})
             paid_steps.update(job["paid_step"], ended, only_from=("running",))
-            seen.pop(customer, None)       # it ran ONE step: the safe step must look at the run again
+            if not job.get("recheck"):
+                seen.pop(customer, None)   # it ran ONE step: the safe step must look at the run again
         else:
             task_id = blocked_paid_task(text)
             if task_id:
@@ -804,15 +848,20 @@ def work_once(client, seen: dict, running: dict, dotenv_key: str | None, popen=s
                 continue
             job["paid_step"] = step["id"]
             running[customer] = job
-            seen[customer] = "running"
+            seen[customer] = running_since()
             print(f"[{time.strftime('%H:%M:%S')}] {customer}: started run {step['month']} for {step['task_id']} "
                   "(started by a person in the platform; buys data)")
 
     work = read_work(client)
-    # Remember the state as it is once a step has finished, so the same state is not run again.
+    # Remember the state as it is once a step has finished, so the same state is not run again. But an
+    # answer given WHILE the step was running was not seen by it: then the customer stays due.
     for item in work:
-        if item["customer"] not in running and item["customer"] in seen and seen[item["customer"]] == "running":
-            seen[item["customer"]] = item["fingerprint"]
+        marker = seen.get(item["customer"])
+        if item["customer"] not in running and is_running_marker(marker):
+            if answered_after(item.get("last_answer"), marker[1]):
+                seen.pop(item["customer"], None)
+            else:
+                seen[item["customer"]] = item["fingerprint"]
 
     to_start = due(work, seen, set(running))
     if not to_start:
@@ -825,7 +874,7 @@ def work_once(client, seen: dict, running: dict, dotenv_key: str | None, popen=s
             seen[item["customer"]] = item["fingerprint"]
             continue
         running[item["customer"]] = job
-        seen[item["customer"]] = "running"
+        seen[item["customer"]] = running_since()
         waiting = f", {item['open_decisions']} decision(s) open" if item["open_decisions"] else ""
         print(f"[{time.strftime('%H:%M:%S')}] {item['customer']}: started run {item['month']} --until-wait{waiting}")
 
@@ -1401,6 +1450,26 @@ def selftest() -> None:
                    len(started) == 3 and started[2]["key"] == "new-co-222222" and list(running) == ["new-co-222222"])
             for job in running.values():
                 job["log"].close()
+
+            # A tool still working outside our tables (e.g. the email tool writing samples) changes nothing
+            # the fingerprint can see: the worker must look again after a while, not wait for a change.
+            job = running["new-co-222222"]
+            with open(job["log_path"], "w", encoding="utf-8") as log:
+                log.write("  Tool:     T14 -> still running\n\nSTOPPED after 1 step(s): a tool is still running (run again later)\n")
+            job["log"] = open(os.devnull, "w")
+            job["process"].code = 0
+            work_once(work_client("2026-10-12T09:50:00Z", old_status="running"), seen, running, "someone-else", popen=fake_popen)
+            expect("a step whose tool is still running is not started again at once",
+                   len(started) == 3 and is_recheck_marker(seen["new-co-222222"]))
+            seen["new-co-222222"] = ("recheck", time.time() - 1)
+            work_once(work_client("2026-10-12T09:50:00Z", old_status="running"), seen, running, "someone-else", popen=fake_popen)
+            expect("...and is looked at again once the wait is over, though nothing changed",
+                   len(started) == 4 and started[3]["key"] == "new-co-222222")
+            expect("a recheck time in the future is not due", due(first_look, {"new-co-222222": recheck_at()}, set()) == [])
+            expect("a recheck time in the past is due",
+                   [w["customer"] for w in due(first_look, {"new-co-222222": recheck_at(-1)}, set())] == ["new-co-222222"])
+            for job in running.values():
+                job["log"].close()
         finally:
             globals()["workspace_for"] = real_workspace
 
@@ -1610,6 +1679,24 @@ def selftest() -> None:
             work_once(work_client(), seen2, running2, "someone-else", popen=paid_popen, paid_steps=paid2)
             expect("a started step that fails says why", paid2.rows[0]["status"] == "failed" and "QuickICP did not answer" in paid2.rows[0]["error"])
             for job in list(running.values()) + list(running2.values()):
+                job["log"].close()
+        finally:
+            globals()["workspace_for"] = real_workspace
+
+    # ---- an answer given while a step was running is not lost (stalled Anvixa AI Version2 on 2026-10-15) ----
+    started = running_since()
+    expect("an answer after the step started keeps the customer due",
+           answered_after("2099-01-01T00:00:00+00:00", started[1]) and not answered_after("2020-01-01T00:00:00Z", started[1])
+           and not answered_after("", started[1]) and answered_after("not a date", started[1]))
+    with tempfile.TemporaryDirectory() as folder:
+        real_workspace = globals()["workspace_for"]
+        globals()["workspace_for"] = lambda key, dotenv_key, brain_dir=BRAIN_DIR: os.path.join(folder, key)
+        try:
+            seen_race, running_race = {"new-co-222222": ("running", "2026-10-12T09:49:00+00:00")}, {}
+            work_once(work_client("2026-10-12T09:50:00Z"), seen_race, running_race, "someone-else",
+                      popen=lambda *a, **k: type("P", (), {"poll": lambda self: None})())
+            expect("so the next look starts a step that applies that answer", "new-co-222222" in running_race)
+            for job in running_race.values():
                 job["log"].close()
         finally:
             globals()["workspace_for"] = real_workspace

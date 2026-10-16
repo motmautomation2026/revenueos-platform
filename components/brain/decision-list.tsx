@@ -26,6 +26,21 @@ import {
 import type { DecisionCard } from "@/lib/brain/view";
 import { answerDecision } from "@/app/(app)/projects/[id]/execution/actions";
 
+/** Sample batches the email tool returned without emails (the Brain's NOT_APPROVABLE states). */
+const SAMPLE_PROBLEMS: Record<string, { title: string; next: string }> = {
+  failed: {
+    title: "The email tool could not write every sample email",
+    next:
+      "Nothing was sent, and these samples cannot be approved until all of them are written. Use Ask for changes with a short note " +
+      "(e.g. \"try again\") to have them written again. If none were written at all, the email tool's own AI key may have been " +
+      "rejected or be out of credits; that is fixed on the email tool's server first.",
+  },
+  stale: {
+    title: "These samples are out of date",
+    next: "The campaign was edited in the email tool after they were written. Use Ask for changes to have them written again.",
+  },
+};
+
 /** Open questions the Brain is waiting on, each with the answers the Brain allows. */
 export function DecisionList({ projectId, decisions }: { projectId: string; decisions: DecisionCard[] }) {
   return (
@@ -48,10 +63,15 @@ function DecisionItem({ projectId, decision }: { projectId: string; decision: De
   const needsNote = noteRequired(decision.kind);
   const noteId = `note-${decision.id}`;
   const human = decision.kind === "human_task" || decision.kind === "human_gate_task";
+  const emails = decision.kind === "email_approve";
+  const review = decision.review;
+  const canChange = options.some((option) => option.answer === "feedback");
   const task = decision.task;
-  const intro = decisionIntro(decision.kind);
-  // The Brain's own sentence for a person's task repeats what is laid out below it.
-  const question = human && task ? "" : decision.text || "The Brain is waiting for an answer.";
+  // Samples the tool could not write (or that are out of date) are empty: say why instead of "read below".
+  const sampleProblem = emails && review ? SAMPLE_PROBLEMS[review.status] : undefined;
+  const intro = sampleProblem ? "" : decisionIntro(decision.kind);
+  // The Brain's own sentence for a person's task, or for an email review, repeats what is laid out below it.
+  const question = (human && task) || emails ? "" : decision.text || "The Brain is waiting for an answer.";
 
   const send = async (option: AnswerOption) => {
     setConfirming(null);
@@ -72,7 +92,7 @@ function DecisionItem({ projectId, decision }: { projectId: string; decision: De
   };
 
   const choose = (option: AnswerOption) => {
-    if (needsNote && !note.trim()) {
+    if ((needsNote || option.answer === "feedback") && !note.trim()) {
       setNoteError(true);
       document.getElementById(noteId)?.focus();
       return;
@@ -121,20 +141,70 @@ function DecisionItem({ projectId, decision }: { projectId: string; decision: De
         </details>
       )}
 
+      {review && (
+        <p className="flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
+          <span className="rounded-full bg-primary/10 px-2 py-0.5 font-semibold text-primary">Version {review.version}</span>
+          {review.roundsLeft > 0
+            ? `${review.roundsLeft} round${review.roundsLeft === 1 ? "" : "s"} of changes left`
+            : "No rounds of changes left"}
+        </p>
+      )}
+
+      {sampleProblem && (
+        <div className="grid gap-1 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm">
+          <p className="font-semibold text-destructive">{sampleProblem.title}</p>
+          {review && review.missing.length > 0 && decision.samples.length > 0 && (
+            <ul className="grid list-disc gap-0.5 pl-5 text-muted-foreground">
+              {review.missing.map((item, i) => (
+                <li key={i}>Not written: {item}</li>
+              ))}
+            </ul>
+          )}
+          <p className="leading-relaxed text-muted-foreground">{sampleProblem.next}</p>
+        </div>
+      )}
+
+      {review && review.checks.length > 0 && (
+        <div className="grid gap-1 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm">
+          <p className="font-semibold text-destructive">
+            {review.checks.length} problem{review.checks.length === 1 ? "" : "s"} found, so this version cannot be approved
+          </p>
+          <ul className="grid list-disc gap-0.5 pl-5 text-muted-foreground">
+            {review.checks.map((check, i) => (
+              <li key={i}>{check}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       {decision.samples.length > 0 && (
-        <details className="rounded-lg border text-sm">
+        <details className="rounded-lg border text-sm" open={emails}>
           <summary className="cursor-pointer px-3 py-2 font-medium">
             {decision.samples.length} sample email{decision.samples.length === 1 ? "" : "s"}
           </summary>
-          <ul className="divide-y border-t">
+          <ul className="max-h-[32rem] divide-y overflow-y-auto border-t">
             {decision.samples.map((sample, i) => (
               <li key={i} className="grid gap-1 px-3 py-2">
-                {sample.to && <p className="text-xs text-muted-foreground">To: {sample.to}</p>}
+                {sample.to && <p className="text-xs text-muted-foreground">For {sample.to}</p>}
                 <p className="font-medium">{sample.subject}</p>
+                {sample.preheader && <p className="text-xs text-muted-foreground italic">{sample.preheader}</p>}
                 <p className="leading-relaxed whitespace-pre-line text-muted-foreground">{sample.text}</p>
               </li>
             ))}
           </ul>
+        </details>
+      )}
+
+      {review && review.previousFeedback.length > 0 && (
+        <details className="text-sm">
+          <summary className="cursor-pointer text-primary">
+            Changes asked for so far ({review.previousFeedback.length})
+          </summary>
+          <ol className="mt-1 grid list-decimal gap-1 pl-5 leading-relaxed text-muted-foreground">
+            {review.previousFeedback.map((feedback, i) => (
+              <li key={i}>{feedback}</li>
+            ))}
+          </ol>
         </details>
       )}
 
@@ -162,7 +232,11 @@ function DecisionItem({ projectId, decision }: { projectId: string; decision: De
       ) : (
         <div className="grid gap-2">
           <label htmlFor={noteId} className="text-xs font-medium text-muted-foreground">
-            {needsNote ? "Note (required)" : "Note (optional)"}
+            {needsNote
+              ? "Note (required)"
+              : canChange
+                ? "What should change (needed for Ask for changes)"
+                : "Note (optional)"}
           </label>
           <Textarea
             id={noteId}
@@ -171,7 +245,7 @@ function DecisionItem({ projectId, decision }: { projectId: string; decision: De
             value={note}
             disabled={sending !== null}
             aria-invalid={noteError}
-            placeholder={human ? "What was done" : undefined}
+            placeholder={human ? "What was done" : canChange ? "e.g. Shorter, and mention the 2-year warranty" : undefined}
             onChange={(e) => {
               setNote(e.target.value);
               if (e.target.value.trim()) setNoteError(false);

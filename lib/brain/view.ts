@@ -136,8 +136,18 @@ export type DecisionCard = {
   why: string;
   followsRule: string;
   allowed: string[];
-  samples: { to: string; subject: string; text: string }[];
+  samples: { to: string; subject: string; preheader: string; text: string }[];
   contacts: { name: string; company: string; phone: string }[];
+  /** Email sample review: which version, how many rounds of changes are left, what our checks found. */
+  review: {
+    version: number;
+    roundsLeft: number;
+    checks: string[];
+    status: string;
+    previousFeedback: string[];
+    /** Samples the tool returned without an email ("Pranav, ... at Armstrong Dematic: email 3"). */
+    missing: string[];
+  } | null;
   open: boolean;
   answer: string | null;
   decidedBy: string | null;
@@ -298,8 +308,22 @@ function decisionCard(
     allowed: strings(q.allowed_answers),
     samples: list(q.samples)
       .map(obj)
-      .map((s) => ({ to: str(s.for) || str(s.email), subject: str(s.subject), text: str(s.text) }))
+      .map((s) => ({ to: str(s.for) || str(s.email), subject: str(s.subject), preheader: str(s.preheader), text: str(s.text) }))
       .filter((s) => s.subject || s.text),
+    review:
+      typeof q.round === "number"
+        ? {
+            version: q.round,
+            roundsLeft: typeof q.feedback_rounds_left === "number" ? q.feedback_rounds_left : 0,
+            checks: strings(q.checks),
+            status: str(q.samples_status),
+            previousFeedback: strings(q.previous_feedback),
+            missing: list(q.samples)
+              .map(obj)
+              .filter((s) => !str(s.subject) && !str(s.text))
+              .map((s) => `${str(s.for) || str(s.email) || "A recipient"}${typeof s.email === "number" ? `: email ${s.email}` : ""}`),
+          }
+        : null,
     contacts: list(q.contacts)
       .map(obj)
       .map((c) => ({ name: str(c.name), company: str(c.company), phone: maskPhone(str(c.phone)) }))

@@ -280,8 +280,91 @@ function emailTiles(c: {
   return tiles;
 }
 
+/** One sample email; `written` is false when the tool returned that email empty (it failed). */
+export type EmailSample = {
+  to: string;
+  /** 1, 2, 3...: its place in the sequence, when the Brain recorded it. */
+  email: number | null;
+  subject: string;
+  preheader: string;
+  text: string;
+  written: boolean;
+};
+
+/** The campaign as the Brain handed it to the email tool (its 'request' step): no addresses of the sender, no secrets. */
+export type EmailPlan = {
+  name: string;
+  description: string;
+  timezone: string;
+  /** ISO weekdays, 1 = Monday. */
+  weekdays: number[];
+  dailyLimit: number | null;
+  windowStart: string;
+  windowEnd: string;
+  cta: string;
+  tone: string;
+  /** The base sequence the samples are written from; waitDays counts from the email before. */
+  emails: { subject: string; preheader: string; text: string; waitDays: number }[];
+  recipients: { name: string; title: string; company: string; email: string }[];
+};
+
+/** Paragraphs and line breaks kept, every other tag dropped, the few entities the Brain writes decoded. */
+export function htmlToText(html: string): string {
+  return html
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/p>\s*<p[^>]*>/gi, "\n\n")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&zwnj;/g, "")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&quot;/g, '"')
+    .trim();
+}
+
+/** The plan out of a stored 'request' tool call (its output column). Only the fields named here are read. */
+export function emailPlanOf(output: unknown): EmailPlan | null {
+  const body = obj(obj(output).body);
+  if (!Object.keys(body).length) return null;
+  const campaign = obj(body.campaign);
+  const schedule = obj(body.schedule);
+  const objective = obj(body.objective);
+  const time = (v: unknown) => str(v).slice(0, 5);
+  return {
+    name: str(campaign.name),
+    description: str(campaign.description),
+    timezone: str(schedule.timezone),
+    weekdays: ids(schedule.weekdays),
+    dailyLimit: num(schedule.daily_limit),
+    windowStart: time(schedule.window_start_local),
+    windowEnd: time(schedule.window_end_local),
+    cta: str(objective.cta),
+    tone: str(objective.tone),
+    emails: list(body.emails)
+      .map(obj)
+      .map((e) => ({
+        subject: str(e.subject),
+        preheader: str(e.preheader),
+        text: htmlToText(str(e.body_html) || str(e.body_text)),
+        waitDays: num(e.wait_days_before) ?? 0,
+      })),
+    recipients: list(body.recipients)
+      .map(obj)
+      .map((r) => ({
+        name: [str(r.first_name), str(r.last_name)].filter(Boolean).join(" ") || str(r.name),
+        title: str(r.title),
+        company: str(r.company),
+        email: str(r.email),
+      })),
+  };
+}
+
 export type EmailCampaign = {
   taskId: string;
+  /** The Brain's row id of the task, to find its plan (loadEmailPlans). */
+  taskRowId: number;
   /** The campaign's id in the email tool, when the Brain recorded one. */
   campaignId: string;
   status: TaskStatus;
@@ -299,7 +382,11 @@ export type EmailCampaign = {
   testMode: boolean;
   note: string;
   lastError: string | null;
-  samples: { to: string; subject: string; text: string }[];
+  samples: EmailSample[];
+  /** The email tool's state of the latest samples: ready, failed (some not written), stale... */
+  samplesStatus: string;
+  /** Which version of the samples (1 = first, +1 per round of changes). */
+  samplesVersion: number | null;
   approval: Approval | null;
   steps: ToolCallView[];
   stages: Stage[];
@@ -316,10 +403,20 @@ export function buildEmailReport({ tasks, decisions, toolCalls }: RunRows): Emai
       const approved = approvalOf(task, "email_approve", decisions);
       const steps = stepsOf(task, toolCalls);
       const approval = approved?.approval ?? null;
-      const samples = list(obj(approved?.row.question).samples)
+      const question = obj(approved?.row.question);
+      const samples = list(question.samples)
         .map(obj)
-        .map((s) => ({ to: str(s.for) || str(s.email), subject: str(s.subject), text: str(s.text) }))
-        .filter((s) => s.subject || s.text);
+        .map(
+          (s): EmailSample => ({
+            to: str(s.for) || (typeof s.email === "string" ? str(s.email) : ""),
+            email: num(s.email),
+            subject: str(s.subject),
+            preheader: str(s.preheader),
+            text: str(s.text),
+            written: !!(str(s.subject) || str(s.text)),
+          })
+        );
+      const written = samples.filter((s) => s.written).length;
       const facts = {
         recipients: num(r.recipients),
         rejected: num(r.rejected),
@@ -329,6 +426,7 @@ export function buildEmailReport({ tasks, decisions, toolCalls }: RunRows): Emai
       };
       return {
         taskId: task.task_id,
+        taskRowId: task.id,
         status: task.status,
         campaignId: str(r.campaign_id),
         reference: str(r.reference) || str(obj(approved?.row.question).reference),
@@ -341,10 +439,12 @@ export function buildEmailReport({ tasks, decisions, toolCalls }: RunRows): Emai
         note: str(r.note),
         lastError: task.last_error,
         samples,
+        samplesStatus: str(question.samples_status),
+        samplesVersion: num(question.round),
         approval,
         steps,
         stages: emailStages(steps, approval),
-        tiles: emailTiles({ ...facts, samples: samples.length, approval }),
+        tiles: emailTiles({ ...facts, samples: written, approval }),
       };
     });
 

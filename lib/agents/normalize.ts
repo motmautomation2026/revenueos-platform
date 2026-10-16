@@ -75,12 +75,20 @@ function matchEnum(value: unknown, options: unknown[]): unknown {
   const wanted = squash(value);
   if (!wanted) return undefined;
   const strings = options.filter((o): o is string => typeof o === "string");
-  return (
+  const matched =
     strings.find((o) => squash(o) === wanted) ??
     strings.find((o) => squash(o).startsWith(wanted) || wanted.startsWith(squash(o))) ??
-    strings.find((o) => wanted.includes(squash(o)))
-  );
+    strings.find((o) => wanted.includes(squash(o)));
+  if (matched !== undefined) return matched;
+  // A document source ("brochure", "catalogue", "deck"...) where the format groups them: the
+  // customer's own material, or any other document. Only for lists that have both values.
+  if (strings.includes("customer_material") && strings.includes("other")) {
+    return CUSTOMER_MATERIAL.test(value) ? "customer_material" : "other";
+  }
+  return undefined;
 }
+
+const CUSTOMER_MATERIAL = /brochure|catalog|profile|presentation|deck|slide|case.?stud|leaflet|flyer|website/i;
 
 const TRUE_WORDS = ["true", "yes", "y", "1"];
 const FALSE_WORDS = ["false", "no", "n", "0"];

@@ -1,7 +1,9 @@
 import "server-only";
 import ExcelJS from "exceljs";
+import JSZip from "jszip";
 import mammoth from "mammoth";
 import { extractText as extractPdfText, getDocumentProxy } from "unpdf";
+import { imagePages, readImagePages } from "./ocr";
 import { fileExtension } from "./rules";
 
 /** An error whose message is safe and useful to show to the user. */
@@ -22,10 +24,23 @@ function clean(text: string) {
     .trim();
 }
 
+/**
+ * Every page's text. A page that is a picture of text (a scan, or a brochure exported as images)
+ * is read with free OCR (lib/files/ocr.ts) and marked, so the agents know it may hold reading errors.
+ */
 async function extractPdf(bytes: Uint8Array) {
   const pdf = await getDocumentProxy(bytes);
   const { text } = await extractPdfText(pdf, { mergePages: false });
-  return text.join("\n\n");
+  const pictures = imagePages(text);
+  if (!pictures.length) return text.join("\n\n");
+
+  const { texts, skipped } = await readImagePages(pdf, pictures);
+  const pages = text.map((pageText, index) => {
+    const read = texts.get(index + 1);
+    return read ? `[Page ${index + 1}, read from an image: may contain reading errors]\n${read}` : pageText;
+  });
+  if (skipped) pages.push(`[${skipped} more image page(s) were not read: only the first pages of a scan are read.]`);
+  return pages.join("\n\n");
 }
 
 async function extractDocx(buffer: Buffer) {
@@ -79,6 +94,42 @@ async function extractXlsx(buffer: Buffer) {
   return sheets.join("\n\n");
 }
 
+const XML_ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" };
+const decodeXml = (text: string) =>
+  text.replace(/&(amp|lt|gt|quot|apos|#\d+|#x[0-9a-f]+);/gi, (_, entity: string) =>
+    entity[0] === "#"
+      ? String.fromCodePoint(entity[1].toLowerCase() === "x" ? parseInt(entity.slice(2), 16) : parseInt(entity.slice(1), 10))
+      : XML_ENTITIES[entity.toLowerCase()]
+  );
+
+/** The text of one slide's XML: one line per paragraph (<a:p>), its runs (<a:t>) joined. */
+function slideText(xml: string) {
+  return xml
+    .split(/<a:p[\s>]/)
+    .map((paragraph) => [...paragraph.matchAll(/<a:t>([^<]*)<\/a:t>/g)].map((m) => decodeXml(m[1])).join(""))
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join("\n");
+}
+
+/** Every slide in order as "--- Slide N ---", followed by its speaker notes when it has any. */
+async function extractPptx(buffer: Buffer) {
+  const zip = await JSZip.loadAsync(buffer);
+  const number = (path: string) => Number(path.match(/(\d+)\.xml$/)?.[1] ?? 0);
+  const slides = Object.keys(zip.files)
+    .filter((path) => /^ppt\/slides\/slide\d+\.xml$/.test(path))
+    .sort((a, b) => number(a) - number(b));
+  const parts: string[] = [];
+  for (const path of slides) {
+    const text = slideText(await zip.file(path)!.async("string"));
+    const notesFile = zip.file(`ppt/notesSlides/notesSlide${number(path)}.xml`);
+    // Notes repeat the slide number as text; keep only real sentences.
+    const notes = notesFile ? slideText(await notesFile.async("string")).replace(/^\d+$/gm, "").trim() : "";
+    if (text || notes) parts.push([`--- Slide ${number(path)} ---`, text, notes && `Notes: ${notes}`].filter(Boolean).join("\n"));
+  }
+  return parts.join("\n\n");
+}
+
 function extractPlain(buffer: Buffer) {
   return new TextDecoder("utf-8").decode(buffer).replace(/^﻿/, "");
 }
@@ -102,6 +153,10 @@ export async function extractText(buffer: Buffer, fileName: string): Promise<str
         if (!startsWith(bytes, ZIP_SIGNATURE)) throw new ExtractionError("This is not a valid XLSX file.");
         text = await extractXlsx(buffer);
         break;
+      case "pptx":
+        if (!startsWith(bytes, ZIP_SIGNATURE)) throw new ExtractionError("This is not a valid PPTX file.");
+        text = await extractPptx(buffer);
+        break;
       case "csv":
       case "txt":
       case "md":
@@ -121,7 +176,7 @@ export async function extractText(buffer: Buffer, fileName: string): Promise<str
   if (!text) {
     throw new ExtractionError(
       ext === "pdf"
-        ? "No text found. This PDF looks like a scan (images only); upload a text version."
+        ? "No readable text found, even with image reading. Upload a text version, or a clearer scan."
         : "No text found in this file."
     );
   }

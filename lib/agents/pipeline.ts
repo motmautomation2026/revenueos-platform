@@ -7,6 +7,7 @@ import {
   type InputChecklistItem,
   type InputFile,
   type InputProject,
+  laterStepFiles,
 } from "@/lib/agents/build-inputs";
 import { buildPlanDocument, type PlanInternal } from "@/lib/plan/document";
 import { renderPlanHtml } from "@/lib/plan/render-html";
@@ -23,6 +24,7 @@ import type { Project } from "@/lib/projects";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { TABLES } from "@/lib/supabase/tables";
 import { OPENAI_MODEL } from "./config";
+import { withFactSheets } from "./fact-sheet";
 import { AgentError, runAgent } from "./run-agent";
 
 export type PlanRow = {
@@ -213,11 +215,11 @@ async function loadInputs(admin: SupabaseClient, projectId: string) {
       .single<InputProject>(),
     admin
       .from(TABLES.projectFiles)
-      .select("doc_type, file_name, extracted_text")
+      .select("id, doc_type, file_name, extracted_text")
       .eq("project_id", projectId)
       .eq("extraction_status", "done")
       .order("created_at", { ascending: true })
-      .returns<InputFile[]>(),
+      .returns<(InputFile & { id: string })[]>(),
     admin
       .from(TABLES.checklists)
       .select("id")
@@ -236,20 +238,25 @@ async function loadInputs(admin: SupabaseClient, projectId: string) {
 
   return {
     project,
-    base: `${buildDocumentBlock(project, files ?? [])}\n\n${buildFilledChecklistBlock(items ?? [])}`,
+    // Diagnosis reads every document (large customer documents as fact sheets); Strategy and
+    // Execution read the agreed documents again, but not the customer's material (laterStepFiles).
+    base: {
+      diagnosis: `${buildDocumentBlock(project, await withFactSheets(admin, files ?? []))}\n\n${buildFilledChecklistBlock(items ?? [])}`,
+      later: `${buildDocumentBlock(project, laterStepFiles(files ?? []))}\n\n${buildFilledChecklistBlock(items ?? [])}`,
+    },
   };
 }
 
-function userMessage(step: PlanStep, base: string, plan: PlanRow) {
+function userMessage(step: PlanStep, inputs: { diagnosis: string; later: string }, plan: PlanRow) {
   const diagnosis = `=== DIAGNOSIS (Part 1, JSON) ===\n${JSON.stringify(plan.diagnosis)}`;
   const strategy = `=== STRATEGY (Part 2, JSON) ===\n${JSON.stringify(plan.strategy)}`;
   switch (step) {
     case "diagnosis":
-      return `${base}\n\nWrite the diagnosis now.`;
+      return `${inputs.diagnosis}\n\nWrite the diagnosis now.`;
     case "strategy":
-      return `${base}\n\n${diagnosis}\n\nWrite the strategy now.`;
+      return `${inputs.later}\n\n${diagnosis}\n\nWrite the strategy now.`;
     case "execution":
-      return `${base}\n\n${diagnosis}\n\n${strategy}\n\nWrite the execution plan now.`;
+      return `${inputs.later}\n\n${diagnosis}\n\n${strategy}\n\nWrite the execution plan now.`;
   }
 }
 

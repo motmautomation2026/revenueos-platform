@@ -7,7 +7,9 @@ import {
   ACTIVE_STATUSES,
   APPROVER_MAX,
   buildRequestView,
+  compulsoryProblems,
   planAnswerProblem,
+  readMonthPlan,
   type BrainRequestRow,
   type PlanAnswer,
   type RequestView,
@@ -91,17 +93,19 @@ export async function answerRequest(input: {
   const admin = createAdminClient();
   const { data: row } = await admin
     .from(TABLE)
-    .select("id, status, answer, plan_errors")
+    .select("id, status, answer, plan_errors, plan, revenue_analysis")
     .eq("id", input.requestId)
     .eq("project_id", input.projectId) // never another project's request
-    .maybeSingle<{ id: string; status: string; answer: string | null; plan_errors: unknown }>();
+    .maybeSingle<{ id: string; status: string; answer: string | null; plan_errors: unknown; plan: unknown; revenue_analysis: unknown }>();
   if (!row) return { ok: false, error: "This request no longer exists." };
   if (row.status !== "awaiting_approval") return { ok: false, error: "The month plan is not waiting for approval any more." };
   if (row.answer) return { ok: false, error: "An answer was already sent. The Brain is reading it." };
 
   const broken = Array.isArray(row.plan_errors) ? row.plan_errors.length : 0;
+  const errors = Array.isArray(row.plan_errors) ? row.plan_errors.filter((e): e is string => typeof e === "string") : [];
+  const compulsory = compulsoryProblems(readMonthPlan(row.plan, row.revenue_analysis)?.tasks ?? [], errors);
   const note = input.note.trim();
-  const problem = planAnswerProblem(input.answer, note, broken);
+  const problem = planAnswerProblem(input.answer, note, broken, compulsory.length);
   if (problem) return { ok: false, error: problem };
 
   const { data: updated, error } = await admin

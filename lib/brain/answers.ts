@@ -7,7 +7,8 @@ export const ALLOWED_ANSWERS: Record<string, readonly string[]> = {
   plan_approval: ["yes", "no"],
   goal_check: ["continue", "more", "stop"],
   goal_check_final: ["continue", "stop"],
-  email_approve: ["yes", "no"],
+  // feedback = a note the email tool rewrites the samples with (brain/runner_email.py, feedback rounds)
+  email_approve: ["yes", "no", "feedback"],
   call_start: ["yes", "no"],
   paid_call_unknown: ["rerun", "skip", "stop"],
   task_failed: ["retry", "skip", "stop"],
@@ -29,6 +30,7 @@ export function answerProblem(kind: string, answer: string, note: string): strin
   if (!allowed) return "This kind of decision cannot be answered from the app.";
   if (!allowed.includes(answer)) return `Choose one of: ${allowed.join(", ")}.`;
   if (noteRequired(kind) && !note.trim()) return "Add a short note saying what was done or why.";
+  if (answer === "feedback" && !note.trim()) return "Write what should change in the emails.";
   if (note.length > MAX_NOTE_LENGTH) return `Keep the note under ${MAX_NOTE_LENGTH} characters.`;
   return null;
 }
@@ -61,6 +63,7 @@ const OPTIONS: Record<string, Omit<AnswerOption, "answer">> = {
     confirm: "The earlier attempt may already have gone through, so running it again could do the same thing twice.",
   },
   retry: { label: "Retry", tone: "primary", confirm: "The Brain will run this task again." },
+  feedback: { label: "Ask for changes", tone: "neutral" },
 };
 
 const APPROVAL_CONFIRM: Record<string, string> = {
@@ -79,7 +82,9 @@ export function decisionIntro(kind: string): string {
   if (kind === "goal_check" || kind === "goal_check_final") {
     return "The tool found fewer results than the target. Everything found so far is saved.";
   }
-  if (kind === "email_approve") return "Nothing is sent until you approve. Read the emails below first.";
+  if (kind === "email_approve") {
+    return "Nothing is sent until you approve. Read the sample emails below; ask for changes to have them rewritten.";
+  }
   if (kind === "call_start") return "No call is made until you approve. Check who will be called first.";
   if (kind === "paid_call_unknown") {
     return "The Brain was interrupted during a paid call and cannot tell whether it went through.";
@@ -112,6 +117,8 @@ export function answerHelp(kind: string, answer: string): string {
       return kind === "email_approve" ? "Start sending." : kind === "call_start" ? "Start calling." : "Approve.";
     case "no":
       return "Do not go ahead. Nothing is sent or called.";
+    case "feedback":
+      return "The email tool rewrites the samples using your note; you then review the new version.";
     case "accept":
       return "Record that you agree.";
     case "reject":

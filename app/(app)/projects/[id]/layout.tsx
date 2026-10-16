@@ -1,4 +1,5 @@
 import { Suspense } from "react";
+import { cookies } from "next/headers";
 import Link from "next/link";
 import { ChevronRight } from "lucide-react";
 import { ProjectArchiveButton } from "@/components/project-archive-button";
@@ -9,6 +10,7 @@ import { loadCallRecords, loadExecution } from "@/lib/brain/read";
 import { executionStatus } from "@/lib/brain/status";
 import { buildCallsReport, buildEmailReport, buildResearchReport } from "@/lib/brain/tools";
 import { reachedStep, statusLabel, statusTone } from "@/lib/projects";
+import { SIDEBAR_COOKIE } from "@/lib/sidebar";
 import { cn } from "@/lib/utils";
 
 const number = new Intl.NumberFormat("en-IN");
@@ -67,6 +69,7 @@ export default async function ProjectLayout({
   const { id } = await params;
   const { project } = await requireProject(id);
   const planReady = project.status === "plan_ready";
+  const sidebarCollapsed = (await cookies()).get(SIDEBAR_COOKIE)?.value === "collapsed";
   const badges = planReady ? await sidebarBadges(project.id) : null;
   // Planning status until the plan is ready; after that, where execution stands.
   const status = (planReady && (await executionStatus(project.id))) || {
@@ -124,13 +127,24 @@ export default async function ProjectLayout({
         </p>
       )}
 
-      <div className="grid items-start gap-5 lg:grid-cols-[15.5rem_minmax(0,1fr)] xl:grid-cols-[17rem_minmax(0,1fr)] xl:gap-6 print:block">
-        <Suspense fallback={<div className="h-12 rounded-xl border bg-background lg:h-96" />}>
+      {/* The panel sets its own width (open or collapsed to icons); the page takes the rest. */}
+      <div className="grid items-start gap-5 lg:grid-cols-[auto_minmax(0,1fr)] xl:gap-6 print:block">
+        <Suspense
+          fallback={
+            <div
+              className={cn(
+                "h-12 rounded-xl border bg-background lg:h-96",
+                sidebarCollapsed ? "lg:w-[3.75rem]" : "lg:w-[15.5rem] xl:w-[17rem]"
+              )}
+            />
+          }
+        >
           <ProjectSidebar
             projectId={project.id}
             reached={reachedStep(project.status)}
             planReady={planReady}
             badges={badges}
+            initiallyCollapsed={sidebarCollapsed}
           />
         </Suspense>
         <div className="min-w-0 rounded-xl border bg-background p-4 sm:p-6 xl:p-8 print:border-0 print:p-0">

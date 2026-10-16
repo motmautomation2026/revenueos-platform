@@ -40,6 +40,7 @@ RUN
 """
 
 import os
+import re
 import time
 
 REQUESTS = "revenueos_brain_requests"
@@ -49,6 +50,56 @@ HEARTBEAT_SECONDS = 60
 WAIT_HOURS = 72                      # an unanswered plan is given up after this long
 PENDING_APPROVER = "platform (pending)"
 APPROVER_MAX = 80                    # same limit as plan_approval.APPROVER_MAX
+
+
+# Every month plan must use all four connected tools, in this order: find companies -> find people
+# (email + phone) -> email campaign and AI calls; and no task may be one that can never run. Such a
+# plan is never approved, not even with "override". The platform's lib/brain/requests.ts
+# (compulsoryProblems) has the same rule.
+NEEDS_PEOPLE = ("Quickhowl", "Email Agent")
+REQUIRED_STEPS = (("QuickICP", "accounts", "find companies (QuickICP)"),
+                  ("QuickICP", "contacts", "find people with email and phone (QuickICP contacts)"),
+                  ("Email Agent", "emails", "an email campaign (Email Agent)"),
+                  ("Quickhowl", "calls", "AI calls (Quickhowl)"))
+COMPULSORY_ERRORS = re.compile(r"has no number\. Tool tasks run by a count|which does not exist|"
+                               r"is not enabled for this customer|only has:")
+
+
+def compulsory_problems(plan: dict | None, errors: list[str]) -> list[str]:
+    """One sentence per compulsory problem of a published month plan; empty when it may be approved."""
+    tasks = {str(t.get("task_id")): t for t in ((plan or {}).get("tasks") or []) if isinstance(t, dict)}
+
+    def comes_after(task: dict, agent: str, output_type: str) -> bool:
+        seen, stack = set(), list(task.get("depends_on") or [])
+        while stack:
+            task_id = str(stack.pop())
+            if task_id in seen:
+                continue
+            seen.add(task_id)
+            before = tasks.get(task_id)
+            if not before:
+                continue
+            if before.get("agent") == agent and before.get("output_type") == output_type:
+                return True
+            stack.extend(before.get("depends_on") or [])
+        return False
+
+    def finds_people_before(task: dict) -> bool:
+        return comes_after(task, "QuickICP", "contacts")
+
+    def has(agent: str, output_type: str) -> bool:
+        return any(t.get("agent") == agent and t.get("output_type") == output_type for t in tasks.values())
+
+    steps = [f"The plan has no step to {words}. Every month plan must have it."
+             for agent, output_type, words in REQUIRED_STEPS if not has(agent, output_type)]
+    order = [f"{task_id} (find people) must come after the step that finds companies."
+             for task_id, task in tasks.items()
+             if task.get("agent") == "QuickICP" and task.get("output_type") == "contacts"
+             and has("QuickICP", "accounts") and not comes_after(task, "QuickICP", "accounts")]
+    missing = [f"{task_id} ({'email campaign' if task.get('agent') == 'Email Agent' else 'AI calls'}) has no earlier "
+               "step that finds people's email and phone. A QuickICP contacts task must come before it."
+               for task_id, task in tasks.items() if task.get("agent") in NEEDS_PEOPLE and not finds_people_before(task)]
+    return steps + order + missing + [error for error in errors or [] if COMPULSORY_ERRORS.search(error)]
 
 
 class Stop(Exception):
@@ -182,6 +233,7 @@ class PlatformReader:
         self._sleep, self._clock = sleep, clock
         self._poll, self._deadline = poll_seconds, clock() + wait_hours * 3600
         self._queued: list[str] = []          # the override reason, handed over on the next call
+        self._compulsory = compulsory_problems(payload.get("plan"), self._errors)
         self._published = False
         self.approved_by: str | None = None   # who approved, for the proof
 
@@ -226,6 +278,11 @@ class PlatformReader:
             typed = {"yes": "yes", "override": "override"}.get(answer, text)
             choice = self._decide(typed, self._errors)
 
+            if self._compulsory and choice.action in ("approve", "override"):
+                # A task in this plan could never run: it is changed, never approved (not even anyway).
+                self._publish("This plan is missing a compulsory step and cannot be approved: "
+                              + " ".join(self._compulsory[:3]) + " Ask for changes.")
+                continue
             if answer == "changes" and choice.action != "feedback":
                 # "yes" or "override" sent as changes must never be read as an approval.
                 self._publish("Describe the changes in a sentence. Nothing was approved.")
@@ -315,10 +372,15 @@ def selftest() -> None:
         def model_dump(self, mode="json"):
             return self._data
 
-    state = {"month_plan": Model({"month": "Month 1", "tasks": [{"task_id": "T1"}]}),
+    # A complete plan: all four tool steps in order, so only the answer rules are being tested here.
+    complete = [{"task_id": "T1", "agent": "QuickICP", "output_type": "accounts", "depends_on": []},
+                {"task_id": "T2", "agent": "QuickICP", "output_type": "contacts", "depends_on": ["T1"]},
+                {"task_id": "T3", "agent": "Email Agent", "output_type": "emails", "depends_on": ["T2"]},
+                {"task_id": "T4", "agent": "Quickhowl", "output_type": "calls", "depends_on": ["T2"]}]
+    state = {"month_plan": Model({"month": "Month 1", "tasks": complete}),
              "revenue_analysis": Model({"revenue_goal": "2 crore"})}
     expect("the plan is published as plain data, with the rule errors",
-           plan_payload(state, ["rule A"]) == {"plan": {"month": "Month 1", "tasks": [{"task_id": "T1"}]},
+           plan_payload(state, ["rule A"]) == {"plan": {"month": "Month 1", "tasks": complete},
                                                "revenue_analysis": {"revenue_goal": "2 crore"}, "plan_errors": ["rule A"]})
 
     def reader_for(row, errors, answers):
@@ -390,6 +452,34 @@ def selftest() -> None:
     except Stop:
         timed_out = store.row["status"] == "failed" and store.row["failed_step"] == "plan"
     expect("an unanswered plan is given up after the waiting time and marked failed", timed_out)
+
+    # a compulsory step missing: never approved, not even with override; changes still go through
+    plan = {"tasks": [{"task_id": "T1", "agent": "QuickICP", "output_type": "accounts", "depends_on": []},
+                      {"task_id": "T4", "agent": "Quickhowl", "output_type": "calls", "depends_on": ["T1"]}]}
+    expect("calls with no people-search step before them are a compulsory problem",
+           any(p.startswith("T4 (AI calls) has no earlier step") for p in compulsory_problems(plan, [])))
+    expect("a plan missing a tool step is a compulsory problem",
+           any("no step to an email campaign" in p for p in compulsory_problems(plan, [])))
+    fixed = {"tasks": plan["tasks"][:1] + [{"task_id": "T2", "agent": "QuickICP", "output_type": "contacts", "depends_on": ["T1"]},
+                                           {"task_id": "T4", "agent": "Quickhowl", "output_type": "calls", "depends_on": ["T2"]},
+                                           {"task_id": "T6", "agent": "Email Agent", "output_type": "emails", "depends_on": ["T2"]}]}
+    expect("all four tools, in order, means nothing is compulsory", compulsory_problems(fixed, []) == [])
+    loose = {"tasks": [{**t, "depends_on": []} if t["task_id"] == "T2" else t for t in fixed["tasks"]]}
+    expect("people found before the companies are a compulsory problem",
+           compulsory_problems(loose, []) == ["T2 (find people) must come after the step that finds companies."])
+    expect("a tool task with no number is compulsory too",
+           compulsory_problems(fixed, ["T4 (Quickhowl / calls) target 'x' has no number. Tool tasks run by a count: give one"]) != [])
+    store = MemoryRequests({"id": "r1", "status": "planning"})
+    answers = [{"answer": "override", "answer_text": "go anyway", "answered_by": "A"},
+               {"answer": "changes", "answer_text": "plan: add a contacts task", "answered_by": "A"}]
+    def feed(seconds):
+        if answers:
+            store.row.update(answers.pop(0))
+    read = PlatformReader(store, "r1", {"plan": plan, "plan_errors": ["rule"]}, ["rule"], decide, sleep=feed)
+    expect("approving anyway is refused while a compulsory step is missing; changes still go through",
+           read("Approve?") == "plan: add a contacts task" and read.approved_by is None)
+    expect("the refusal is shown in the platform",
+           any("compulsory step" in (w.get("brain_message") or "") for w in store.writes))
 
     # the store's guard
     store = MemoryRequests({"id": "r1", "status": "cancelled"})

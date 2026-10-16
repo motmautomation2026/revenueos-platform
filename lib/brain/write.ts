@@ -25,9 +25,9 @@ export async function recordAnswer(input: {
 
   const { data: decision } = await admin
     .from("brain_decisions")
-    .select("id, run_id, kind, status, answer")
+    .select("id, run_id, kind, status, answer, question")
     .eq("id", input.decisionId)
-    .maybeSingle<{ id: number; run_id: number; kind: string; status: string; answer: string | null }>();
+    .maybeSingle<{ id: number; run_id: number; kind: string; status: string; answer: string | null; question: unknown }>();
   if (!decision) return { ok: false, error: "This decision no longer exists." };
 
   // Never another customer's decision: its run must belong to this project's customer.
@@ -46,6 +46,12 @@ export async function recordAnswer(input: {
   const note = input.note.trim();
   const problem = answerProblem(decision.kind, input.answer, note);
   if (problem) return { ok: false, error: problem };
+  // A question may offer fewer answers than its kind allows (e.g. no more rounds of changes), as the
+  // Brain's own answer_decision enforces.
+  const offered = (decision.question as { allowed_answers?: unknown } | null)?.allowed_answers;
+  if (Array.isArray(offered) && offered.length && !offered.includes(input.answer)) {
+    return { ok: false, error: "That answer is not available for this question any more. Refresh the page." };
+  }
 
   const reason = [note, `via RevenueOS app: ${input.answeredBy}`].filter(Boolean).join(" · ");
   const { data: updated, error } = await admin

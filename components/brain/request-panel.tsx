@@ -23,6 +23,7 @@ import {
   REQUEST_STEPS,
   failedWhile,
   planAnswerProblem,
+  suggestedChange,
   requestStepIndex,
   type MonthPlanView,
   type PlanAnswer,
@@ -178,6 +179,7 @@ export function RequestPanel({
         <Approval
           plan={request.plan}
           errors={request.planErrors}
+          compulsory={request.compulsory}
           message={request.brainMessage}
           busy={busy}
           cancel={cancel}
@@ -315,6 +317,7 @@ function Waiting({
 function Approval({
   plan,
   errors,
+  compulsory,
   message,
   busy,
   cancel,
@@ -322,6 +325,8 @@ function Approval({
 }: {
   plan: MonthPlanView;
   errors: string[];
+  /** Problems that stop this plan from being approved at all. */
+  compulsory: string[];
   message: string | null;
   busy: string | null;
   cancel: React.ReactNode;
@@ -333,7 +338,7 @@ function Approval({
   const weeks = [...new Set(plan.tasks.map((task) => task.week ?? 0))].sort((a, b) => a - b);
 
   const answer = (choice: PlanAnswer) => {
-    const found = planAnswerProblem(choice, note, broken);
+    const found = planAnswerProblem(choice, note, broken, compulsory.length);
     setProblem(found);
     if (found) {
       if (choice !== "yes") document.getElementById("plan-answer-note")?.focus();
@@ -361,7 +366,34 @@ function Approval({
         </p>
       )}
 
-      {broken > 0 && (
+      {compulsory.length > 0 && (
+        <div className="grid gap-2 rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-sm">
+          <p className="flex items-center gap-2 font-semibold text-destructive">
+            <TriangleAlert className="size-4" aria-hidden />
+            A compulsory step is missing, so this plan cannot be approved
+          </p>
+          <ul className="grid list-disc gap-1 pl-5 leading-relaxed">
+            {compulsory.map((problem, i) => (
+              <li key={i}>{problem}</li>
+            ))}
+          </ul>
+          <div>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                setNote(suggestedChange(plan.tasks));
+                setProblem(null);
+              }}
+            >
+              Use the suggested change
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {broken > 0 && compulsory.length === 0 && (
         <div className="grid gap-2 rounded-lg border border-amber-500/50 bg-amber-500/10 p-3 text-sm">
           <p className="flex items-center gap-2 font-semibold text-amber-900">
             <TriangleAlert className="size-4" aria-hidden />
@@ -443,7 +475,7 @@ function Approval({
           </p>
         )}
         <div className="flex flex-wrap gap-2">
-          {broken === 0 ? (
+          {compulsory.length > 0 ? null : broken === 0 ? (
             <Button disabled={busy !== null || note.trim() !== ""} onClick={() => answer("yes")}>
               {busy === "yes" && <Loader2 className="animate-spin" aria-hidden />}
               Approve month plan

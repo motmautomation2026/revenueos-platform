@@ -1,7 +1,7 @@
 import "server-only";
 import { cache } from "react";
 import { createAdminClient } from "@/lib/supabase/admin";
-import type { RunRows } from "./tools";
+import { emailPlanOf, type EmailPlan, type RunRows } from "./tools";
 import {
   buildExecutionView,
   monthOfRunKey,
@@ -154,6 +154,33 @@ export const loadExecution = cache(async (projectId: string, runKey?: string): P
     return { state: "error", message: "The Brain's data could not be loaded." };
   }
 });
+
+/**
+ * The campaign each email task handed to the email tool: its latest 'request' tool call. Only the
+ * Email page reads this (it holds the recipient list), and emailPlanOf keeps only the fields it names.
+ */
+export async function loadEmailPlans(taskRowIds: number[]): Promise<Map<number, EmailPlan>> {
+  const result = new Map<number, EmailPlan>();
+  if (!taskRowIds.length) return result;
+  try {
+    const { data } = await createAdminClient()
+      .from("brain_tool_calls")
+      .select("task_row_id, output")
+      .in("task_row_id", taskRowIds)
+      .eq("tool", "email_tool")
+      .eq("step", "request")
+      .order("id", { ascending: false })
+      .returns<{ task_row_id: number; output: unknown }[]>();
+    for (const row of data ?? []) {
+      if (result.has(row.task_row_id)) continue; // newest first: the campaign as it was last sent
+      const plan = emailPlanOf(row.output);
+      if (plan) result.set(row.task_row_id, plan);
+    }
+  } catch {
+    // Optional extra detail: without it the page shows what the Brain recorded on the task.
+  }
+  return result;
+}
 
 // ---------------------------------------------------------------------------
 // QuickICP records (the companies and contacts found for this customer)

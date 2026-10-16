@@ -121,6 +121,7 @@ test("the published month plan is read as tasks by week", () => {
     id: "T2",
     week: 2,
     agent: "Email",
+    outputType: "",
     task: "Send the first sequence",
     target: "150 contacts",
     dependsOn: ["T1"],
@@ -201,4 +202,61 @@ test("the app, the Brain's worker and the import script name each tool account t
   assert.equal(update.email_user_email, null);
   assert.ok(!("calls_user_password" in update), "an empty password keeps the saved one");
   assert.equal(accountsUpdate({ ...input, calls_user_password: "new-secret" }).calls_user_password, "new-secret");
+});
+
+test("a plan whose email or calls have no people-search step before them can never be approved", async () => {
+  const { compulsoryProblems, suggestedChange } = await import("../lib/brain/requests");
+  // The plan that broke today: companies, then calls and email with no contacts task.
+  const broken = [
+    { id: "T1", agent: "QuickICP", outputType: "accounts", dependsOn: [] },
+    { id: "T2", agent: "Content & Training", outputType: "client_training", dependsOn: ["T1"] },
+    { id: "T4", agent: "Quickhowl", outputType: "calls", dependsOn: ["T2"] },
+    { id: "T6", agent: "Email Agent", outputType: "emails", dependsOn: ["T2"] },
+  ];
+  const problems = compulsoryProblems(broken, []);
+  assert.deepEqual(
+    problems.filter((p) => /^T\d/.test(p)).map((p) => p.split(" ")[0]),
+    ["T4", "T6"]
+  );
+  assert.ok(problems.some((p) => /no step to find people with email and phone/.test(p)), "the people search itself is required");
+  assert.ok(problems.some((p) => /has no earlier step that finds people's email and phone/.test(p)));
+  assert.match(planAnswerProblem("override", "go anyway", 3, problems.length)!, /cannot be approved: ask for changes/);
+  assert.match(planAnswerProblem("yes", "", 0, problems.length)!, /cannot be approved/);
+  assert.equal(planAnswerProblem("changes", "plan: add a contacts task", 3, problems.length), null);
+  assert.match(suggestedChange(broken), /all four tools in this order: 1\) a QuickICP accounts task .* 2\) a QuickICP contacts task/);
+
+  const fixed = [...broken.slice(0, 2), { id: "T3", agent: "QuickICP", outputType: "contacts", dependsOn: ["T1"] },
+    { id: "T4", agent: "Quickhowl", outputType: "calls", dependsOn: ["T3", "T2"] },
+    { id: "T6", agent: "Email Agent", outputType: "emails", dependsOn: ["T4"] }];
+  assert.deepEqual(compulsoryProblems(fixed, []), [], "an earlier contacts task, directly or through another task, is enough");
+  assert.equal(compulsoryProblems(fixed, ["T4 (Quickhowl / calls) target 'x' has no number. Tool tasks run by a count: give one"]).length, 1);
+  assert.equal(compulsoryProblems(fixed, ["T5 is qualification but does not come after a 'outreach' task."]).length, 0,
+    "other broken rules may still be approved anyway");
+
+  // The Brain's worker applies exactly the same rule.
+  const brain = readFileSync("brain/platform_approval.py", "utf8");
+  assert.match(brain, /^NEEDS_PEOPLE = \("Quickhowl", "Email Agent"\)/m);
+  assert.match(brain, /has no number\\\. Tool tasks run by a count\|which does not exist\|"\s*\n\s*r"is not enabled for this customer\|only has:/);
+});
+
+test("every month plan must use all four connected tools, in order", async () => {
+  const { compulsoryProblems } = await import("../lib/brain/requests");
+  const all = [
+    { id: "T1", agent: "QuickICP", outputType: "accounts", dependsOn: [] },
+    { id: "T2", agent: "QuickICP", outputType: "contacts", dependsOn: ["T1"] },
+    { id: "T3", agent: "Email Agent", outputType: "emails", dependsOn: ["T2"] },
+    { id: "T4", agent: "Quickhowl", outputType: "calls", dependsOn: ["T2"] },
+  ];
+  assert.deepEqual(compulsoryProblems(all, []), []);
+  for (const left of ["T1", "T2", "T3", "T4"]) {
+    const without = all.filter((task) => task.id !== left).map((task) => ({ ...task, dependsOn: task.dependsOn.filter((d) => d !== left) }));
+    assert.ok(compulsoryProblems(without, []).some((p) => /Every month plan must have it/.test(p)), `without ${left}`);
+  }
+  const peopleFirst = all.map((task) => (task.id === "T2" ? { ...task, dependsOn: [] } : task));
+  assert.deepEqual(compulsoryProblems(peopleFirst, []), ["T2 (find people) must come after the step that finds companies."]);
+  // The Brain's worker requires the same four steps.
+  const brain = readFileSync("brain/platform_approval.py", "utf8");
+  for (const [agent, output] of [["QuickICP", "accounts"], ["QuickICP", "contacts"], ["Email Agent", "emails"], ["Quickhowl", "calls"]]) {
+    assert.ok(brain.includes(`("${agent}", "${output}",`), `${agent} ${output}`);
+  }
 });

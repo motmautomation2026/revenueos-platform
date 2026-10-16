@@ -138,7 +138,8 @@ test("open decisions carry their question, samples and masked phone numbers", ()
     [102, "Approve calling", "T4"],
     [103, "Suggested action", "T1"],
   ]);
-  assert.deepEqual(view.openDecisions[0].samples, [{ to: "Head of Ops", subject: "Hello", text: "Body" }]);
+  assert.deepEqual(view.openDecisions[0].samples, [{ to: "Head of Ops", subject: "Hello", preheader: "", text: "Body" }]);
+  assert.equal(view.openDecisions[0].review, null, "an old-style question has no version or rounds");
   assert.deepEqual(view.openDecisions[0].allowed, ["no", "yes"]);
   assert.equal(view.openDecisions[1].contacts[0].phone, "••••••3210");
   assert.ok(!JSON.stringify(view).includes("98765"));

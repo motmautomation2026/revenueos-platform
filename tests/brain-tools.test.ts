@@ -7,6 +7,8 @@ import {
   buildCallsReport,
   buildCompanyBreakdown,
   buildEmailReport,
+  emailPlanOf,
+  htmlToText,
   buildFunnel,
   buildResearchReport,
   buildResultTiles,
@@ -137,7 +139,7 @@ test("email: campaign facts, approved samples and the honest results note", () =
   const { campaigns, resultsNote } = buildEmailReport(rows);
   const c = campaigns[0];
   assert.deepEqual([c.taskId, c.reference, c.campaignStatus, c.recipients, c.rejected, c.testMode], ["T3", "REF-1", "RUNNING", 3, 0, true]);
-  assert.deepEqual(c.samples, [{ to: "Head of Ops", subject: "Hello", text: "Body" }]);
+  assert.deepEqual(c.samples, [{ to: "Head of Ops", email: null, subject: "Hello", preheader: "", text: "Body", written: true }]);
   assert.deepEqual([c.approval?.answer, c.approval?.reason, c.approval?.open], ["yes", "samples ok", false]);
   assert.deepEqual(c.steps.map((s) => s.step), ["launch"]);
   assert.equal(resultsNote, "not available yet");
@@ -331,4 +333,33 @@ test("activity: repeated steps become one line, and filters narrow the list", ()
   assert.ok(filterActivity(events, "decisions").every((e) => e.kind !== "tool"));
   assert.deepEqual(filterActivity(events, "problems").map((e) => e.tone).sort(), ["attention", "problem"]);
   assert.equal(filterActivity(events, "all").length, events.length);
+});
+
+test("email plan: sequence, schedule and recipients from the Brain's request, nothing else", () => {
+  const plan = emailPlanOf({
+    body: {
+      campaign: { name: "Anvixa - October", description: "Three emails" },
+      schedule: { timezone: "Asia/Kolkata", weekdays: [1, 2, 3, 4, 5], daily_limit: 50, window_start_local: "09:30:00", window_end_local: "17:30:00" },
+      objective: { cta: "A 15-minute demo?", tone: "direct" },
+      emails: [
+        { subject: "Hi {{company}}", body_html: "<p>Hi {{first_name}},</p><p>Line one<br>Line two &amp; more</p>", preheader: "Pre", wait_days_before: 0 },
+        { subject: "Again", body_html: "<p>Two</p>", wait_days_before: 3 },
+      ],
+      recipients: [{ first_name: "Asha", last_name: "Rao", title: "CTO", company: "Example Ltd", email: "a@example.com", city: "Pune" }],
+      smtp: { password: "never-read" },
+    },
+  });
+  assert.ok(plan);
+  assert.deepEqual(
+    [plan.name, plan.timezone, plan.weekdays, plan.dailyLimit, plan.windowStart, plan.windowEnd, plan.cta],
+    ["Anvixa - October", "Asia/Kolkata", [1, 2, 3, 4, 5], 50, "09:30", "17:30", "A 15-minute demo?"]
+  );
+  assert.deepEqual(plan.emails.map((e) => [e.subject, e.text, e.waitDays]), [
+    ["Hi {{company}}", "Hi {{first_name}},\n\nLine one\nLine two & more", 0],
+    ["Again", "Two", 3],
+  ]);
+  assert.deepEqual(plan.recipients, [{ name: "Asha Rao", title: "CTO", company: "Example Ltd", email: "a@example.com" }]);
+  assert.ok(!JSON.stringify(plan).includes("never-read"), "only the named fields are kept");
+  assert.equal(emailPlanOf({}), null);
+  assert.equal(htmlToText("<p>a&nbsp;b&zwnj;</p>"), "a b");
 });
