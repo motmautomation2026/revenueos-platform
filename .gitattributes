@@ -1,0 +1,5 @@
+# Files that run on the Linux VPS keep LF line endings on every checkout.
+*.sh text eol=lf
+Dockerfile text eol=lf
+docker-compose.yml text eol=lf
+deploy/Caddyfile.snippet text eol=lf

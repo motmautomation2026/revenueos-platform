@@ -1,0 +1,51 @@
+# RevenueOS on one VPS: the web app and the Brain worker.
+#
+# Start or update (from this folder on the VPS):   ./deploy/deploy.sh
+# The app listens on 127.0.0.1:3000 only; the VPS's existing Caddy serves revenueos.b2botix.ai
+# and forwards to it (deploy/Caddyfile.snippet). Nothing else is opened to the internet.
+#
+# Secrets stay on the VPS, in the same files as on a laptop:
+#   .env.local    the app's settings      brain/.env    the worker's settings
+# Both are git-ignored and never copied into an image.
+
+name: revenueos
+
+services:
+  app:
+    build:
+      context: .
+      args:
+        # Compiled into the browser code; read from .env (deploy.sh links it to .env.local).
+        NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL:?set in .env.local}
+        NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY:?set in .env.local}
+    image: revenueos-app
+    env_file: .env.local
+    environment:
+      TZ: Asia/Kolkata
+    ports:
+      # Only this machine can reach it. Caddy in Docker: set APP_BIND=172.17.0.1:3000 in .env.local.
+      - "${APP_BIND:-127.0.0.1:3000}:3000"
+    restart: unless-stopped
+    logging: &logging
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+
+  worker:
+    build: ./brain
+    image: revenueos-worker
+    # The worker signs its platform requests with the machine name: keep it fixed, so a
+    # restarted container recognises (and finishes or fails) the requests it had picked up.
+    hostname: revenueos-worker
+    environment:
+      TZ: Asia/Kolkata
+    volumes:
+      - ./brain/.env:/brain/.env:ro
+      - brain-customers:/brain/customers
+    restart: unless-stopped
+    # Give a running step time to finish its current write before the container stops.
+    stop_grace_period: 60s
+    logging: *logging
+
+volumes:
+  # One folder per customer (plans, maps, logs). Back it up with deploy/backup.sh.
+  brain-customers:

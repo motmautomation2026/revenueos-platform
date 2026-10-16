@@ -1,0 +1,11 @@
+# Code only. Secrets are mounted at run time; customer folders live in a volume.
+.env
+.env.*
+.venv
+__pycache__
+*.pyc
+customers
+logs
+data
+baseline
+install_worker.ps1

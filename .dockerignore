@@ -1,0 +1,15 @@
+# Never in the app image: secrets, local builds, the Brain (its own image), git history.
+.env
+.env.*
+!.env.example
+node_modules
+.next
+.git
+.github
+.vscode
+brain
+tests
+deploy
+docker-compose*.yml
+Dockerfile
+*.log
