@@ -24,7 +24,10 @@ MASKED (in messages and tracebacks)
 WHERE
 -----
     logs/ under the folder the command runs in (run_for.py: customers/<key>/logs/). BRAIN_LOG_DIR=<folder>
-    overrides it; BRAIN_LOG=off switches logging off. One file per day; old files are never deleted here.
+    overrides it; BRAIN_LOG=off switches logging off. One file per day.
+    Cleanup: once per process, at its first log write, files named EXACTLY brain-YYYY-MM-DD.log in that folder
+    whose date is more than BRAIN_LOG_KEEP_DAYS days ago (default 30; 0 or an invalid value = never delete)
+    are deleted. Nothing else is ever deleted; any error is ignored.
 
 RUN
 ---
@@ -42,6 +45,9 @@ EMAIL = re.compile(r"\b([A-Za-z0-9._%+-]{1,3})[A-Za-z0-9._%+-]*@[A-Za-z0-9-]+(\.
 PHONE = re.compile(r"(?<![\w-])(\+\d{2})[\d -]{8,13}\d(?![\w-])|(?<![\w-])([6-9]\d{2})\d{7}(?![\w-])")
 KEY = re.compile(r"^(?P<run>[a-z0-9]+(?:-[a-z0-9]+)*-\d{4}-\d{2}(?:-r\d+)?):(?P<task>T\d+):")
 _TASKS: dict = {}            # task_row_id -> (run_key, task): learned from ledger keys, no database read
+LOG_FILE = re.compile(r"brain-(\d{4}-\d{2}-\d{2})\.log")
+KEEP_DAYS = 30
+_cleaned = False             # the cleanup runs once per process
 
 
 def mask(text: str) -> str:
@@ -51,6 +57,38 @@ def mask(text: str) -> str:
             text = text.replace(value, "********")
     text = EMAIL.sub(lambda m: m.group(1) + "***@***", text)
     return PHONE.sub(lambda m: (m.group(1) or m.group(2)) + "***", text)
+
+
+def keep_days() -> int:
+    """BRAIN_LOG_KEEP_DAYS (default 30). 0, a negative or an unreadable value -> 0 = never delete."""
+    value = (os.getenv("BRAIN_LOG_KEEP_DAYS") or "").strip()
+    if not value:
+        return KEEP_DAYS
+    return int(value) if value.isdigit() else 0
+
+
+def cleanup(folder: str, today: datetime.date | None = None) -> list[str]:
+    """Delete brain-YYYY-MM-DD.log files in 'folder' older than keep_days(). Returns their names. Never raises."""
+    deleted = []
+    try:
+        days = keep_days()
+        if days <= 0:
+            return deleted
+        today = today or datetime.date.today()
+        for name in os.listdir(folder):
+            try:
+                found = LOG_FILE.fullmatch(name)
+                path = os.path.join(folder, name)
+                if not found or not os.path.isfile(path) or os.path.islink(path):
+                    continue
+                if (today - datetime.date.fromisoformat(found[1])).days > days:
+                    os.remove(path)
+                    deleted.append(name)
+            except Exception:
+                continue         # an impossible date, a locked file: leave it
+    except Exception:
+        pass
+    return deleted
 
 
 def write(level: str, message: str, run: str | None = None, task: str | None = None, step: str | None = None,
@@ -65,6 +103,10 @@ def write(level: str, message: str, run: str | None = None, task: str | None = N
                 f"step={step or '-'} " + mask(text).replace("\n", "\n    ") + "\n")
         folder = os.getenv("BRAIN_LOG_DIR") or os.path.join(os.getcwd(), "logs")
         os.makedirs(folder, exist_ok=True)
+        global _cleaned
+        if not _cleaned:
+            _cleaned = True
+            cleanup(folder)
         with open(os.path.join(folder, f"brain-{now:%Y-%m-%d}.log"), "a", encoding="utf-8") as file:
             file.write(line)
     except Exception:
@@ -102,7 +144,7 @@ def selftest() -> bool:
         checks.append(bool(condition))
         print(f"  {'PASS' if condition else 'FAIL'}  {label}")
 
-    saved = {name: os.environ.get(name) for name in ("BRAIN_LOG_DIR", "BRAIN_LOG", "SELFTEST_API_KEY")}
+    saved = {name: os.environ.get(name) for name in ("BRAIN_LOG_DIR", "BRAIN_LOG", "SELFTEST_API_KEY", "BRAIN_LOG_KEEP_DAYS")}
     try:
         os.environ["SELFTEST_API_KEY"] = "sk-selftest-0123456789"
         text = mask("mail rahul.sharma@acme.co.in, call +91 98765 43210 or 9876543210, key sk-selftest-0123456789, "
@@ -178,6 +220,48 @@ def selftest() -> bool:
                    "IDENTICAL with logging off and on; with it on, the log file got the lines",
                    outputs[:2] == outputs[2:] and outputs[1][0] == 1 and logged
                    and "exit 1" in open(os.path.join(folder, logged[0]), encoding="utf-8").read())
+        with tempfile.TemporaryDirectory() as folder:
+            today = datetime.date(2026, 10, 16)
+            names = {"brain-2026-09-15.log": "31 days", "brain-2026-09-16.log": "30 days", "brain-2026-10-16.log": "today",
+                     "brain-2020-01-01.log.bak": "other", "other.log": "other", "brain-2026-13-01.log": "bad date",
+                     "brain-2026-9-1.log": "other", "notes.txt": "other"}
+            for name in names:
+                open(os.path.join(folder, name), "w").close()
+            os.makedirs(os.path.join(folder, "brain-2020-01-01.log"))          # a FOLDER with a log file's name
+            os.environ.pop("BRAIN_LOG_KEEP_DAYS", None)
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                deleted = cleanup(folder, today)
+            left = sorted(os.listdir(folder))
+            expect("cleanup (default 30 days): ONLY brain-YYYY-MM-DD.log files older than 30 days are deleted (31 days "
+                   "-> deleted; 30 days and today -> kept); other names, an impossible date and a folder are never "
+                   "touched; nothing printed",
+                   deleted == ["brain-2026-09-15.log"] and "brain-2026-09-15.log" not in left and len(left) == len(names)
+                   and out.getvalue() == err.getvalue() == "")
+            open(os.path.join(folder, "brain-2026-09-15.log"), "w").close()
+            kept = []
+            for value in ("0", "abc", "-5"):
+                os.environ["BRAIN_LOG_KEEP_DAYS"] = value
+                kept.append(cleanup(folder, today) == [])
+            os.environ["BRAIN_LOG_KEEP_DAYS"] = "10"
+            ten = cleanup(folder, today)
+            expect("BRAIN_LOG_KEEP_DAYS: 0, 'abc' and -5 -> nothing deleted; 10 -> the 31- and 30-day files deleted",
+                   kept == [True, True, True] and sorted(ten) == ["brain-2026-09-15.log", "brain-2026-09-16.log"])
+            os.environ.pop("BRAIN_LOG_KEEP_DAYS", None)
+            expect("cleanup of a folder that does not exist: no exception, nothing deleted",
+                   cleanup(os.path.join(folder, "missing")) == [])
+
+        with tempfile.TemporaryDirectory() as folder:
+            global _cleaned
+            open(os.path.join(folder, "brain-2000-01-01.log"), "w").close()
+            os.environ["BRAIN_LOG_DIR"] = folder
+            _cleaned = False
+            write("INFO", "first write of this process")
+            first_gone = not os.path.exists(os.path.join(folder, "brain-2000-01-01.log"))
+            open(os.path.join(folder, "brain-2000-01-01.log"), "w").close()
+            write("INFO", "second write")
+            expect("the cleanup runs once per process, at the first log write (a later old file stays until the next process)",
+                   first_gone and os.path.exists(os.path.join(folder, "brain-2000-01-01.log")))
     finally:
         for name, value in saved.items():
             if value is None:
