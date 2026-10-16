@@ -160,40 +160,48 @@ ARCHIVED = {"pipeline", "goal_check", "email_campaign_payload", "company_loop_cl
 
 
 def check_imports() -> bool:
-    """After the orchestrator split: every name defined once, shared state shared, no copied runtime values.
+    """After the orchestrator (orch/) and selftest (orch_tests/) splits: every name defined once and importable
+    from its old module, shared state shared, no copied runtime values, no archived code.
     orch/brain_log.py is not part of the split (the log; imported by quickicp and state_store, not re-exported)."""
     import ast
     sys.path.insert(0, ROOT)
     import orchestrator
     import orch.run
-    files = ["orchestrator.py"] + sorted(f"orch/{f}" for f in os.listdir(os.path.join(ROOT, "orch")) if f.endswith(".py") and f != "brain_log.py")
-    defined, problems = {}, []
-    for path in files:
-        tree = ast.parse(open(os.path.join(ROOT, path), encoding="utf-8").read())
-        for node in tree.body:
-            names = ([node.name] if isinstance(node, (ast.FunctionDef, ast.ClassDef)) else
-                     [t.id for t in getattr(node, "targets", [getattr(node, "target", None)]) if isinstance(t, ast.Name)])
-            for name in names:
-                if name in defined:
-                    problems.append(f"{name} defined in {defined[name]} AND {path}")
-                defined[name] = path
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom):
-                copied = {a.name for a in node.names} & RUNTIME_VALUES
-                if copied:
-                    problems.append(f"{path} imports runtime value(s) by value: {sorted(copied)}")
-                module = node.module or ""
-            elif isinstance(node, ast.Import):
-                module = ",".join(a.name for a in node.names)
-            else:
-                continue
-            if path.startswith("orch/") and "orchestrator" in module.split(","):
-                problems.append(f"{path} imports orchestrator (it must only be imported BY orchestrator)")
-            if set(module.replace(".", ",").split(",")) & ARCHIVED:
-                problems.append(f"{path} imports archived code: {module}")
-    missing = [name for name in defined if not hasattr(orchestrator, name)]
-    if missing:
-        problems.append(f"not importable from orchestrator: {missing}")
+    import orchestrator_selftest
+    groups = [(orchestrator, "orchestrator.py", "orch", {"brain_log.py"}),           # the run controller split
+              (orchestrator_selftest, "orchestrator_selftest.py", "orch_tests", set())]  # its selftest split
+    problems, counted, file_count = [], 0, 0
+    for facade, facade_file, folder, skip in groups:
+        files = [facade_file] + sorted(f"{folder}/{f}" for f in os.listdir(os.path.join(ROOT, folder))
+                                       if f.endswith(".py") and f not in skip)
+        defined = {}
+        for path in files:
+            tree = ast.parse(open(os.path.join(ROOT, path), encoding="utf-8").read())
+            for node in tree.body:
+                names = ([node.name] if isinstance(node, (ast.FunctionDef, ast.ClassDef)) else
+                         [t.id for t in getattr(node, "targets", [getattr(node, "target", None)]) if isinstance(t, ast.Name)])
+                for name in names:
+                    if name in defined:
+                        problems.append(f"{name} defined in {defined[name]} AND {path}")
+                    defined[name] = path
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom):
+                    copied = {a.name for a in node.names} & RUNTIME_VALUES
+                    if copied:
+                        problems.append(f"{path} imports runtime value(s) by value: {sorted(copied)}")
+                    module = node.module or ""
+                elif isinstance(node, ast.Import):
+                    module = ",".join(a.name for a in node.names)
+                else:
+                    continue
+                if path.startswith(folder + "/") and facade.__name__ in module.split(","):
+                    problems.append(f"{path} imports {facade.__name__} (it must only be imported BY {facade.__name__})")
+                if set(module.replace(".", ",").split(",")) & ARCHIVED:
+                    problems.append(f"{path} imports archived code: {module}")
+        missing = [name for name in defined if not hasattr(facade, name)]
+        if missing:
+            problems.append(f"not importable from {facade.__name__}: {missing}")
+        counted, file_count = counted + len(defined), file_count + len(files)
     if orchestrator.WIRED_RUNNERS is not orch.run.WIRED_RUNNERS:
         problems.append("orchestrator.WIRED_RUNNERS is not the dict orch.run uses")
     orchestrator.WIRED_RUNNERS["_probe"] = None              # what e2e_test / email_live_check do
@@ -203,7 +211,7 @@ def check_imports() -> bool:
         problems.append("a change to orchestrator.WIRED_RUNNERS does not reach orch.run")
     for problem in problems:
         print(f"  FAIL  {problem}")
-    print(f"IMPORT CHECK: {'OK' if not problems else 'FAILED'} ({len(defined)} names in {len(files)} files; "
+    print(f"IMPORT CHECK: {'OK' if not problems else 'FAILED'} ({counted} names in {file_count} files; "
           f"WIRED_RUNNERS shared; none of {sorted(RUNTIME_VALUES)} imported by value)")
     return not problems
 
