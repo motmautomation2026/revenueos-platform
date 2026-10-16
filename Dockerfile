@@ -13,7 +13,7 @@ COPY package.json package-lock.json ./
 RUN npm ci
 
 COPY . .
-# Public values only: they are compiled into the browser code. Secrets come at run time (.env.local).
+# Public values only: they are compiled into the browser code. Secrets come at run time (.env).
 ARG NEXT_PUBLIC_SUPABASE_URL
 ARG NEXT_PUBLIC_SUPABASE_ANON_KEY
 ENV NEXT_PUBLIC_SUPABASE_URL=$NEXT_PUBLIC_SUPABASE_URL \

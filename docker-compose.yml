@@ -5,7 +5,8 @@
 # and forwards to it (deploy/Caddyfile.snippet). Nothing else is opened to the internet.
 #
 # Secrets stay on the VPS, in the same files as on a laptop:
-#   .env.local    the app's settings      brain/.env    the worker's settings
+#   .env          the app's settings      brain/.env    the worker's settings
+# (On a laptop the app's file may be called .env.local instead: either name works.)
 # Both are git-ignored and never copied into an image.
 
 name: revenueos
@@ -15,15 +16,19 @@ services:
     build:
       context: .
       args:
-        # Compiled into the browser code; read from .env (deploy.sh links it to .env.local).
-        NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL:?set in .env.local}
-        NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY:?set in .env.local}
+        # Compiled into the browser code; Compose reads them from .env.
+        NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL:?set in .env}
+        NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY:?set in .env}
     image: revenueos-app
-    env_file: .env.local
+    env_file:
+      - path: .env
+        required: false
+      - path: .env.local
+        required: false
     environment:
       TZ: Asia/Kolkata
     ports:
-      # Only this machine can reach it. Caddy in Docker: set APP_BIND=172.17.0.1:3000 in .env.local.
+      # Only this machine can reach it. Caddy in Docker: set APP_BIND=172.17.0.1:3000 in .env.
       - "${APP_BIND:-127.0.0.1:3000}:3000"
     restart: unless-stopped
     logging: &logging

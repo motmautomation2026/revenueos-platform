@@ -8,7 +8,7 @@ Two containers from `docker-compose.yml`, built on the VPS:
 | `worker` | the Brain worker, `python run_for.py work` | nothing (outbound calls only) |
 
 Supabase, OpenAI, QuickICP/Prospeo, the email tool and Quickhowl stay where they are; both
-containers only call out to them. Secrets live only on the VPS in `.env.local` and `brain/.env`.
+containers only call out to them. Secrets live only on the VPS in `.env` (the app) and `brain/.env` (the worker).
 
 > **Only one worker at a time.** Two workers on the same database would run the same customer's
 > steps twice. Stop the Windows worker before the VPS one starts (step 7).
@@ -43,13 +43,12 @@ The repository is private: use a GitHub **deploy key** (read-only) or a personal
 ### 4. The secrets (from this Windows PC)
 ```powershell
 cd "D:\MOTM Diagnose\RevenueOS\revenueos-platform"
-scp .env.local root@<VPS-IP>:/opt/revenueos/.env.local
+scp .env.local root@<VPS-IP>:/opt/revenueos/.env      # on the VPS it is called .env
 scp brain\.env root@<VPS-IP>:/opt/revenueos/brain/.env
 ```
 On the VPS:
 ```bash
-chmod 600 .env.local brain/.env
-ln -s .env.local .env      # Docker Compose reads its settings from .env
+chmod 600 .env brain/.env
 ```
 
 ### 5. Build and start the app only
@@ -66,7 +65,7 @@ Add the block from `deploy/Caddyfile.snippet` to the existing Caddyfile and relo
 certificate by itself. Open **https://revenueos.b2botix.ai** and sign in.
 
 If Caddy runs **in Docker**: use `reverse_proxy 172.17.0.1:3000` in the block, add
-`APP_BIND=172.17.0.1:3000` to `.env.local`, and run step 5 again.
+`APP_BIND=172.17.0.1:3000` to `.env`, and run step 5 again.
 
 **Supabase:** in the Supabase dashboard → Authentication → URL Configuration, set the
 **Site URL** to `https://revenueos.b2botix.ai` and add it to **Redirect URLs**, so sign-in and
@@ -74,7 +73,7 @@ password e-mails point to the live site.
 
 ### 6b. Instead of 6: the IP address only (no domain yet)
 Plain HTTP on port 3000, for testing; switch to the domain (HTTPS) before others use it.
-1. Add `APP_BIND=0.0.0.0:3000` to `.env.local`, then `./deploy/deploy.sh --no-pull`.
+1. Add `APP_BIND=0.0.0.0:3000` to `.env`, then `./deploy/deploy.sh --no-pull`.
 2. Hostinger hPanel → VPS → **Firewall**: if a firewall is active, allow **TCP 3000**.
 3. Open **http://&lt;VPS-IP&gt;:3000** and sign in.
 4. Supabase → Authentication → URL Configuration: add `http://<VPS-IP>:3000` to **Redirect URLs**.
@@ -120,4 +119,4 @@ Any run that was waiting (a decision, a Start card) carries on from where it was
 A nightly backup: `crontab -e` and add
 `30 2 * * * cd /opt/revenueos && ./deploy/backup.sh >/dev/null 2>&1`.
 
-Changing a secret: edit `.env.local` or `brain/.env`, then `./deploy/deploy.sh --no-pull`.
+Changing a secret: edit `.env` or `brain/.env`, then `./deploy/deploy.sh --no-pull`.

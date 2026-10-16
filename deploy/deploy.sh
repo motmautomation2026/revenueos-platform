@@ -5,12 +5,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-for file in .env.local brain/.env; do
+for file in .env brain/.env; do
   [ -f "$file" ] || { echo "Missing $file: copy it to the VPS first (see deploy/README.md)."; exit 1; }
 done
-
-# Compose reads its ${...} values from ".env": point it at .env.local (one file to keep up to date).
-[ -e .env ] || ln -s .env.local .env
 
 if [ "${1:-}" != "--no-pull" ]; then
   git pull --ff-only
