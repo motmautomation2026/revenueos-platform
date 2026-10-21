@@ -2,6 +2,7 @@ import "server-only";
 import { loadExecution } from "./read";
 import { loadPaidStep } from "./paid-steps";
 import { loadRequest } from "./request-store";
+import { lastActivityOf } from "./tools";
 import { describeMonth } from "./view";
 
 export type ExecutionStatus = { label: string; tone: string };
@@ -57,7 +58,59 @@ export type ExecutionSummary = {
   waiting: number;
   /** Headline results, e.g. 181 companies found. */
   results: { label: string; value: number }[];
+  /** When the Brain last did anything for this client (ISO), or null. */
+  lastActivity: string | null;
 };
+
+/** One thing a person has to do on a project in execution, for the overview's "Needs you" list. */
+export type AttentionItem = {
+  key: string;
+  /** What to do, e.g. "Approve the sample emails". */
+  title: string;
+  /** Which task, e.g. "T14 · Launch email outreach campaigns". */
+  detail: string;
+  /** When it started waiting (ISO), for "waiting 2 h". */
+  since: string | null;
+  /** Page inside the project, e.g. "execution". */
+  path: string;
+};
+
+/**
+ * Everything waiting for a person on one project once its plan is ready: a month plan to approve,
+ * a step that buys data to start, and the Brain's open questions. Empty when nothing is waiting.
+ */
+export async function attentionItems(projectId: string): Promise<AttentionItem[]> {
+  const [{ view: request }, data, paid] = await Promise.all([
+    loadRequest(projectId),
+    loadExecution(projectId),
+    loadPaidStep(projectId),
+  ]);
+  const items: AttentionItem[] = [];
+  if (request.stage === "needs_approval") {
+    items.push({ key: "month-plan", title: "Approve the month plan", detail: "The Brain planned the month", since: null, path: "execution" });
+  }
+  if (paid?.status === "waiting" || paid?.status === "failed") {
+    items.push({
+      key: `paid-${paid.taskId}`,
+      title: paid.status === "failed" ? `Start ${paid.taskId} again` : `Start ${paid.taskId}`,
+      detail: "This step buys data, so it waits for a person",
+      since: null,
+      path: "execution",
+    });
+  }
+  if (data.state === "ok") {
+    for (const decision of data.view.openDecisions) {
+      items.push({
+        key: `decision-${decision.id}`,
+        title: decision.title,
+        detail: [decision.taskId, decision.task?.title].filter(Boolean).join(" · "),
+        since: decision.askedAt,
+        path: "execution",
+      });
+    }
+  }
+  return items;
+}
 
 const SHORT_LABELS: Record<string, string> = {
   "Companies found": "companies",
@@ -77,5 +130,6 @@ export async function executionSummary(projectId: string): Promise<ExecutionSumm
     total: data.view.counts.total,
     waiting: data.view.openDecisions.length,
     results: data.view.kpis.map((kpi) => ({ label: SHORT_LABELS[kpi.label] ?? kpi.label.toLowerCase(), value: kpi.achieved })),
+    lastActivity: lastActivityOf(data.rows),
   };
 }

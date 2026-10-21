@@ -93,3 +93,26 @@ export function statusTone(status: ProjectStatus) {
   if (BUSY.includes(status)) return "bg-primary/10 text-primary";
   return "bg-muted text-muted-foreground";
 }
+
+/**
+ * What a person has to do next on a project that is still being planned, and on which page.
+ * Null while RevenueOS itself is working (writing the checklist or the plan) or once the plan is
+ * ready: from then on the Brain's own questions say what is needed.
+ */
+export function planningNextStep(status: ProjectStatus): { label: string; path: string } | null {
+  switch (status) {
+    case "draft":
+    case "uploading":
+      return { label: "Upload the handover and proposal", path: "upload" };
+    case "checklist_ready":
+      return { label: "Fill in and submit the checklist", path: "checklist" };
+    case "checklist_submitted":
+      return { label: "Generate the GTM plan", path: "plan" };
+    case "plan_blocked":
+      return { label: "Answer the plan's questions", path: "plan" };
+    case "failed":
+      return { label: "Resume the plan", path: "plan" };
+    default:
+      return null;
+  }
+}

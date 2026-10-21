@@ -892,7 +892,13 @@ def cmd_work(arguments: list[str]) -> None:
               "(run supabase/migrations/0007_brain_paid_steps.sql once, then restart the worker).")
         paid_steps = None
     seen, running, planning = {}, {}, {}
+    # So the platform can show whether a worker is running (0012_brain_worker_heartbeat.sql).
+    heartbeat = platform_approval.Heartbeat(client, worker)
     print(f"Worker '{worker}' started. Looking every {WORK_EVERY_SECONDS} seconds. Ctrl+C to stop.")
+    if not heartbeat.beat("started"):
+        print("The platform cannot show this worker as online "
+              "(run supabase/migrations/0012_brain_worker_heartbeat.sql once, then restart the worker).")
+        heartbeat = None
     try:
         lost = fail_orphans(requests, worker)
         if lost:
@@ -907,6 +913,8 @@ def cmd_work(arguments: list[str]) -> None:
                 if requests:
                     pick_up_requests(requests, planning, dotenv_key, worker)
                 work_once(client, seen, running, dotenv_key, paid_steps=paid_steps)
+                if heartbeat:
+                    heartbeat.beat(f"{len(running)} step(s) running, {len(planning)} planning")
             except SelectError:
                 raise
             except Exception as error:      # e.g. the network dropped: keep the worker alive, look again

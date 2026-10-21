@@ -31,6 +31,16 @@ export type RunRows = {
 
 export type Approval = { answer: string; by: string; reason: string; at: string | null; open: boolean };
 
+/** The last moment anything happened in a run: a task started or ended, a question was asked or answered, a tool was called. */
+export function lastActivityOf({ tasks, decisions, toolCalls }: RunRows): string | null {
+  const times = [
+    ...tasks.flatMap((t) => [t.started_at, t.finished_at]),
+    ...decisions.flatMap((d) => [d.created_at, d.answered_at]),
+    ...toolCalls.flatMap((c) => [c.started_at, c.finished_at]),
+  ].filter((at): at is string => !!at && Number.isFinite(Date.parse(at)));
+  return times.length ? times.reduce((latest, at) => (Date.parse(at) > Date.parse(latest) ? at : latest)) : null;
+}
+
 function stepsOf(task: BrainTaskRow, toolCalls: BrainToolCallRow[]): ToolCallView[] {
   return toolCalls
     .filter((c) => c.task_row_id === task.id)

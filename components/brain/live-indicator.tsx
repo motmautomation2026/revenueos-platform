@@ -9,10 +9,11 @@ const REFRESH_MS = 5000;
 const clock = new Intl.DateTimeFormat("en-IN", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 
 /**
- * Keeps the Execution pages current: while the page is visible it re-reads the Brain's data
- * every few seconds, so progress appears without reloading.
+ * Keeps a page current: while the page is visible it re-reads the Brain's data every few seconds
+ * (every 5 on the Execution pages; the Projects overview asks for less), so progress appears
+ * without reloading.
  */
-export function LiveIndicator() {
+export function LiveIndicator({ intervalMs = REFRESH_MS }: { intervalMs?: number }) {
   const router = useRouter();
   const [live, setLive] = useState(true);
   const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
@@ -25,14 +26,14 @@ export function LiveIndicator() {
       setUpdatedAt(new Date());
     };
     const first = setTimeout(() => setUpdatedAt(new Date()), 0);
-    const timer = setInterval(tick, REFRESH_MS);
+    const timer = setInterval(tick, intervalMs);
     document.addEventListener("visibilitychange", tick);
     return () => {
       clearTimeout(first);
       clearInterval(timer);
       document.removeEventListener("visibilitychange", tick);
     };
-  }, [live, router]);
+  }, [live, router, intervalMs]);
 
   return (
     <div className="flex items-center justify-end gap-2 text-xs text-muted-foreground print:hidden">

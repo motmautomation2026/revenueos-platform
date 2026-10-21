@@ -196,6 +196,31 @@ class PaidSteps:
             return False
 
 
+# ================= THE WORKER'S HEARTBEAT =================
+
+WORKERS = "revenueos_brain_workers"
+
+
+class Heartbeat:
+    """
+    The worker's row in the platform, refreshed at every look for work, so the app can say whether a
+    worker is running (supabase/migrations/0012_brain_worker_heartbeat.sql). Never stops the worker:
+    without the table, or when a write fails, the worker simply carries on.
+    """
+
+    def __init__(self, client, worker: str):
+        self._client, self.worker, self.started_at = client, worker, utc_now()
+
+    def beat(self, note: str = "") -> bool:
+        """Write the row now. False when it could not be written (e.g. the table is not there yet)."""
+        try:
+            self._client.table(WORKERS).upsert({"worker": self.worker, "started_at": self.started_at,
+                                                "last_seen_at": utc_now(), "note": note[:200]}).execute()
+            return True
+        except Exception:
+            return False
+
+
 def connect() -> Requests:
     """The request store, from SUPABASE_URL + SUPABASE_KEY. Imported here so 'selftest' needs no packages."""
     from supabase import create_client
@@ -487,6 +512,30 @@ def selftest() -> None:
     expect("a long name is cut to the proof's limit", len(("x" * 200)[:APPROVER_MAX]) == 80)
     expect("without BRAIN_REQUEST_ID nothing here is used", os.environ.pop("BRAIN_REQUEST_ID", None) is None
            and from_environment() is None)
+
+    # the worker's heartbeat
+    class HeartbeatClient:
+        def __init__(self, fail=False):
+            self.rows, self.fail = [], fail
+        def table(self, name):
+            client = self
+            class Query:
+                def upsert(self, row):
+                    self.row = row
+                    return self
+                def execute(self):
+                    if client.fail:
+                        raise RuntimeError('relation "revenueos_brain_workers" does not exist')
+                    client.rows.append((name, self.row))
+            return Query()
+    client = HeartbeatClient()
+    heart = Heartbeat(client, "revenueos-worker")
+    expect("the heartbeat writes the worker's own row, with when it started and what it is doing",
+           heart.beat("1 step running") and client.rows[0][0] == WORKERS
+           and client.rows[0][1]["worker"] == "revenueos-worker" and client.rows[0][1]["note"] == "1 step running"
+           and client.rows[0][1]["started_at"] == heart.started_at)
+    expect("without the table the heartbeat says so, and never stops the worker",
+           Heartbeat(HeartbeatClient(fail=True), "w").beat() is False)
     print("\nSELFTEST PASSED: no network, no LLM, no waiting.")
 
 

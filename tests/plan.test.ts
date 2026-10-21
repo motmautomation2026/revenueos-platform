@@ -189,7 +189,8 @@ test("strategy and execution do not read the customer's material again", () => {
   ];
   assert.deepEqual(laterStepFiles(files).map((f) => f.file_name), ["p.pdf", "cam.txt", "o.txt"]);
   const pipeline = readFileSync("lib/agents/pipeline.ts", "utf8");
-  assert.match(pipeline, /case "strategy":\n\s+return `\$\{inputs\.later\}/);
-  assert.match(pipeline, /case "execution":\n\s+return `\$\{inputs\.later\}/);
-  assert.match(pipeline, /case "diagnosis":\n\s+return `\$\{inputs\.diagnosis\}/);
+  // \s+ rather than \n: a Windows checkout has \r\n line endings.
+  assert.match(pipeline, /case "strategy":\s+return `\$\{inputs\.later\}/);
+  assert.match(pipeline, /case "execution":\s+return `\$\{inputs\.later\}/);
+  assert.match(pipeline, /case "diagnosis":\s+return `\$\{inputs\.diagnosis\}/);
 });
