@@ -284,6 +284,18 @@ export default async function ProjectsPage({
   );
 }
 
+/** The worker's note ("1 step(s) running, 0 planning") in plain words: "idle", "1 step running", "planning 1 month". */
+function workerActivity(note: string) {
+  const match = note.match(/^(\d+) step\(s\) running, (\d+) planning$/);
+  if (!match) return note === "started" || !note ? "idle" : note;
+  const [steps, planning] = [Number(match[1]), Number(match[2])];
+  const parts = [
+    steps ? `${steps} step${steps === 1 ? "" : "s"} running` : "",
+    planning ? `planning ${planning} month${planning === 1 ? "" : "s"}` : "",
+  ].filter(Boolean);
+  return parts.length ? parts.join(", ") : "idle";
+}
+
 /** Whether the Brain worker is running. Nothing moves for any client while it is not. */
 function WorkerLine({ worker }: { worker: WorkerState }) {
   if (worker.state === "unknown") return null;
@@ -293,8 +305,7 @@ function WorkerLine({ worker }: { worker: WorkerState }) {
         <span aria-hidden className="size-2 rounded-full bg-emerald-600" />
         <span className="font-medium text-foreground">Brain worker online</span>
         <span>
-          {worker.worker} · checked {waitingFor(worker.lastSeen)} ago
-          {worker.note && worker.note !== "started" ? ` · ${worker.note}` : ""}
+          {worker.worker} · checked {waitingFor(worker.lastSeen)} ago · {workerActivity(worker.note)}
         </span>
       </p>
     );
@@ -377,9 +388,13 @@ function WaitingTile({ items }: { items: Row["needs"] }) {
   );
 }
 
-/** "Brain active 5 min ago", or in amber "Quiet for 2 days" when an unfinished month has not moved for a day. */
-function ActivityNote({ at, finished }: { at: string; finished: boolean }) {
-  const quiet = !finished && Date.now() - Date.parse(at) > 24 * 60 * 60 * 1000;
+/**
+ * "Brain active 5 min ago", or in amber "quiet for 2 days" when a month has not moved for a day
+ * although nothing waits for a person: a stall worth a look. A month that is finished, or that is
+ * waiting for you, is quiet on purpose.
+ */
+function ActivityNote({ at, expected }: { at: string; expected: boolean }) {
+  const quiet = !expected && Date.now() - Date.parse(at) > 24 * 60 * 60 * 1000;
   return (
     <span className={cn(quiet && "font-medium text-amber-700")} title={dateFormat.format(new Date(at))}>
       · {quiet ? `quiet for ${waitingFor(at)}` : `Brain active ${waitingFor(at)} ago`}
@@ -428,7 +443,9 @@ function ProjectCard({ row, archived }: { row: Row; archived: boolean }) {
             </p>
             <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
               <span>{summary ? `${summary.month} plan` : `Updated ${dateFormat.format(new Date(project.updated_at))}`}</span>
-              {summary?.lastActivity && <ActivityNote at={summary.lastActivity} finished={summary.done >= summary.total} />}
+              {summary?.lastActivity && (
+                <ActivityNote at={summary.lastActivity} expected={summary.done >= summary.total || needs.length > 0} />
+              )}
               {project.run_mode === "staging" && (
                 <span className="rounded bg-violet-500/10 px-1.5 py-px text-[0.6875rem] font-semibold text-violet-700">Staging</span>
               )}
