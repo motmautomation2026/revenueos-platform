@@ -9,6 +9,7 @@ import {
   buildEmailReport,
   emailPlanOf,
   htmlToText,
+  sendingProgress,
   buildFunnel,
   buildResearchReport,
   buildResultTiles,
@@ -362,4 +363,24 @@ test("email plan: sequence, schedule and recipients from the Brain's request, no
   assert.ok(!JSON.stringify(plan).includes("never-read"), "only the named fields are kept");
   assert.equal(emailPlanOf({}), null);
   assert.equal(htmlToText("<p>a&nbsp;b&zwnj;</p>"), "a b");
+});
+
+test("sending: the whole sequence counts, and a next email two hours past due is overdue", () => {
+  // Anvixa on 21 Oct: email 1 sent to 5 people, email 2 due 19 Oct and still queued.
+  const stats = { recipients: 5, messages: 10, sent: 5, failed: 0, nextDueAt: "2026-10-19T05:59:55Z", status: "Running" };
+  const now = Date.parse("2026-10-21T08:00:00Z");
+  assert.deepEqual(sendingProgress(stats, 3, now), {
+    total: 15,
+    sent: 5,
+    failed: 0,
+    toSend: 10,
+    overdueSince: "2026-10-19T05:59:55Z",
+    finished: false,
+  });
+  // Within two hours of the due time it is not overdue yet; without the plan the tool's own count is used.
+  assert.equal(sendingProgress(stats, 3, Date.parse("2026-10-19T07:00:00Z")).overdueSince, null);
+  assert.equal(sendingProgress(stats, null, now).total, 10);
+  // Everything sent: finished, never overdue.
+  const done = sendingProgress({ ...stats, sent: 15, messages: 15 }, 3, now);
+  assert.deepEqual([done.toSend, done.finished, done.overdueSince], [0, true, null]);
 });

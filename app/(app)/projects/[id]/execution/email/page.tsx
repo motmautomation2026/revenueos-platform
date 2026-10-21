@@ -3,12 +3,9 @@ import Link from "next/link";
 import {
   ArrowRight,
   CalendarClock,
-  FileText,
   Info,
   ListOrdered,
-  MailCheck,
   MousePointerClick,
-  Send,
   TriangleAlert,
   Users,
   type LucideIcon,
@@ -18,7 +15,6 @@ import {
   EmptyTool,
   ExecutionEmpty,
   ExecutionHeader,
-  InsightTileCard,
   Pill,
   SectionTitle,
   StageTrack,
@@ -29,14 +25,20 @@ import {
   number,
 } from "@/components/brain/parts";
 import { SenderCard } from "@/components/brain/sender-card";
-import { loadSender } from "@/lib/brain/sender-store";
-import { buildEmailReport, type EmailCampaign, type EmailPlan, type EmailSample } from "@/lib/brain/tools";
+import { loadImapAddedAt, loadSender } from "@/lib/brain/sender-store";
+import {
+  buildEmailReport,
+  sendingProgress,
+  type EmailCampaign,
+  type EmailPlan,
+  type EmailSample,
+  type SendingProgress,
+} from "@/lib/brain/tools";
 import { cn } from "@/lib/utils";
 import { loadExecutionPage, type ExecutionPageProps } from "../load";
 
 export const metadata: Metadata = { title: "Email" };
 
-const TILE_ICONS: Record<string, LucideIcon> = { recipients: Send, accepted: MailCheck, samples: FileText };
 const WEEKDAYS = ["", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
 export default async function EmailPage(props: ExecutionPageProps) {
@@ -60,10 +62,12 @@ export default async function EmailPage(props: ExecutionPageProps) {
   const report = buildEmailReport(rows);
   // What the email tool itself recorded after the Brain handed the campaign over (counts only),
   // and the campaign as the Brain handed it over (sequence, schedule, recipients).
-  const [stats, plans] = await Promise.all([
+  const [stats, plans, imapAddedAt] = await Promise.all([
     loadEmailStats(report.campaigns.map((c) => c.campaignId)),
     loadEmailPlans(report.campaigns.map((c) => c.taskRowId)),
+    loadImapAddedAt(project.id),
   ]);
+  const now = Date.now();
   const dashboard = query.run ? `${base}?run=${encodeURIComponent(query.run)}` : base;
 
   return (
@@ -74,9 +78,20 @@ export default async function EmailPage(props: ExecutionPageProps) {
       {report.campaigns.length === 0 && <EmptyTool>This month plan has no email task.</EmptyTool>}
 
       {report.campaigns.map((campaign, index) => {
-        const status = TASK_STATUS[campaign.status];
         const sending = stats.get(campaign.campaignId);
         const plan = plans.get(campaign.taskRowId) ?? null;
+        const progress = sending ? sendingProgress(sending, plan?.emails.length ?? null, now) : null;
+        // The Brain's task is "done" once the campaign is handed over and started; sending goes on after that.
+        const status =
+          campaign.status === "done" && progress
+            ? progress.finished
+              ? { label: "Finished", tone: TASK_STATUS.done.tone }
+              : { label: "Sending", tone: "bg-primary/10 text-primary" }
+            : TASK_STATUS[campaign.status];
+        // The mailbox reaches the email tool when the campaign is launched: IMAP added later is not part of it.
+        const launchedAt = campaign.steps.find((step) => step.step === "launch")?.startedAt ?? null;
+        const repliesReadable =
+          !!imapAddedAt && (!launchedAt || Date.parse(imapAddedAt) <= Date.parse(launchedAt));
         return (
           <section key={campaign.taskId} className="grid gap-6">
             <div className="grid gap-1.5">
@@ -100,29 +115,36 @@ export default async function EmailPage(props: ExecutionPageProps) {
 
             <NextStep campaign={campaign} dashboard={dashboard} />
 
+            {progress?.overdueSince && (
+              <div role="alert" className="flex items-start gap-3 rounded-xl border border-destructive/40 bg-destructive/5 p-4 text-sm">
+                <TriangleAlert className="mt-0.5 size-5 shrink-0 text-destructive" aria-hidden />
+                <p>
+                  <span className="font-semibold text-destructive">
+                    Overdue since {dateTime.format(new Date(progress.overdueSince))}: the email tool has not sent the next emails.
+                  </span>{" "}
+                  <span className="text-muted-foreground">
+                    {number.format(progress.toSend)} still to send and none failed, so the email tool&apos;s sending
+                    processes have most likely stopped. Its owner should check that its scheduler and send workers are
+                    running.
+                  </span>
+                </p>
+              </div>
+            )}
+
             {campaign.lastError && (
               <p role="alert" className="rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">
                 {campaign.lastError}
               </p>
             )}
 
-            {plan && <AtAGlance plan={plan} recipients={campaign.recipients} />}
+            {plan && <AtAGlance plan={plan} campaign={campaign} />}
 
             <div className="grid gap-3">
               <SectionTitle>How far it got</SectionTitle>
               <StageTrack stages={campaign.stages} />
             </div>
 
-            <div className="grid gap-3">
-              <SectionTitle>Numbers</SectionTitle>
-              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-                {campaign.tiles.map((tile) => (
-                  <InsightTileCard key={tile.key} tile={tile} icon={TILE_ICONS[tile.key] ?? Send} />
-                ))}
-              </div>
-            </div>
-
-            {sending && <Sending stats={sending} />}
+            {sending && progress && <Sending stats={sending} progress={progress} repliesReadable={repliesReadable} />}
 
             <Samples campaign={campaign} plan={plan} />
 
@@ -219,11 +241,21 @@ function weekdaysLabel(days: number[]) {
 const sendDays = (plan: EmailPlan) =>
   plan.emails.reduce<number[]>((days, email, i) => [...days, (i ? days[i - 1] : 0) + (i ? email.waitDays : 0)], []);
 
-function AtAGlance({ plan, recipients }: { plan: EmailPlan; recipients: number | null }) {
+function AtAGlance({ plan, campaign }: { plan: EmailPlan; campaign: EmailCampaign }) {
   const days = sendDays(plan);
-  const people = recipients ?? plan.recipients.length;
+  const people = campaign.recipients ?? plan.recipients.length;
+  const capped = campaign.planTarget != null && campaign.planTarget > people;
   const facts: { icon: LucideIcon; label: string; value: string; note?: string }[] = [
-    { icon: Users, label: "Recipients", value: number.format(people), note: people === 1 ? "person" : "people" },
+    {
+      icon: Users,
+      label: "Recipients",
+      value: number.format(people),
+      note: capped
+        ? `${people === 1 ? "person" : "people"} · capped for testing (plan ${number.format(campaign.planTarget!)})`
+        : people === 1
+          ? "person"
+          : "people",
+    },
     {
       icon: ListOrdered,
       label: "Sequence",
@@ -379,8 +411,16 @@ function Recipients({ plan }: { plan: EmailPlan }) {
 }
 
 /** What the email tool recorded once the campaign was in its hands. Counts only. */
-function Sending({ stats }: { stats: EmailStats }) {
-  const percentSent = stats.messages ? Math.round((stats.sent / stats.messages) * 100) : null;
+function Sending({
+  stats,
+  progress,
+  repliesReadable,
+}: {
+  stats: EmailStats;
+  progress: SendingProgress;
+  repliesReadable: boolean;
+}) {
+  const percentSent = progress.total ? Math.round((progress.sent / progress.total) * 100) : null;
   const tracked = stats.events.length > 0 || stats.outcomes.length > 0;
   return (
     <div className="grid gap-3">
@@ -390,8 +430,8 @@ function Sending({ stats }: { stats: EmailStats }) {
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <StatTile
           label="Emails sent"
-          value={number.format(stats.sent)}
-          of={number.format(stats.messages)}
+          value={number.format(progress.sent)}
+          of={number.format(progress.total)}
           percent={percentSent}
           note={
             stats.lastSentAt
@@ -401,13 +441,16 @@ function Sending({ stats }: { stats: EmailStats }) {
         />
         <StatTile
           label="Still to send"
-          value={number.format(stats.waiting)}
+          value={number.format(progress.toSend)}
+          attention={!!progress.overdueSince}
           note={
-            stats.waiting > 0
-              ? stats.nextDueAt
-                ? `Later emails in the sequence · next due ${dateTime.format(new Date(stats.nextDueAt))}`
-                : "Later emails in the sequence"
-              : "Nothing is waiting"
+            progress.overdueSince
+              ? `Overdue since ${dateTime.format(new Date(progress.overdueSince))}`
+              : progress.toSend > 0
+                ? stats.nextDueAt
+                  ? `Later emails in the sequence · next due ${dateTime.format(new Date(stats.nextDueAt))}`
+                  : "Later emails in the sequence"
+                : "Nothing is waiting"
           }
         />
         <StatTile
@@ -418,8 +461,15 @@ function Sending({ stats }: { stats: EmailStats }) {
         />
         <StatTile
           label="Replies received"
-          value={number.format(stats.replies)}
-          note={stats.replies > 0 ? "Read them in the email tool" : "No replies recorded"}
+          value={repliesReadable || stats.replies > 0 ? number.format(stats.replies) : "–"}
+          attention={!repliesReadable && stats.replies === 0}
+          note={
+            stats.replies > 0
+              ? "Read them in the email tool"
+              : repliesReadable
+                ? "No replies recorded"
+                : "Cannot be read: this campaign's mailbox was connected without IMAP. Add the IMAP host in the email tool's mailbox settings."
+          }
         />
       </div>
 

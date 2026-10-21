@@ -371,6 +371,39 @@ export function emailPlanOf(output: unknown): EmailPlan | null {
   };
 }
 
+/** How far sending is, over the whole sequence (every recipient x every email), from the email tool's counts. */
+export type SendingProgress = {
+  total: number;
+  sent: number;
+  failed: number;
+  toSend: number;
+  /** When the next email was due, if that is more than OVERDUE_AFTER_MS ago and it has still not gone out. */
+  overdueSince: string | null;
+  finished: boolean;
+};
+
+/** The email tool sends inside its window; two hours past the due time means it is not sending. */
+export const OVERDUE_AFTER_MS = 2 * 60 * 60 * 1000;
+
+export function sendingProgress(
+  stats: { recipients: number; messages: number; sent: number; failed: number; nextDueAt: string | null; status: string },
+  sequenceLength: number | null,
+  now: number
+): SendingProgress {
+  // The tool only creates the next message for each recipient, so its own count stops at the next step.
+  const total = sequenceLength && stats.recipients ? Math.max(stats.recipients * sequenceLength, stats.messages) : stats.messages;
+  const toSend = Math.max(0, total - stats.sent - stats.failed);
+  const due = stats.nextDueAt ? Date.parse(stats.nextDueAt) : NaN;
+  return {
+    total,
+    sent: stats.sent,
+    failed: stats.failed,
+    toSend,
+    overdueSince: toSend > 0 && Number.isFinite(due) && now - due > OVERDUE_AFTER_MS ? stats.nextDueAt : null,
+    finished: toSend === 0 || /^complet/i.test(stats.status),
+  };
+}
+
 export type EmailCampaign = {
   taskId: string;
   /** The Brain's row id of the task, to find its plan (loadEmailPlans). */

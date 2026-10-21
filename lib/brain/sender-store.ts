@@ -73,6 +73,32 @@ export const loadSender = cache(async (projectId: string): Promise<SenderState> 
   }
 });
 
+/**
+ * When the sender's IMAP host was given (null: never). The Brain hands the mailbox to the email tool
+ * when it launches a campaign, so a campaign launched before this time cannot read replies.
+ */
+export async function loadImapAddedAt(projectId: string): Promise<string | null> {
+  try {
+    const admin = createAdminClient();
+    const { data: checklist } = await admin
+      .from(TABLES.checklists)
+      .select("id")
+      .eq("project_id", projectId)
+      .eq("is_active", true)
+      .maybeSingle<{ id: string }>();
+    if (!checklist) return null;
+    const { data: item } = await admin
+      .from(TABLES.checklistItems)
+      .select("answer, answered_at, updated_at")
+      .eq("checklist_id", checklist.id)
+      .eq("code", "SENDER-IMAP-HOST")
+      .maybeSingle<{ answer: string | null; answered_at: string | null; updated_at: string | null }>();
+    return item?.answer?.trim() ? (item.answered_at ?? item.updated_at) : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function saveSender(
   projectId: string,
   userId: string,

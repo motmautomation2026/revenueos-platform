@@ -14,7 +14,6 @@ import {
   SectionTitle,
   StatTile,
   TASK_STATUS,
-  capNote,
   dateTime,
   number,
 } from "@/components/brain/parts";
@@ -189,11 +188,8 @@ export default async function ExecutionPage(props: ExecutionPageProps) {
         </div>
       )}
 
-      {/* The whole month in one row: progress, what needs you, and each tool's result. */}
-      <section
-        aria-label="At a glance"
-        className="grid grid-cols-2 gap-3 lg:grid-cols-3 2xl:grid-cols-6"
-      >
+      {/* Progress and what needs you. Each tool's result is in the pipeline below (not repeated here). */}
+      <section aria-label="At a glance" className="grid grid-cols-2 gap-3 lg:max-w-2xl">
         <StatTile
           label="Tasks done"
           value={number.format(view.counts.done)}
@@ -231,37 +227,34 @@ export default async function ExecutionPage(props: ExecutionPageProps) {
             </p>
           </div>
         )}
-        {view.kpis.map((kpi, i) => (
-          <StatTile
-            key={i}
-            label={kpi.label}
-            value={number.format(kpi.achieved)}
-            of={kpi.target != null ? number.format(kpi.target) : undefined}
-            percent={kpi.percent}
-            note={
-              kpi.planTarget != null && kpi.planTarget !== kpi.target
-                ? `Plan target ${number.format(kpi.planTarget)} · capped for testing`
-                : undefined
-            }
-          />
-        ))}
       </section>
 
       <div className="grid gap-3">
         {funnel.length > 0 && (
           <section className="grid content-start gap-3">
-            <SectionTitle>Pipeline this month</SectionTitle>
+            <SectionTitle
+              aside={
+                funnel.some((stage) => stage.planTarget != null && stage.target != null && stage.planTarget !== stage.target)
+                  ? "Targets capped for testing (Staging): plan targets in brackets"
+                  : undefined
+              }
+            >
+              Pipeline this month
+            </SectionTitle>
             <ol className="grid divide-y rounded-xl border px-4">
               {funnel.map((stage) => {
                 const status = TASK_STATUS[stage.status];
                 const started = stage.achieved != null;
+                // "Interested" has no target of its own: it is a share of the calls made.
+                const callsMade = callsStage !== -1 ? funnel[callsStage].achieved : null;
+                const interested = stage.key === "interested";
+                const base = interested ? callsMade : stage.target;
                 // Each bar is that stage's own progress to its target, so every row reads the same way.
-                const percent =
-                  started && stage.target ? Math.round(((stage.achieved ?? 0) / stage.target) * 100) : null;
-                const width = percent != null ? Math.min(100, Math.max(percent, stage.achieved ? 2 : 0)) : started ? 100 : 0;
+                const percent = started && base ? Math.round(((stage.achieved ?? 0) / base) * 100) : null;
+                const width = percent != null ? Math.min(100, Math.max(percent, stage.achieved ? 2 : 0)) : 0;
                 const short =
                   stage.status === "done" && stage.target != null && started ? stage.target - (stage.achieved ?? 0) : 0;
-                const cap = started ? capNote(stage.target, stage.planTarget) : null;
+                const capped = stage.planTarget != null && stage.target != null && stage.planTarget !== stage.target;
                 return (
                   <li
                     key={stage.key}
@@ -281,12 +274,8 @@ export default async function ExecutionPage(props: ExecutionPageProps) {
                           style={{ width: `${width}%` }}
                         />
                       </div>
-                      {(short > 0 || cap) && (
-                        <p className="text-xs text-muted-foreground">
-                          {short > 0 && `${number.format(short)} short of the target`}
-                          {short > 0 && cap && " · "}
-                          {cap}
-                        </p>
+                      {short > 0 && (
+                        <p className="text-xs text-muted-foreground">{number.format(short)} short of the target</p>
                       )}
                     </div>
 
@@ -294,10 +283,21 @@ export default async function ExecutionPage(props: ExecutionPageProps) {
                       {started ? (
                         <>
                           <span className="text-lg leading-none font-semibold">{number.format(stage.achieved ?? 0)}</span>
-                          {stage.target != null && (
-                            <span className="text-muted-foreground"> / {number.format(stage.target)}</span>
+                          {interested ? (
+                            callsMade != null && <span className="text-muted-foreground"> of {number.format(callsMade)} calls</span>
+                          ) : (
+                            stage.target != null && (
+                              <span className="text-muted-foreground">
+                                {" "}/ {number.format(stage.target)}
+                                {capped && ` (${number.format(stage.planTarget!)})`}
+                              </span>
+                            )
                           )}
-                          {percent != null && <span className="block text-xs text-muted-foreground">{percent}% of target</span>}
+                          {percent != null && (
+                            <span className="block text-xs text-muted-foreground">
+                              {percent}% {interested ? "interested" : "of target"}
+                            </span>
+                          )}
                         </>
                       ) : (
                         <span className="text-muted-foreground">

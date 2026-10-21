@@ -6,6 +6,7 @@ import { buildChecklistMessage } from "@/lib/agents/build-inputs";
 import { canGenerateChecklist, type ExtractionStatus } from "@/lib/files/rules";
 import { TABLES } from "@/lib/supabase/tables";
 import { CHECKLIST_MAX_QUESTIONS, CHECKLIST_MIN_QUESTIONS } from "./config";
+import { guardChecklist } from "./checklist-guard";
 import { withFactSheets } from "./fact-sheet";
 import { AgentError, runAgent } from "./run-agent";
 
@@ -109,6 +110,22 @@ export async function generateChecklist(projectId: string): Promise<GenerateChec
     }
     if (count === 0) throw new AgentError("The AI returned no questions. Try again.");
 
+    // Code checks on the answer (lib/agents/checklist-guard.ts): quotes must be in a document, and a
+    // prefill must be a real answer. Checked against the full text, not the fact sheets.
+    const guarded = guardChecklist(
+      { known_facts: run.data.known_facts as Record<string, unknown>[], checklist_items: run.data.checklist_items },
+      files.filter((f) => f.extraction_status === "done").map((f) => f.extracted_text ?? "")
+    );
+    const guardNotes = [
+      ...(guarded.report.unquotedFacts
+        ? [`Checked by RevenueOS: ${guarded.report.unquotedFacts} known fact(s) removed because their quote is in no document.`]
+        : []),
+      ...guarded.report.clearedPrefills.map(
+        (cleared) => `Checked by RevenueOS: prefill "${cleared.was}" removed from "${cleared.question}": ${cleared.why}.`
+      ),
+    ];
+    run = { ...run, data: { ...run.data, known_facts: guarded.known_facts, checklist_items: guarded.checklist_items } };
+
     // Build the new checklist inactive, then swap it in, so a failure never loses the old one.
     const { data: checklist, error: checklistError } = await supabase
       .from(TABLES.checklists)
@@ -117,7 +134,7 @@ export async function generateChecklist(projectId: string): Promise<GenerateChec
         is_active: false,
         known_facts: run.data.known_facts,
         flags: run.data.flags,
-        cam_notes: run.data.cam_notes,
+        cam_notes: [...run.data.cam_notes, ...guardNotes],
         agent_run_id: run.runId,
       })
       .select("id")
