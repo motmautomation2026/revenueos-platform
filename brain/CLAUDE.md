@@ -72,9 +72,10 @@ Patches only. Every sync point is a line in `PLATFORM_SYNC.txt`
    then apply, write the files out, byte-compare every file with theirs (ignoring CRLF only), commit
    "Platform brain changes <sha>, unchanged", and add a line to `PLATFORM_SYNC.txt`.
 2. **Then push, as a patch on a PR branch.** `git diff <last master-agent sync point>..master` here;
-   in the platform clone a new branch `brain-sync-<date>` from their latest `origin/version1`;
+   in the platform clone a new branch `brain-sync-<date>` from their latest `origin/main`;
    `git apply --directory=brain --3way --check`, then apply and commit. Pushing that branch and
-   opening the PR need the developer's go. PRs target `version1` (the developers' rule for now), never main. After they merge, record the
+   opening the PR need the developer's go. PRs target `main` (the developers' rule since 2026-10-23; `version1`
+   is no longer the target). After they merge, record the
    merge commit as the new platform sync point (so the next pull does not bring our changes back).
 3. **Never:** copy whole files or folders over `brain/`, mirror, or `--delete`; apply a patch that
    touches their files or settings (see Scope): stop and ask. Any conflict: stop and report; it is

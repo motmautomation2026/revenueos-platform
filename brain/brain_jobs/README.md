@@ -66,15 +66,29 @@ only).
 
 ## What must run on the server (their side)
 
-`python -m brain_jobs tick` every 5 minutes, in each customer's brain folder, with that customer's `.env`. The
-lease and the 8-minute limit make overlapping ticks safe.
+`python -m brain_jobs tick` every 5 minutes for each customer, started exactly like a run step: in the customer's
+folder (`customers/<key>`, or the brain folder for the `.env` customer) with the environment run_for builds for that
+customer (`environment_for`: CUSTOMER_KEY, the customer's tool accounts). The lease and the 8-minute limit make
+overlapping ticks safe. Nothing in run_for exists for this yet: it is their change, and no existing command changes.
 
-- **Windows** (as `install_worker.ps1` does now): one Scheduled Task per customer, repeating every 5 minutes:
-  `cmd /c cd /d <customer folder> && <python> -m brain_jobs tick`.
-- **Linux:** `*/5 * * * * cd <customer folder> && .venv/bin/python -m brain_jobs tick >> logs/jobs.log 2>&1`, or a
-  systemd timer with `OnUnitActiveSec=5min`.
-- Later, run_for can call the same command from its loop, so there is one process per machine. That would be their
-  change; no existing command changes.
+The worker runs in Docker (`docker-compose.yml`, service `worker`: `python run_for.py work`; customer folders in the
+`brain-customers` volume; `brain/.env` mounted read-only). There is no `.env` per customer inside the container, so a
+plain cron line cannot give `tick` the right customer. Two ways:
+
+- **A. From run_for's loop (recommended).** In `cmd_work`, every 5 minutes, for each customer that has a platform
+  project: start `python -m brain_jobs tick` the way `start_background_step` starts `orchestrator.py run`
+  (`workspace_for` + `prepare_workspace` + `environment_for`, output to `logs/<time>-jobs.log`), at most one tick per
+  customer at a time. One process, one container, nothing new to deploy.
+- **B. A second compose service.** The same image and volume as `worker`, with its own fixed hostname, running a
+  small loop of theirs every 5 minutes (e.g. a new `python run_for.py jobs` that reuses those same three functions).
+  Its own restarts and logs, but two processes read the same customer folders.
+
+Either way the heartbeat shows it: `python -m brain_jobs status` (or the platform reading `brain_worker_heartbeats`)
+says `WORKER OFFLINE` when no tick wrote for 15 minutes. Their own `revenueos_brain_workers` row stays the worker's
+liveness; ours is per worker AND customer.
+
+Outside Docker (a laptop): `python -m brain_jobs tick` in the brain folder with its `.env`, every 5 minutes
+(Windows Scheduled Task, or cron `*/5 * * * *`).
 
 ## Isolation (enforced by `python tools/baseline.py check-imports`)
 

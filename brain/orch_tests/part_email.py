@@ -121,20 +121,40 @@ def selftest_email() -> bool:
         expect("E6 --dry: 3 recipients, nothing recorded, no launch", result.output["recipients"] == 3
                and fake.calls["launch"] == 0 and rows_of(run, "request") == [] and t2(run)["status"] == "pending")
 
-        # E7. send_launch: 'pending' -> the SAME request again (call_tool stubbed, no network)
-        sent = []
+        # E7. send_launch: 'pending' -> the SAME request again (call_tool stubbed, no network). Checked by content,
+        # with no workspace login password and with one (with_sender adds it at send time only, never to the body).
+        saved_e7 = {name: os.environ.get(name) for name in ("EMAIL_TOOL_USER_PASSWORD", "SMTP_HOST")}
+        same = []
+        try:
+            os.environ.pop("SMTP_HOST", None)                                # isolate from mailbox injection
+            os.environ.setdefault("EMAIL_TOOL_URL", "https://example.invalid/api/v1/x")
+            for password in (None, "Fake@E7pass"):
+                if password:
+                    os.environ["EMAIL_TOOL_USER_PASSWORD"] = password
+                else:
+                    os.environ.pop("EMAIL_TOOL_USER_PASSWORD", None)
+                sent = []
 
-        def stub(method, url, body=None):
-            sent.append(body)
-            return 200, ({"start_status": "pending"} if len(sent) < 3 else
-                         {"start_status": "awaiting_approval", "campaign_id": "c", "workspace_id": "w"})
-        email_tool.call_tool = stub
-        os.environ.setdefault("EMAIL_TOOL_URL", "https://example.invalid/api/v1/x")
-        body = {"reference": "R-1"}
-        email_tool.send_launch(body, wait_seconds=0)
-        expect("E7 send_launch: pending twice -> the same request sent 3 times", len(sent) == 3
-               and all(b is body for b in sent))
-        email_tool.call_tool = real_call_tool
+                def stub(method, url, body=None):
+                    sent.append(body)
+                    return 200, ({"start_status": "pending"} if len(sent) < 3 else
+                                 {"start_status": "awaiting_approval", "campaign_id": "c", "workspace_id": "w"})
+                email_tool.call_tool = stub
+                body = {"reference": "R-1", "user": {"email": "u@x.test", "workspace_name": "X", "role": "ADMIN"}}
+                email_tool.send_launch(body, wait_seconds=0)
+                first = sent[0] if sent else {}
+                without = {**first, "user": {k: v for k, v in (first.get("user") or {}).items() if k != "password"}}
+                same.append(len(sent) == 3 and all(b == first for b in sent) and without == body
+                            and first["user"].get("password") == password and "password" not in body["user"])
+        finally:
+            email_tool.call_tool = real_call_tool
+            for name, value in saved_e7.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+        expect("E7 send_launch: pending twice -> the same request sent 3 times (same content; without and with a "
+               "workspace login password, never saved in the body)", same == [True, True])
 
         # E8. known issue 4: never_say in OUR reference emails -> one rewrite; signature from the display name.
         # Its own understanding + work order: reading ANY file through email_tool here is a test failure.
