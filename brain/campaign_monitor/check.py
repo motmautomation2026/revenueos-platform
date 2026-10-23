@@ -83,10 +83,13 @@ def check_campaign(campaign: dict, tools, writes, now) -> dict:
     return {**output, "line": line, "key": key}
 
 
-def check_all(key: str, month: str | None = None, tools=None, reads=None, writes=None, now=None) -> list[dict]:
+def check_all(key: str, month: str | None = None, tools=None, reads=None, writes=None, now=None,
+              reference: str | None = None) -> list[dict]:
+    """Every tracked campaign of the customer (or of one run), or only the one named by reference (brain_jobs)."""
     if tools is None:
         from campaign_monitor.tools import RealTools
         tools = RealTools()
     writes = writes or default_writes()
     now = now or datetime.datetime.now(datetime.timezone.utc)
-    return [check_campaign(c, tools, writes, now) for c in campaigns(key, month, reads) if c["tracked"]]
+    return [check_campaign(c, tools, writes, now) for c in campaigns(key, month, reads)
+            if c["tracked"] and reference in (None, c["reference"])]

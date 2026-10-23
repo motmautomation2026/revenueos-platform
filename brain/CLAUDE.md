@@ -53,6 +53,11 @@ folder or `selftest-*` rows that are deleted at the end).
   `monitor:<ref>:<n>` ledger step per check, a log line); a stall = an answered `campaign_stalled` decision (never
   open; `config.OPEN_ALERTS` off). Nothing imports it; check-imports enforces this. `python -m campaign_monitor ...`
   (a real `check` needs "run it"), see `campaign_monitor/README.md`.
+- **`brain_jobs/`:** durable job queue (table `brain_jobs`, `sql/004_brain_jobs.sql`): `tick` claims due jobs
+  atomically (lease), runs `campaign_check` / `run_step`, retries with backoff, dead -> an answered `job_dead`
+  decision (never open); heartbeat for "worker offline". `run_step` only by hand or at a set time. Nothing imports
+  it; check-imports enforces this. `python -m brain_jobs ...` (tick / enqueue / realtest need "run it"), see
+  `brain_jobs/README.md`.
 - **Theirs, read-only (platform developers):** `run_for.py` (project choice, per-customer folders,
   the worker), `platform_approval.py` (plan approval in the platform), `install_worker.ps1`. See Scope.
 
