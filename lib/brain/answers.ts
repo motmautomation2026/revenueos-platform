@@ -17,6 +17,11 @@ export const ALLOWED_ANSWERS: Record<string, readonly string[]> = {
   review_action_1: ["accept", "reject"],
   review_action_2: ["accept", "reject"],
   review_action_3: ["accept", "reject"],
+  // Brain-internal signals the Brain records itself: a memory it kept (approved), a campaign that
+  // stalled and a job that gave up (raised). Listed so the app does not treat them as unknown.
+  memory: ["approved"],
+  campaign_stalled: ["raised"],
+  job_dead: ["raised"],
 };
 
 const NOTE_REQUIRED = new Set(["human_task", "human_gate_task", "review_action_1", "review_action_2", "review_action_3"]);
@@ -64,6 +69,8 @@ const OPTIONS: Record<string, Omit<AnswerOption, "answer">> = {
   },
   retry: { label: "Retry", tone: "primary", confirm: "The Brain will run this task again." },
   feedback: { label: "Ask for changes", tone: "neutral" },
+  approved: { label: "Approved", tone: "neutral" },
+  raised: { label: "Acknowledge", tone: "neutral" },
 };
 
 const APPROVAL_CONFIRM: Record<string, string> = {
