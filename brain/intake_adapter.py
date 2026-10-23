@@ -677,6 +677,29 @@ def llm_selftest(expect, raises) -> None:
         quickicp.ask_llm_batch(Answer, ["hello a", "hello b"], "Work orders")
         expect("usage log: a batch of 2 -> 2 lines, one per call ('Work orders')",
                [line["call"] for line in usage_lines()] == ["Fake step", "Work orders", "Work orders"])
+        from types import SimpleNamespace
+        reply = SimpleNamespace(llm_output={}, generations=[[SimpleNamespace(message=SimpleNamespace(
+            usage_metadata={"input_tokens": 1, "output_tokens": 1}, response_metadata={"model_name": "fake"}))]])
+        lines_before, calls_before = len(usage_lines()), quickicp.USAGE_TOTAL["calls"]
+        writers = [threading.Thread(target=quickicp.log_usage, args=(f"Parallel {i}", reply, 0.0)) for i in range(20)]
+        with contextlib.redirect_stdout(io.StringIO()):
+            for writer in writers:
+                writer.start()
+            for writer in writers:
+                writer.join()
+        parallel = usage_lines()[lines_before:]
+        expect("usage log: 20 calls logging at the same moment (threads) -> exactly 20 new lines, none lost; the "
+               "total counts all 20",
+               len(parallel) == 20 and {line["call"] for line in parallel} == {f"Parallel {i}" for i in range(20)}
+               and quickicp.USAGE_TOTAL["calls"] - calls_before == 20)
+        for line in parallel:                                # keep the later checks' totals as before
+            quickicp.USAGE_TOTAL["calls"] -= 1
+            quickicp.USAGE_TOTAL["input_tokens"] -= 1
+            quickicp.USAGE_TOTAL["output_tokens"] -= 1
+        with open(quickicp.USAGE_FILE, encoding="utf-8") as file:
+            kept = file.readlines()[:lines_before]
+        with open(quickicp.USAGE_FILE, "w", encoding="utf-8") as file:   # the selftest's own temp usage file
+            file.writelines(kept)
         seen["usage"] = False
         answer = quickicp.ask_llm(Answer, "hello", "No usage")
         expect("usage missing in the reply -> 'n/a' in the line; the answer is still returned",
@@ -851,6 +874,9 @@ def selftest() -> bool:
 
         # master_agent.py: the --intake choice, tested WITHOUT running the brain (importing runs nothing)
         import master_agent
+        from unittest import mock
+        mock.patch.object(master_agent, "lessons_text", lambda key, allow_test=False: "").start()   # no approved-memory read from
+        mock.patch.dict(master_agent._LESSONS, clear=True).start()                  # Supabase in a selftest
         expect("master_agent: no flag -> data/extracted.txt (fallback unchanged); --intake -> data/intake_document.txt",
                master_agent.choose_document(["master_agent.py"]) == "data/extracted.txt"
                and master_agent.choose_document(["master_agent.py", "--intake"]) == "data/intake_document.txt")
@@ -961,9 +987,53 @@ def selftest() -> bool:
                r6_errors[0] in checked["plan_errors"] and r6_errors[1] in checked["plan_errors"]
                and r6_errors[0] in retry and r6_errors[1] in retry
                and "Quickhowl calls tasks list the QuickICP contacts task directly in depends_on" in prompts[0])
+
+        # Approved memory (brain_memory): none -> both prompts exactly as before; approved -> the section in both
+        class Sent(Exception):
+            pass
+
+        def prompts_with(lessons):
+            sent = []
+
+            def fake_ask(schema, prompt, name, timeout=None):
+                sent.append(prompt)
+                raise Sent                                               # stop right after the prompt is built
+            master_agent._LESSONS.clear()
+            with mock.patch.object(master_agent, "lessons_text", lambda key, allow_test=False: lessons), \
+                    mock.patch.object(master_agent, "ask_llm", fake_ask), mock.patch.dict(os.environ, {"CUSTOMER_KEY": "selftest-memory"}):
+                for node in (master_agent.analyze_revenue, master_agent.plan_month):
+                    try:
+                        node({**state, "document_text": "doc", "document_path": "doc.txt"})
+                    except Sent:
+                        pass
+            master_agent._LESSONS.clear()
+            return sent
+        lessons = "Lessons from earlier months (facts of those runs, approved by a person):\n- [2026-09] x\nRULE"
+        empty, given = prompts_with(""), prompts_with(lessons)
+
+        def allow_test(test_mode, argv):
+            """What earlier_lessons() asks lessons_text for: TEST-run lessons only in test mode with --allow-test."""
+            asked = []
+            master_agent._LESSONS.clear()
+            with mock.patch.object(master_agent, "lessons_text", lambda key, allow_test=False: asked.append(allow_test) or ""), \
+                    mock.patch.object(master_agent, "TEST_MODE", test_mode), mock.patch.object(sys, "argv", argv), \
+                    mock.patch.dict(os.environ, {"CUSTOMER_KEY": "selftest-memory"}):
+                master_agent.earlier_lessons()
+            master_agent._LESSONS.clear()
+            return asked
+        expect("no approved memory -> the revenue-analysis and month-plan prompts have no lessons section (unchanged)",
+               len(empty) == 2 and all("Lessons from earlier months" not in p for p in empty)
+               and allow_test(False, ["master_agent.py", "--allow-test"]) == [False]          # real plan: never test lessons
+               and allow_test(True, ["master_agent.py"]) == [False]
+               and allow_test(True, ["master_agent.py", "--intake", "--allow-test"]) == [True])
+        expect("approved memory -> the lessons go into BOTH prompts once, after the customer's data; nothing else changes",
+               len(given) == 2 and all(g.count(lessons) == 1 and g.replace("\n\n" + lessons, "") == e
+                                       for g, e in zip(given, empty)))
         revenue_selftest(expect, folder)
         llm_selftest(expect, raises)
     finally:
+        from unittest import mock
+        mock.patch.stopall()
         shutil.rmtree(folder, ignore_errors=True)
         if saved is None:
             os.environ.pop("REVENUEOS_PROJECT_ID", None)

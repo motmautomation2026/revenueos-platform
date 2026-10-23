@@ -78,6 +78,7 @@ NOISE = [
     (r"(motm|MOTM)-(st|ST)\d{6}", r"\1-\2<tag>"),                         # reference tag from the selftest stamp
     (r"tmp[a-z0-9_]{8}\\", r"tmp<dir>\\"),                                 # temporary folders
     (r"\d{8}-\d{6}-(run|plan)\.log", r"<stamp>-\1.log"),                  # run_for log file names
+    (r"\b[cC]:\\", r"C:\\"),                                                 # drive letter case of the shell's folder
 ]
 
 
@@ -155,6 +156,21 @@ def contract() -> None:
             print(f"name {name}: {type(value).__name__} {value!r}"[:400])
 
 
+def python_files():
+    """(repo-relative path, parsed tree) of every .py file of ours (not .venv, not archive/)."""
+    import ast
+    for folder, subfolders, files in os.walk(ROOT):
+        subfolders[:] = [s for s in subfolders if s not in (".venv", ".git", "archive", "__pycache__", "baseline",
+                                                           "data", "logs", "customers", "node_modules")]
+        for name in files:
+            if name.endswith(".py"):
+                path = os.path.relpath(os.path.join(folder, name), ROOT).replace("\\", "/")
+                try:
+                    yield path, ast.parse(open(os.path.join(ROOT, path), encoding="utf-8").read())
+                except SyntaxError:
+                    continue                     # not valid Python (e.g. ap.py): nothing can import it
+
+
 RUNTIME_VALUES = {"_backend", "STATE_WRITES", "HELD_LOCKS", "PAID_IN_FLIGHT", "USAGE_TOTAL"}   # changed while running
 ARCHIVED = {"pipeline", "goal_check", "email_campaign_payload", "company_loop_cli", "people_loop_cli"}
 
@@ -202,6 +218,50 @@ def check_imports() -> bool:
         if missing:
             problems.append(f"not importable from {facade.__name__}: {missing}")
         counted, file_count = counted + len(defined), file_count + len(files)
+    # lead_qual/ and brain_memory/: on their own. Each may only use these shared names; outside it, only the listed
+    # file may import it, and only the listed names (lead_qual: nobody yet; brain_memory: master_agent, lessons_text).
+    packages = {
+        "lead_qual": ({"quickicp": {"ask_llm", "ask_llm_batch", "run_cli", "ToolError", "TEST_MODE"},
+                       "state_store": {"get_runs", "get_tasks", "get_steps"},
+                       "intake_adapter": {"rupees_per_unit"}},                 # lakh / crore -> INR, one converter
+                      {}, "the LLM factory, run_cli, state_store reads and rupees_per_unit"),
+        "brain_memory": ({"quickicp": {"ask_llm", "run_cli", "ToolError"},
+                          "state_store": {"get_runs", "get_tasks", "get_decisions", "get_steps", "record_decision",
+                                          "ALLOWED_ANSWERS", "open_decision"}},  # the last 2: its selftest only
+                         {"master_agent.py": {"lessons_text"}}, "the LLM factory, run_cli and state_store reads + record_decision"),
+        "campaign_monitor": ({"quickicp": {"run_cli", "ToolError"},
+                              "state_store": {"get_runs", "get_tasks", "get_steps", "get_decisions", "start_step",
+                                              "finish_step", "record_decision", "open_decision", "current_customer",
+                                              "ALLOWED_ANSWERS"},                # the last one: its selftest only
+                              "quickhowl": {"campaign_status", "cmd_results"},     # FREE reads only
+                              "orch": {"write", "check_month"}},                    # brain_log.write, common.check_month
+                             {"brain_jobs/kinds.py": {"check_all"}, "brain_jobs/tick.py": {"campaigns"},
+                              "brain_jobs/cli.py": {"campaigns"}},
+                             "run_cli, state_store reads + ledger / decision writes, Quickhowl's free reads and the log"),
+        "brain_jobs": ({"quickicp": {"run_cli", "ToolError"},
+                        "state_store": {"get_runs", "record_decision", "current_customer",
+                                        "ALLOWED_ANSWERS", "open_decision"},             # the last 2: its selftest only
+                        "supabase_store": {"db"},                                         # the one Supabase client
+                        "campaign_monitor": {"check_all", "campaigns"},
+                        "orch": {"write", "mask", "check_month"}},                        # brain_log, common
+                       {}, "run_cli, state_store runs + record_decision, the Supabase client, campaign_monitor and the log"),
+    }
+    ours = {f[:-3] for f in os.listdir(ROOT) if f.endswith(".py")} | {"orch", "orch_tests", "tools", "archive"} | set(packages)
+    for path, tree in python_files():
+        home = path.split("/")[0] if path.split("/")[0] in packages else None
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.Import, ast.ImportFrom)):
+                continue
+            modules = [node.module or ""] if isinstance(node, ast.ImportFrom) else [a.name for a in node.names]
+            for module in modules:
+                top = module.split(".")[0]
+                names = {a.name for a in node.names} if isinstance(node, ast.ImportFrom) else {"*"}
+                if top in packages and top != home and not names <= packages[top][1].get(path, set()):
+                    problems.append(f"{path} imports {sorted(names)} from {module} (outside {top}/ only "
+                                    f"{packages[top][1] or 'nobody yet'} may)")
+                if home and top in ours and top != home and not names <= packages[home][0].get(top, set()):
+                    problems.append(f"{path} imports {sorted(names - packages[home][0].get(top, set()))} from {module} "
+                                    f"({home} may only use {packages[home][2]})")
     if orchestrator.WIRED_RUNNERS is not orch.run.WIRED_RUNNERS:
         problems.append("orchestrator.WIRED_RUNNERS is not the dict orch.run uses")
     orchestrator.WIRED_RUNNERS["_probe"] = None              # what e2e_test / email_live_check do

@@ -41,6 +41,23 @@ folder or `selftest-*` rows that are deleted at the end).
 - **`archive/legacy/`:** the old standalone flow (`pipeline.py`, `goal_check.py`, `email_campaign_payload.py`,
   the old loop CLIs, the old CLI modes of quickhowl / email_tool / quickicp / validator / supabase_store). Reference only: never import it from, or copy it back into, the run path. The
   orchestrator selftest's "imports" part checks this.
+- **`lead_qual/`:** Lead Qualification Agent, on its own (brain logic only; nothing imports it yet; it may only use
+  `quickicp`'s LLM calls / `run_cli`, `state_store.get_runs` / `get_tasks` / `get_steps` (reads) and
+  `intake_adapter.rupees_per_unit`; check-imports
+  enforces this). `python -m lead_qual ...`,
+  see `lead_qual/README.md`.
+- **`brain_memory/`:** approved lessons of earlier months (code facts, 1 LLM call, a person approves -> one answered
+  `brain_decisions` row, kind `memory`). Only `master_agent.py` imports it, and only `lessons_text()`; no approved
+  memory = prompts unchanged; check-imports enforces this. `python -m brain_memory ...`, see `brain_memory/README.md`.
+- **`campaign_monitor/`:** tracks every launched calls / email campaign until it really ends (free tool reads, one
+  `monitor:<ref>:<n>` ledger step per check, a log line); a stall = an answered `campaign_stalled` decision (never
+  open; `config.OPEN_ALERTS` off). Nothing imports it; check-imports enforces this. `python -m campaign_monitor ...`
+  (a real `check` needs "run it"), see `campaign_monitor/README.md`.
+- **`brain_jobs/`:** durable job queue (table `brain_jobs`, `sql/004_brain_jobs.sql`): `tick` claims due jobs
+  atomically (lease), runs `campaign_check` / `run_step`, retries with backoff, dead -> an answered `job_dead`
+  decision (never open); heartbeat for "worker offline". `run_step` only by hand or at a set time. Nothing imports
+  it; check-imports enforces this. `python -m brain_jobs ...` (tick / enqueue / realtest need "run it"), see
+  `brain_jobs/README.md`.
 - **Theirs, read-only (platform developers):** `run_for.py` (project choice, per-customer folders,
   the worker), `platform_approval.py` (plan approval in the platform), `install_worker.ps1`. See Scope.
 
@@ -55,9 +72,10 @@ Patches only. Every sync point is a line in `PLATFORM_SYNC.txt`
    then apply, write the files out, byte-compare every file with theirs (ignoring CRLF only), commit
    "Platform brain changes <sha>, unchanged", and add a line to `PLATFORM_SYNC.txt`.
 2. **Then push, as a patch on a PR branch.** `git diff <last master-agent sync point>..master` here;
-   in the platform clone a new branch `brain-sync-<date>` from their latest `origin/version1`;
+   in the platform clone a new branch `brain-sync-<date>` from their latest `origin/main`;
    `git apply --directory=brain --3way --check`, then apply and commit. Pushing that branch and
-   opening the PR need the developer's go. PRs target `version1` (the developers' rule for now), never main. After they merge, record the
+   opening the PR need the developer's go. PRs target `main` (the developers' rule since 2026-10-23; `version1`
+   is no longer the target). After they merge, record the
    merge commit as the new platform sync point (so the next pull does not bring our changes back).
 3. **Never:** copy whole files or folders over `brain/`, mirror, or `--delete`; apply a patch that
    touches their files or settings (see Scope): stop and ask. Any conflict: stop and report; it is
