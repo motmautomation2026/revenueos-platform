@@ -235,7 +235,16 @@ def check_imports() -> bool:
                                               "ALLOWED_ANSWERS"},                # the last one: its selftest only
                               "quickhowl": {"campaign_status", "cmd_results"},     # FREE reads only
                               "orch": {"write", "check_month"}},                    # brain_log.write, common.check_month
-                             {}, "run_cli, state_store reads + ledger / decision writes, Quickhowl's free reads and the log"),
+                             {"brain_jobs/kinds.py": {"check_all"}, "brain_jobs/tick.py": {"campaigns"},
+                              "brain_jobs/cli.py": {"campaigns"}},
+                             "run_cli, state_store reads + ledger / decision writes, Quickhowl's free reads and the log"),
+        "brain_jobs": ({"quickicp": {"run_cli", "ToolError"},
+                        "state_store": {"get_runs", "record_decision", "current_customer",
+                                        "ALLOWED_ANSWERS", "open_decision"},             # the last 2: its selftest only
+                        "supabase_store": {"db"},                                         # the one Supabase client
+                        "campaign_monitor": {"check_all", "campaigns"},
+                        "orch": {"write", "mask", "check_month"}},                        # brain_log, common
+                       {}, "run_cli, state_store runs + record_decision, the Supabase client, campaign_monitor and the log"),
     }
     ours = {f[:-3] for f in os.listdir(ROOT) if f.endswith(".py")} | {"orch", "orch_tests", "tools", "archive"} | set(packages)
     for path, tree in python_files():
