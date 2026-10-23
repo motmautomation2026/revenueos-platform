@@ -48,6 +48,8 @@ def raise_alert(writes, campaign: dict, day: dict) -> dict:
     question = {"campaign": campaign["reference"], "kind": campaign["kind"], "task_id": task["task_id"],
                 "day": day["day"], "expected": day["expected_count"], "actual": day["actual"], "text": day["why"]}
     reason = f"{task['task_id']} {campaign['kind']} campaign {campaign['reference']} stalled on {day['day']}: {day['why']}"
+    from quickicp import report_event                  # Sentry, only when SENTRY_DSN is set
+    report_event(config.ALERT_KIND, reason, "warning", run=campaign["run"]["run_key"], task=task["task_id"])
     if config.OPEN_ALERTS:
         return writes.open_decision(campaign["run"]["id"], config.ALERT_KIND, question, task["id"])
     return writes.record_decision(campaign["run"]["id"], config.ALERT_KIND, "raised", "brain", reason,

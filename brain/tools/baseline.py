@@ -93,7 +93,7 @@ def capture(folder: str) -> None:
     for name, args, env in COMMANDS:
         if env.get("CUSTOMER_KEY", CHECK_KEY) != CHECK_KEY:
             raise SystemExit(f"refusing {name}: CLI commands run for {CHECK_KEY} only")
-        done = subprocess.run([PY, *args], cwd=ROOT, env={**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONHASHSEED": "0", **env},
+        done = subprocess.run([PY, *args], cwd=ROOT, env={**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONHASHSEED": "0", "SENTRY_DSN": "", **env},
                               capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=1800,
                               stdin=subprocess.DEVNULL)
         with open(os.path.join(folder, name + ".out"), "w", encoding="utf-8", newline="\n") as file:
@@ -184,7 +184,8 @@ def check_imports() -> bool:
     import orchestrator
     import orch.run
     import orchestrator_selftest
-    groups = [(orchestrator, "orchestrator.py", "orch", {"brain_log.py"}),           # the run controller split
+    groups = [(orchestrator, "orchestrator.py", "orch", {"brain_log.py", "brain_sentry.py",
+                                                          "sentry_selftest.py"}),  # the run controller split
               (orchestrator_selftest, "orchestrator_selftest.py", "orch_tests", set())]  # its selftest split
     problems, counted, file_count = [], 0, 0
     for facade, facade_file, folder, skip in groups:
@@ -229,7 +230,7 @@ def check_imports() -> bool:
                           "state_store": {"get_runs", "get_tasks", "get_decisions", "get_steps", "record_decision",
                                           "ALLOWED_ANSWERS", "open_decision"}},  # the last 2: its selftest only
                          {"master_agent.py": {"lessons_text"}}, "the LLM factory, run_cli and state_store reads + record_decision"),
-        "campaign_monitor": ({"quickicp": {"run_cli", "ToolError"},
+        "campaign_monitor": ({"quickicp": {"run_cli", "ToolError", "report_event"},
                               "state_store": {"get_runs", "get_tasks", "get_steps", "get_decisions", "start_step",
                                               "finish_step", "record_decision", "open_decision", "current_customer",
                                               "ALLOWED_ANSWERS"},                # the last one: its selftest only
@@ -238,7 +239,7 @@ def check_imports() -> bool:
                              {"brain_jobs/kinds.py": {"check_all"}, "brain_jobs/tick.py": {"campaigns"},
                               "brain_jobs/cli.py": {"campaigns"}},
                              "run_cli, state_store reads + ledger / decision writes, Quickhowl's free reads and the log"),
-        "brain_jobs": ({"quickicp": {"run_cli", "ToolError"},
+        "brain_jobs": ({"quickicp": {"run_cli", "ToolError", "report_event"},
                         "state_store": {"get_runs", "record_decision", "current_customer",
                                         "ALLOWED_ANSWERS", "open_decision"},             # the last 2: its selftest only
                         "supabase_store": {"db"},                                         # the one Supabase client
