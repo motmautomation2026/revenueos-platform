@@ -75,8 +75,20 @@ from pydantic import BaseModel, Field
 from plan_approval import (APPROVAL_FILE, archive_plan_files, ask_approval, describe, plan_approver,
                            write_proof)
 from quickicp import (COUNTED_TOOL_TASKS, LLM_TIMEOUT_LONG, ToolError, ask_llm, ask_llm_batch, count_in,
-                      percent_base, percent_of, usage_summary)
+                      percent_base, percent_of, usage_summary, TEST_MODE)
 import platform_approval
+from brain_memory import lessons_text
+
+_LESSONS: dict = {}
+
+
+def earlier_lessons() -> str:
+    """Approved lessons of earlier months for this customer ('' = none: the prompts stay exactly as before).
+    Lessons from TEST runs only when this plan is in test mode AND --allow-test is given (a real plan never gets them)."""
+    key = (os.getenv("CUSTOMER_KEY") or "").strip()
+    if key not in _LESSONS:
+        _LESSONS[key] = lessons_text(key, allow_test=TEST_MODE and "--allow-test" in sys.argv) if key else ""
+    return _LESSONS[key]
 
 load_dotenv()
 
@@ -575,6 +587,8 @@ def analyze_revenue(state: MasterState) -> dict:
         "Customer understanding:\n" + state["understanding"].model_dump_json(indent=2),
         "Source document:\n" + state["document_text"],
     ]
+    if earlier_lessons():
+        parts.append(earlier_lessons())
 
     analysis_fb = state.get("analysis_feedback", "")
     previous = state.get("revenue_analysis")
@@ -674,6 +688,8 @@ def plan_month(state: MasterState) -> dict:
         "Revenue analysis:\n" + state["revenue_analysis"].model_dump_json(indent=2),
         "Customer understanding:\n" + state["understanding"].model_dump_json(indent=2),
     ]
+    if earlier_lessons():
+        parts.append(earlier_lessons())
 
     plan_fb = state.get("plan_feedback", "")
     analysis_fb = state.get("analysis_feedback", "")

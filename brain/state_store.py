@@ -140,6 +140,8 @@ ALLOWED_ANSWERS = {
                                                        # readiness): it can never be skipped
     "goal_check_final": {"continue", "stop"},          # goal check after the last allowed 'more'
     "run_review": {"saved"},                           # the brain's review of a run (recorded, never open)
+    "memory": {"approved"},                            # approved lessons of a month (brain_memory; recorded, never open)
+    "campaign_stalled": {"raised"},                    # a campaign day with expected activity but none (campaign_monitor; recorded, never open)
     "review_action_1": {"accept", "reject"},           # a suggested action from a review (human decides;
     "review_action_2": {"accept", "reject"},           #  accepting only records the choice)
     "review_action_3": {"accept", "reject"},
@@ -758,7 +760,7 @@ def open_decision(run_id: int, kind: str, question: dict, task_row_id: int | Non
     question['allowed_answers'] may narrow the answers for THIS question (e.g. no 'feedback' when no rounds
     are left); it is always kept inside the kind's ALLOWED_ANSWERS, and answer_decision enforces it.
     """
-    check_value(kind, set(ALLOWED_ANSWERS) - {"brain_review", "run_review"}, "decision kind to ask")
+    check_value(kind, set(ALLOWED_ANSWERS) - {"brain_review", "run_review", "memory", "campaign_stalled"}, "decision kind to ask")
     existing = get_open_decision(run_id, kind, task_row_id)
     if existing:
         return existing

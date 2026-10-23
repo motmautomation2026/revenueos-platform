@@ -41,6 +41,18 @@ folder or `selftest-*` rows that are deleted at the end).
 - **`archive/legacy/`:** the old standalone flow (`pipeline.py`, `goal_check.py`, `email_campaign_payload.py`,
   the old loop CLIs, the old CLI modes of quickhowl / email_tool / quickicp / validator / supabase_store). Reference only: never import it from, or copy it back into, the run path. The
   orchestrator selftest's "imports" part checks this.
+- **`lead_qual/`:** Lead Qualification Agent, on its own (brain logic only; nothing imports it yet; it may only use
+  `quickicp`'s LLM calls / `run_cli`, `state_store.get_runs` / `get_tasks` / `get_steps` (reads) and
+  `intake_adapter.rupees_per_unit`; check-imports
+  enforces this). `python -m lead_qual ...`,
+  see `lead_qual/README.md`.
+- **`brain_memory/`:** approved lessons of earlier months (code facts, 1 LLM call, a person approves -> one answered
+  `brain_decisions` row, kind `memory`). Only `master_agent.py` imports it, and only `lessons_text()`; no approved
+  memory = prompts unchanged; check-imports enforces this. `python -m brain_memory ...`, see `brain_memory/README.md`.
+- **`campaign_monitor/`:** tracks every launched calls / email campaign until it really ends (free tool reads, one
+  `monitor:<ref>:<n>` ledger step per check, a log line); a stall = an answered `campaign_stalled` decision (never
+  open; `config.OPEN_ALERTS` off). Nothing imports it; check-imports enforces this. `python -m campaign_monitor ...`
+  (a real `check` needs "run it"), see `campaign_monitor/README.md`.
 - **Theirs, read-only (platform developers):** `run_for.py` (project choice, per-customer folders,
   the worker), `platform_approval.py` (plan approval in the platform), `install_worker.ps1`. See Scope.
 
