@@ -16,7 +16,11 @@ export async function requireUser() {
   return { supabase, user };
 }
 
-/** Loads a project the signed-in user owns, or 404s. RLS is the second layer. */
+/**
+ * Loads a project the signed-in user can access, or 404s. Access = the owner OR a member
+ * (revenueos_project_members); a member has the same full access as the owner. RLS is the second
+ * layer: the row returns only when the user owns the project or is a member of it.
+ */
 export async function requireProject(projectId: string) {
   const { supabase, user } = await requireUser();
   if (!UUID_RE.test(projectId)) notFound();
@@ -25,7 +29,6 @@ export async function requireProject(projectId: string) {
     .from(TABLES.projects)
     .select("*")
     .eq("id", projectId)
-    .eq("owner_id", user.id)
     .maybeSingle<Project>();
   if (!project) notFound();
 

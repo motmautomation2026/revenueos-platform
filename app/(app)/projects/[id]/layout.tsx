@@ -1,9 +1,10 @@
 import { Suspense } from "react";
 import { cookies } from "next/headers";
 import Link from "next/link";
-import { ChevronRight } from "lucide-react";
+import { ChevronRight, Users } from "lucide-react";
 import { ProjectArchiveButton } from "@/components/project-archive-button";
 import { ProjectSidebar, type SidebarBadges } from "@/components/project-sidebar";
+import { buttonVariants } from "@/components/ui/button";
 import { requireProject } from "@/lib/auth";
 import { loadPaidStep } from "@/lib/brain/paid-steps";
 import { loadCallRecords, loadExecution } from "@/lib/brain/read";
@@ -67,7 +68,8 @@ export default async function ProjectLayout({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const { project } = await requireProject(id);
+  const { project, user } = await requireProject(id);
+  const isOwner = project.owner_id === user.id;
   const planReady = project.status === "plan_ready";
   const sidebarCollapsed = (await cookies()).get(SIDEBAR_COOKIE)?.value === "collapsed";
   const badges = planReady ? await sidebarBadges(project.id) : null;
@@ -116,6 +118,12 @@ export default async function ProjectLayout({
               </span>
             </dd>
           </div>
+          {isOwner && (
+            <Link href={`/projects/${project.id}/access`} className={buttonVariants({ variant: "outline", size: "sm" })}>
+              <Users aria-hidden />
+              Manage access
+            </Link>
+          )}
           <ProjectArchiveButton projectId={project.id} customerName={project.customer_name} archived={!!project.archived_at} />
         </dl>
       </header>

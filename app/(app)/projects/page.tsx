@@ -75,10 +75,11 @@ export default async function ProjectsPage({
 
   const { supabase, user } = await requireUser();
   const workerPromise = loadWorkerStatus();
+  // No owner filter: RLS returns the projects this user owns AND those they are a member of
+  // (revenueos_project_members). Assigned ones get the same full access and are marked "Shared".
   const { data, error } = await supabase
     .from(TABLES.projects)
     .select("*")
-    .eq("owner_id", user.id)
     .order("updated_at", { ascending: false })
     .returns<Project[]>();
   const all = data ?? [];
@@ -274,7 +275,7 @@ export default async function ProjectsPage({
           ) : (
             <ul className="grid gap-4 lg:grid-cols-2 2xl:grid-cols-3">
               {shown.map((row) => (
-                <ProjectCard key={row.project.id} row={row} archived={showArchived} />
+                <ProjectCard key={row.project.id} row={row} archived={showArchived} myUserId={user.id} />
               ))}
             </ul>
           )}
@@ -405,8 +406,9 @@ function ActivityNote({ at, expected }: { at: string; expected: boolean }) {
 /** The four results every card shows, always in this order (the Brain's short labels). */
 const RESULTS = ["companies", "contacts", "emails", "calls"] as const;
 
-function ProjectCard({ row, archived }: { row: Row; archived: boolean }) {
+function ProjectCard({ row, archived, myUserId }: { row: Row; archived: boolean; myUserId: string }) {
   const { project, summary, needs } = row;
+  const shared = project.owner_id !== myUserId; // assigned to this user (full access), not created by them
   const reached = reachedStep(project.status);
   const planReady = project.status === "plan_ready";
   const status = archived
@@ -448,6 +450,9 @@ function ProjectCard({ row, archived }: { row: Row; archived: boolean }) {
               )}
               {project.run_mode === "staging" && (
                 <span className="rounded bg-violet-500/10 px-1.5 py-px text-[0.6875rem] font-semibold text-violet-700">Staging</span>
+              )}
+              {shared && (
+                <span className="rounded bg-sky-500/10 px-1.5 py-px text-[0.6875rem] font-semibold text-sky-700">Shared</span>
               )}
             </p>
           </div>

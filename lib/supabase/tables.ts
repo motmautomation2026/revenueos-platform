@@ -2,6 +2,7 @@
 export const TABLES = {
   profiles: "revenueos_profiles",
   projects: "revenueos_projects",
+  projectMembers: "revenueos_project_members",
   projectFiles: "revenueos_project_files",
   checklists: "revenueos_checklists",
   checklistItems: "revenueos_checklist_items",
