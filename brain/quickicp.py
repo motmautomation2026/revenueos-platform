@@ -186,28 +186,54 @@ def run_cli(main, rerun: str = "rerun the same command") -> None:
     Run an entry point's command. A network drop (DNS, connect, timeout, reset) anywhere in it -> one STOPPED
     line (network_stop_line) and exit code 3, no traceback. '--debug' (removed from sys.argv first) shows the
     full traceback instead. Every other error and exit behaves exactly as before.
+    SENTRY_DSN set -> crashes, STOPPED exits and network drops also go to Sentry (orch/brain_sentry.py, masked);
+    unset -> nothing of it is even imported.
     """
     from orch import brain_log            # file only; never prints, never raises
     debug = "--debug" in sys.argv
     sys.argv[:] = [arg for arg in sys.argv if arg != "--debug"]
     command = " ".join([os.path.basename(sys.argv[0])] + sys.argv[1:])
+    sentry = None
+    if os.getenv("SENTRY_DSN"):
+        try:
+            from orch import brain_sentry as sentry
+            sentry.start(list(sys.argv), TEST_MODE)
+        except Exception:
+            sentry = None
     try:
         main()
     except SystemExit as stop:
         brain_log.write("INFO" if stop.code in (0, None) else "WARNING", f"{command}: exit {stop.code}")
+        if sentry:
+            sentry.call("exit", stop.code)
         raise
     except Exception as error:
         found = network_error(error)
         if found is None or debug:
             brain_log.write("ERROR", f"{command}: crashed", error=error)
+            if sentry:
+                sentry.call("crash", error)
             raise
         brain_log.write("ERROR", f"{command}: network drop -> STOPPED, exit 3", error=error)
-        print(network_stop_line(found, rerun))
+        line = network_stop_line(found, rerun)
+        print(line)
+        if sentry:
+            sentry.call("network", line)
         sys.exit(3)
     except BaseException as error:        # Ctrl+C, a simulated crash: logged, then exactly as before
         brain_log.write("ERROR", f"{command}: interrupted", error=error)
         raise
+    finally:
+        if sentry:
+            sentry.stop()                 # stdout back as it was; at most 2 s to send what is left
     brain_log.write("INFO", f"{command}: exit 0")
+
+
+def report_event(kind: str, text: str, level: str = "warning", **tags) -> None:
+    """An alert for Sentry (campaign_stalled, job_dead): only when run_cli started Sentry; otherwise nothing."""
+    session = sys.modules.get("orch.brain_sentry")
+    if session is not None:
+        session.event(kind, text, level, tags)
 
 
 def check_settings(*names: str) -> None:

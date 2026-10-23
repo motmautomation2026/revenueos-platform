@@ -19,7 +19,8 @@ WHAT IS LOGGED
 MASKED (in messages and tracebacks)
 -----------------------------------
     emails -> 'abc***@***', phone numbers (+CC... or a 10-digit mobile) -> '+91***' / '987***',
-    the value of every environment setting whose name has KEY / TOKEN / PASSWORD / SECRET -> '********'
+    the value of every environment setting whose name has KEY / TOKEN / PASSWORD / SECRET / DSN -> '********',
+    except names that are not secrets (NOT_SECRET: CUSTOMER_KEY, REVENUEOS_PROJECT_ID), so run keys stay readable
 
 WHERE
 -----
@@ -40,7 +41,8 @@ import os
 import re
 import traceback
 
-SECRET_NAME = re.compile(r"KEY|TOKEN|PASSWORD|SECRET", re.IGNORECASE)
+SECRET_NAME = re.compile(r"KEY|TOKEN|PASSWORD|SECRET|DSN", re.IGNORECASE)
+NOT_SECRET = {"CUSTOMER_KEY", "REVENUEOS_PROJECT_ID"}     # ids, not secrets: they are in run keys and file names
 EMAIL = re.compile(r"\b([A-Za-z0-9._%+-]{1,3})[A-Za-z0-9._%+-]*@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+")
 PHONE = re.compile(r"(?<![\w-])(\+\d{2})[\d -]{8,13}\d(?![\w-])|(?<![\w-])([6-9]\d{2})\d{7}(?![\w-])")
 KEY = re.compile(r"^(?P<run>[a-z0-9]+(?:-[a-z0-9]+)*-\d{4}-\d{2}(?:-r\d+)?):(?P<task>T\d+):")
@@ -54,6 +56,8 @@ def mask(text: str) -> str:
     """Emails, phone numbers and secret values from the environment, hidden."""
     for name, value in os.environ.items():
         # passwords from 6 characters (Quickhowl accepts 6); other secrets from 8 (shorter ones are not keys)
+        if name.rsplit(":", 1)[-1].upper() in NOT_SECRET:     # (also a stray '$env:CUSTOMER_KEY' line in .env)
+            continue
         if SECRET_NAME.search(name) and value and len(value) >= (6 if "PASSWORD" in name.upper() else 8):
             text = text.replace(value, "********")
     text = EMAIL.sub(lambda m: m.group(1) + "***@***", text)
@@ -146,7 +150,8 @@ def selftest() -> bool:
         print(f"  {'PASS' if condition else 'FAIL'}  {label}")
 
     saved = {name: os.environ.get(name) for name in ("BRAIN_LOG_DIR", "BRAIN_LOG", "SELFTEST_API_KEY", "BRAIN_LOG_KEEP_DAYS",
-                                                     "SELFTEST_USER_PASSWORD", "SELFTEST_SHORT_KEY")}
+                                                     "SELFTEST_USER_PASSWORD", "SELFTEST_SHORT_KEY", "CUSTOMER_KEY",
+                                                     "$env:CUSTOMER_KEY", "SENTRY_DSN", "SELFTEST_TOKEN")}
     try:
         os.environ["SELFTEST_API_KEY"] = "sk-selftest-0123456789"
         text = mask("mail rahul.sharma@acme.co.in, call +91 98765 43210 or 9876543210, key sk-selftest-0123456789, "
@@ -158,6 +163,13 @@ def selftest() -> bool:
         os.environ["SELFTEST_USER_PASSWORD"], os.environ["SELFTEST_SHORT_KEY"] = "Pw6chr", "abc1234"
         expect("masking: a PASSWORD setting from 6 characters (Quickhowl accepts 6); other secrets from 8",
                mask("login Pw6chr, flag abc1234") == "login ********, flag abc1234")
+        os.environ.update({"CUSTOMER_KEY": "selftest-customer-key", "$env:CUSTOMER_KEY": "selftest-customer-key",
+                           "SENTRY_DSN": "https://pub1234567@o9.ingest.sentry.io/42", "SELFTEST_TOKEN": "tok-0123456789"})
+        expect("masking: CUSTOMER_KEY is not a secret (run keys stay readable, also for a stray '$env:CUSTOMER_KEY'); "
+               "the Sentry DSN, tokens and API keys are still masked",
+               mask("run=selftest-customer-key-2026-10 dsn https://pub1234567@o9.ingest.sentry.io/42 t tok-0123456789 "
+                    "k sk-selftest-0123456789")
+               == "run=selftest-customer-key-2026-10 dsn ******** t ******** k ********")
 
         with tempfile.TemporaryDirectory() as folder:
             os.environ["BRAIN_LOG_DIR"] = folder

@@ -9,3 +9,4 @@ date       | direction             | platform commit | master-agent commit | not
 2026-10-23 | ours->platform (push) | c30595c         | 05e63ba             | PR #14 into version1 (PR #13 into main closed, not merged)
 2026-10-23 | platform->ours (pull) | 1ddb704         | (this commit)       | main: run_for.py, platform_approval.py, email_tool.py, orch_tests/part_email.py, Dockerfile, .dockerignore, unchanged
 2026-10-23 | ours->platform (push) | 77ad85e         | b1727c1             | PR #15 into main (version1 + E7 fix); syncs start from main 77ad85e from now on
+2026-10-23 | ours->platform (push) | 538a542         | 0a540c3             | PR #16 into main (one login per client for calling, password masking)

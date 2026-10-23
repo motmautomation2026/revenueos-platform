@@ -73,6 +73,8 @@ def dead_alert(job: dict, error: str, record=None, runs=None) -> int | None:
     if not run:
         return None
     reason = f"job {job['kind']} {job['idempotency_key']} is dead after {job['attempts']} attempt(s): {error}"
+    from quickicp import report_event                  # Sentry, only when SENTRY_DSN is set
+    report_event(config.ALERT_KIND, reason[:1000], "error", run=job.get("run_key") or "-")
     return record(run["id"], config.ALERT_KIND, "raised", "brain", reason[:1000],
                   question={"job_id": job["id"], "kind": job["kind"], "key": job["idempotency_key"],
                             "attempts": job["attempts"], "text": error})["id"]

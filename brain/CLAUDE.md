@@ -27,6 +27,8 @@ folder or `selftest-*` rows that are deleted at the end).
   `runner_quickicp_accounts.py`, `runner_quickicp_contacts.py`, `runner_email.py`, `runner_calls.py`
   (via `runner_kit.py`) -> `brain_review.py`. State: `state_store.py`, `supabase_store.py`.
   Log: `orch/brain_log.py` -> `logs/brain-YYYY-MM-DD.log` (file only, masked; never stdout/stderr, never stops a run).
+  Errors: `orch/brain_sentry.py` (Sentry), started by `quickicp.run_cli` ONLY when `SENTRY_DSN` is set; masked; unset =
+  never imported, output byte-identical (`python orch/brain_sentry.py selftest`).
 - **Shared tool code:** `quickicp.py` (incl. the one LLM factory `llm()` / `ask_llm`), `company_loop.py`,
   `people_loop.py` (round code only, no CLI), `validator.py`, `email_tool.py`, `quickhowl.py`.
 - **Tests and checks:** `orchestrator_selftest.py` (run with `python orchestrator.py selftest`; its parts are in `orch_tests/`), `e2e_test.py selftest`,
