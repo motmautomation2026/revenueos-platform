@@ -53,8 +53,10 @@ export type CompanyInput = z.infer<typeof companySchema>;
 export const COMPANY_FIELDS = Object.keys(companySchema.shape) as (keyof CompanyInput)[];
 
 export const newProjectSchema = z.object({
-  customerName: z.string().trim().min(1, "Enter the customer name").max(200),
-  customerEmail: z.email("Enter the customer's email").trim().toLowerCase().max(320),
+  clientName: z.string().trim().min(1, "Enter the client name").max(200),
+  clientEmail: z.email("Enter the client's email").trim().toLowerCase().max(320),
+  // Used to open the client's tool workspaces. Quickhowl needs at least 6 characters.
+  clientPassword: z.string().min(6, "Use at least 6 characters").max(72, "Use at most 72 characters"),
   description: z.string().trim().max(2000, "Keep it under 2,000 characters").optional(),
 });
 export type NewProjectInput = z.infer<typeof newProjectSchema>;

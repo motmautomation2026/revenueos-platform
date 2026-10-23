@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { requireProject, requireUser } from "@/lib/auth";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { loadExecution } from "@/lib/brain/read";
 import { loadRequest } from "@/lib/brain/request-store";
 import { ENGAGEMENT_TYPE } from "@/lib/projects";
@@ -14,14 +15,14 @@ export async function createProject(input: unknown): Promise<{ error: string }> 
 
   const parsed = newProjectSchema.safeParse(input);
   if (!parsed.success) return { error: "Please check the form and try again." };
-  const { customerName, customerEmail, description } = parsed.data;
+  const { clientName, clientEmail, clientPassword, description } = parsed.data;
 
   const { data, error } = await supabase
     .from(TABLES.projects)
     .insert({
       owner_id: user.id,
-      customer_name: customerName,
-      customer_email: customerEmail,
+      customer_name: clientName,
+      customer_email: clientEmail,
       engagement_type: ENGAGEMENT_TYPE,
       description: description || null,
     })
@@ -31,6 +32,21 @@ export async function createProject(input: unknown): Promise<{ error: string }> 
     return { error: "The database update that adds the customer email has not been applied (0005_project_customer_email.sql)." };
   }
   if (error || !data) return { error: "Could not create the project. Please try again." };
+
+  // The password the client's tool workspaces are created with. Written with the server-side key
+  // (the row has no browser policies). If it cannot be saved, the project is removed again rather
+  // than left without one, so the person can simply try the form afresh.
+  const { error: passwordError } = await createAdminClient()
+    .from("revenueos_brain_accounts")
+    .upsert({ project_id: data.id, updated_by: user.id, workspace_password: clientPassword }, { onConflict: "project_id" });
+  if (passwordError) {
+    await supabase.from(TABLES.projects).delete().eq("id", data.id);
+    return {
+      error: passwordError.message.includes("workspace_password")
+        ? "The database update that adds the client password has not been applied (0013_workspace_password.sql)."
+        : "Could not save the client password. Please try again.",
+    };
+  }
 
   redirect(`/projects/${data.id}`);
 }

@@ -346,9 +346,17 @@ def read_accounts(client, project_id: str) -> dict | None:
     supabase/migrations/0004_brain_accounts.sql). Select only. The values are only ever handed to
     the step's process; they are never printed or written to a file.
     """
-    try:
-        rows = (client.table(ACCOUNTS).select(", ".join(ACCOUNT_SETTINGS))
+    def select(columns):
+        return (client.table(ACCOUNTS).select(", ".join(columns))
                 .eq("project_id", project_id).execute().data) or []
+
+    try:
+        # workspace_password was added later (0013); on a database without it yet, fall back to the
+        # other columns so the project's email and calling accounts are still read.
+        try:
+            rows = select([*ACCOUNT_SETTINGS, "workspace_password"])
+        except Exception:
+            rows = select(list(ACCOUNT_SETTINGS))
     except Exception:
         return None
     return rows[0] if rows else None
@@ -485,10 +493,14 @@ def environment_for(selection: dict, dotenv_customer_key: str | None, accounts: 
             values[setting] = ""
 
     if customer_email and values.get("QUICKHOWL_CLIENT_REFERENCE") == "":   # no existing calling account
+        # The account is created on its first launch. Its first password is the one set when the
+        # project was created (revenueos_brain_accounts.workspace_password), or the email itself
+        # when none was set (older projects).
+        workspace_password = ((accounts or {}).get("workspace_password") or "").strip() or customer_email
         values.update({
             "QUICKHOWL_CLIENT_REFERENCE": selection["customer_key"],
             "QUICKHOWL_USER_EMAIL": customer_email,
-            "QUICKHOWL_USER_PASSWORD": customer_email,
+            "QUICKHOWL_USER_PASSWORD": workspace_password,
             "QUICKHOWL_USER_FULL_NAME": selection["customer_name"],
             "QUICKHOWL_USER_COMPANY": selection["customer_name"],
         })
@@ -1268,6 +1280,9 @@ def selftest() -> None:
             calling["QUICKHOWL_USER_FULL_NAME"], calling["QUICKHOWL_USER_COMPANY"])
            == ("new-co-222222", "owner@new.co", "owner@new.co", "New Co", "New Co")
            and calling["EMAIL_TOOL_USER_EMAIL"] == "owner@new.co")
+    expect("the workspace password set when the project was created is the account's first password",
+           environment_for(selection, "old-co", {"workspace_password": " chosen-pass "}, sender, "owner@new.co")["QUICKHOWL_USER_PASSWORD"]
+           == "chosen-pass")
     expect("an existing calling account is kept as it is",
            environment_for(selection, "old-co", own_accounts, None, "owner@new.co")["QUICKHOWL_USER_EMAIL"] == "calls@new.co")
     expect("without a customer email no calling account is made up",

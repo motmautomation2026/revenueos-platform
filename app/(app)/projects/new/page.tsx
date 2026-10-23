@@ -37,21 +37,30 @@ export default function NewProjectPage() {
       <Card>
         <CardHeader>
           <CardTitle>New project</CardTitle>
-          <CardDescription>Create one project for each customer.</CardDescription>
+          <CardDescription>Create one project for each client.</CardDescription>
         </CardHeader>
         <CardContent>
           <form onSubmit={onSubmit} className="grid gap-4" noValidate>
-            <FormField id="customerName" label="Customer name" error={errors.customerName?.message}>
-              <Input id="customerName" autoComplete="off" {...register("customerName")} />
+            <FormField id="clientName" label="Client name" error={errors.clientName?.message}>
+              <Input id="clientName" autoComplete="off" {...register("clientName")} />
             </FormField>
 
             <FormField
-              id="customerEmail"
-              label="Customer email"
-              error={errors.customerEmail?.message}
-              hint="This customer's email and calling accounts are opened with it. It cannot be changed once execution has started."
+              id="clientEmail"
+              label="Client email"
+              error={errors.clientEmail?.message}
+              hint="This client's email and calling workspaces are opened with it. It cannot be changed once execution has started."
             >
-              <Input id="customerEmail" type="email" autoComplete="off" {...register("customerEmail")} />
+              <Input id="clientEmail" type="email" autoComplete="off" {...register("clientEmail")} />
+            </FormField>
+
+            <FormField
+              id="clientPassword"
+              label="Client password"
+              error={errors.clientPassword?.message}
+              hint="Used to create the client's workspace in the calling tool. At least 6 characters. Kept on the server and never shown again."
+            >
+              <Input id="clientPassword" type="password" autoComplete="new-password" {...register("clientPassword")} />
             </FormField>
 
             <FormField
