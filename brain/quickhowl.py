@@ -93,6 +93,9 @@ WRITES
     QUICKHOWL_CLIENT_REFERENCE    the client account, e.g. motm-tech
     QUICKHOWL_USER_EMAIL          the account login email (must stay the same per client)
     QUICKHOWL_USER_PASSWORD       6+ characters, used when the account is first created
+                                  Either one empty -> the email tool's login is used instead (EMAIL_TOOL_USER_EMAIL /
+                                  EMAIL_TOOL_USER_PASSWORD): the ONE login the admin sets per client. A value that is
+                                  set always wins (an existing calling account keeps its own login).
     QUICKHOWL_USER_FULL_NAME      e.g. MOTM Technologies
     QUICKHOWL_USER_COMPANY        e.g. MOTM Technologies
     TEST_CALL_NUMBERS             our own phones, comma separated: +9198XXXXXXXX,+9197XXXXXXXX
@@ -153,8 +156,9 @@ PEOPLE_TABLE = "quickicp_revenueos_client_people_data"
 COMPANY_TABLE = "quickicp_revenueos_client_company_data"
 
 
-REQUIRED_KEYS = ("QUICKHOWL_URL", "QUICKHOWL_KEY", "QUICKHOWL_CLIENT_REFERENCE", "QUICKHOWL_USER_EMAIL",
-                 "QUICKHOWL_USER_PASSWORD", "QUICKHOWL_USER_FULL_NAME", "QUICKHOWL_USER_COMPANY")
+REQUIRED_KEYS = ("QUICKHOWL_URL", "QUICKHOWL_KEY", "QUICKHOWL_CLIENT_REFERENCE",
+                 "QUICKHOWL_USER_FULL_NAME", "QUICKHOWL_USER_COMPANY")         # + a login: see login()
+LOGIN_PASSWORDS = ("QUICKHOWL_USER_PASSWORD", "EMAIL_TOOL_USER_PASSWORD")
 
 # Words that mean internal strategy leaked into what the caller will say.
 INTERNAL_WORDS = re.compile(r"\b(motm|cluster|clusters|segment|segments|p1|p2|p3|enquir\w*|work order|"
@@ -198,6 +202,30 @@ def test_numbers() -> list[str]:
 
 # ================= HTTP (timeouts, retries, clear errors) =================
 
+def login() -> tuple[str, str]:
+    """(email, password) of the calling account: QUICKHOWL_USER_* when set, else the email tool's login."""
+    return (os.getenv("QUICKHOWL_USER_EMAIL") or os.getenv("EMAIL_TOOL_USER_EMAIL") or "",
+            os.getenv("QUICKHOWL_USER_PASSWORD") or os.getenv("EMAIL_TOOL_USER_PASSWORD") or "")
+
+
+def check_login() -> None:
+    """Stop before any request when there is no login at all (names the settings, never a value)."""
+    email, password = login()
+    missing = [name for name, value in (("QUICKHOWL_USER_EMAIL or EMAIL_TOOL_USER_EMAIL", email),
+                                        ("QUICKHOWL_USER_PASSWORD or EMAIL_TOOL_USER_PASSWORD", password)) if not value]
+    if missing:
+        raise ToolError(f"Missing in .env: {', '.join(missing)}")
+
+
+def without_password(text: str) -> str:
+    """A tool reply can echo what it was sent: never let a login password into a message, the ledger or a log."""
+    for name in LOGIN_PASSWORDS:
+        secret = os.getenv(name)
+        if secret:
+            text = text.replace(secret, "********")
+    return text
+
+
 def explain_error(response: requests.Response) -> str:
     try:
         body = response.json()
@@ -211,7 +239,7 @@ def explain_error(response: requests.Response) -> str:
         422: "Bad request: the detail names the field or refused contacts.",
         503: "Server settings: launch or auto-start is switched off. Nothing was created.",
     }
-    return f"HTTP {response.status_code}. {hints.get(response.status_code, '')} Detail: {detail}"
+    return without_password(f"HTTP {response.status_code}. {hints.get(response.status_code, '')} Detail: {detail}")
 
 
 def call_api(method: str, path: str, params: dict | None = None, body: dict | None = None,
@@ -398,6 +426,7 @@ def build_request(contacts: list[dict], understanding: dict, work_order: dict) -
     order). Never read from data/ files.
     """
     check_settings("OPENAI_MODEL", *REQUIRED_KEYS)
+    check_login()
     reason = real_calls_block_reason()
     if reason:
         raise ToolError(reason)
@@ -427,9 +456,10 @@ def build_request(contacts: list[dict], understanding: dict, work_order: dict) -
 def with_secrets(request: dict, auto_start: bool) -> dict:
     """Add the user block (and phone_number if configured) at send time only."""
     payload = dict(request)
+    email, password = login()
     payload["user"] = {
-        "email": os.getenv("QUICKHOWL_USER_EMAIL"),
-        "password": os.getenv("QUICKHOWL_USER_PASSWORD"),
+        "email": email,
+        "password": password,
         "full_name": os.getenv("QUICKHOWL_USER_FULL_NAME"),
         "company_name": os.getenv("QUICKHOWL_USER_COMPANY"),
     }

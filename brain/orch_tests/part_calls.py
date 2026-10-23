@@ -209,6 +209,45 @@ def selftest_calls() -> bool:
                 os.environ.pop("QUICKHOWL_DND_HANDLED", None)
             else:
                 os.environ["QUICKHOWL_DND_HANDLED"] = saved_dnd
+
+        # Q14. ONE login per client: QUICKHOWL_USER_* when set, else the email tool's; never saved, never in an error
+        names = ("QUICKHOWL_USER_EMAIL", "QUICKHOWL_USER_PASSWORD", "EMAIL_TOOL_USER_EMAIL", "EMAIL_TOOL_USER_PASSWORD")
+        saved_login = {name: os.environ.get(name) for name in names}
+        try:
+            for name in names:
+                os.environ.pop(name, None)
+            os.environ.update({"EMAIL_TOOL_USER_EMAIL": "owner@client.test", "EMAIL_TOOL_USER_PASSWORD": "Fake6x"})
+            request = {"reference": "R-14", "contacts": []}
+            shared = quickhowl.with_secrets(request, auto_start=False)["user"]
+            os.environ.update({"QUICKHOWL_USER_EMAIL": "calls@client.test", "QUICKHOWL_USER_PASSWORD": "FakeCalls9"})
+            own = quickhowl.with_secrets(request, auto_start=False)["user"]
+
+            class EchoReply:
+                status_code, text = 422, ""
+
+                def json(self):
+                    return {"detail": "invalid", "user": {"password": "FakeCalls9"}, "also": "Fake6x"}
+            error = quickhowl.explain_error(EchoReply())
+            for name in names:
+                os.environ.pop(name, None)
+            nothing = raises(quickhowl.check_login)
+            try:
+                quickhowl.check_login()
+            except ToolError as stop:
+                said = str(stop)
+        finally:
+            for name, value in saved_login.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+        expect("Q14 no calling login set -> the email tool's login (the one the admin set) is used; a calling login "
+               "that is set wins; the saved request never gets a user block; an echoed password is masked in the "
+               "error; no login at all -> STOPPED naming the settings",
+               (shared["email"], shared["password"]) == ("owner@client.test", "Fake6x")
+               and (own["email"], own["password"]) == ("calls@client.test", "FakeCalls9") and "user" not in request
+               and "FakeCalls9" not in error and "Fake6x" not in error and "********" in error
+               and nothing and "QUICKHOWL_USER_PASSWORD or EMAIL_TOOL_USER_PASSWORD" in said)
         ok = True
     except AssertionError as error:
         print(f"  FAIL  {error}")
