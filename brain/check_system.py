@@ -13,7 +13,8 @@ WHAT IT CHECKS
     5. Prospeo     the suggestions lookup answers
     6. Supabase    both tables can be read
     7. Email tool  configured for CAMPAIGN mode (no live call: the tool has no health endpoint)
-    8. Quickhowl   every QUICKHOWL_* setting, user password length, Vobiz keys all-or-none,
+    8. Quickhowl   every QUICKHOWL_* setting, the login (QUICKHOWL_USER_EMAIL / _PASSWORD, or the email tool's
+                   login as the fallback quickhowl.login() uses: which one, never the values), password length, Vobiz keys all-or-none,
                    CUSTOMER_DISPLAY_NAME, CUSTOMER_LONG_NAMES (WARN if missing), TEST_CALL_NUMBERS valid, real calls off until go-live,
                    QUICKHOWL_DND_HANDLED=true (DND handled by the Quickhowl platform) (no live call)
     Also: duplicate keys in .env (names only, never values)
@@ -53,9 +54,11 @@ SHOULD_BE_REMOVED = [
     "IMAP_HOST", "IMAP_PORT", "IMAP_SECURITY",
 ]
 SECRET_KEYS = ["OPENAI_API_KEY", "PROSPEO_API_KEY", "SUPABASE_KEY", "EMAIL_TOOL_KEY", "SMTP_PASSWORD",
-               "QUICKHOWL_KEY", "QUICKHOWL_USER_PASSWORD", "QUICKHOWL_VOBIZ_AUTH_TOKEN"]
-QUICKHOWL_REQUIRED = ["QUICKHOWL_URL", "QUICKHOWL_KEY", "QUICKHOWL_CLIENT_REFERENCE", "QUICKHOWL_USER_EMAIL",
-                      "QUICKHOWL_USER_PASSWORD", "QUICKHOWL_USER_FULL_NAME", "QUICKHOWL_USER_COMPANY"]
+               "QUICKHOWL_KEY", "QUICKHOWL_USER_PASSWORD", "EMAIL_TOOL_USER_PASSWORD", "QUICKHOWL_VOBIZ_AUTH_TOKEN"]
+QUICKHOWL_REQUIRED = ["QUICKHOWL_URL", "QUICKHOWL_KEY", "QUICKHOWL_CLIENT_REFERENCE",
+                      "QUICKHOWL_USER_FULL_NAME", "QUICKHOWL_USER_COMPANY"]         # + the login: check_quickhowl
+LOGIN_SOURCES = (("email", "QUICKHOWL_USER_EMAIL", "EMAIL_TOOL_USER_EMAIL"),
+                 ("password", "QUICKHOWL_USER_PASSWORD", "EMAIL_TOOL_USER_PASSWORD"))
 VOBIZ_KEYS = ["QUICKHOWL_VOBIZ_AUTH_ID", "QUICKHOWL_VOBIZ_AUTH_TOKEN", "QUICKHOWL_DID"]
 REQUIRED_FILES = ["knowledge/motm_context.md", "data/understanding.json", "data/work_orders.json"]
 SKIP_FOLDERS = {".venv", ".git", "__pycache__", "node_modules"}
@@ -226,12 +229,28 @@ def check_quickhowl() -> None:
     else:
         report("PASS", "Quickhowl settings", f"all {len(QUICKHOWL_REQUIRED)} present, client "
                                              f"{os.getenv('QUICKHOWL_CLIENT_REFERENCE')}")
-    password = os.getenv("QUICKHOWL_USER_PASSWORD") or ""
+    # The login the calls really use (quickhowl.login): Quickhowl's own when set, else the email tool's.
+    # Setting NAMES only, never a value.
+    used, missing_login = {}, []
+    for field, own, fallback in LOGIN_SOURCES:
+        used[field] = own if os.getenv(own) else fallback if os.getenv(fallback) else None
+        if not used[field]:
+            missing_login.append(f"{own} or {fallback}")
+    if missing_login:
+        report("FAIL", "Quickhowl login", "missing: " + ", ".join(missing_login))
+    elif used["email"] == "QUICKHOWL_USER_EMAIL" and used["password"] == "QUICKHOWL_USER_PASSWORD":
+        report("PASS", "Quickhowl login", "QUICKHOWL_USER_EMAIL / QUICKHOWL_USER_PASSWORD (the calling account's own)")
+    elif used["email"] == "EMAIL_TOOL_USER_EMAIL" and used["password"] == "EMAIL_TOOL_USER_PASSWORD":
+        report("PASS", "Quickhowl login", "the email tool login (EMAIL_TOOL_USER_EMAIL / EMAIL_TOOL_USER_PASSWORD): "
+                                          "the same login as the email tool")
+    else:
+        report("PASS", "Quickhowl login", f"email from {used['email']}, password from {used['password']} (mixed)")
+    password = os.getenv(used["password"]) if used["password"] else ""
     if len(password) < 6:
         report("FAIL", "Quickhowl user password", "must be at least 6 characters")
     # Weak: short, or part of the (public) login email / name / company. Key names only, never values.
-    inside = [key for key in ("QUICKHOWL_USER_EMAIL", "QUICKHOWL_USER_FULL_NAME", "QUICKHOWL_USER_COMPANY")
-              if password and password.lower() in (os.getenv(key) or "").lower()]
+    inside = [key for key in (used["email"], "QUICKHOWL_USER_FULL_NAME", "QUICKHOWL_USER_COMPANY")
+              if key and password and password.lower() in (os.getenv(key) or "").lower()]
     if password and (len(password) < 16 or inside):
         reasons = (["shorter than 16 characters"] if len(password) < 16 else []) + [f"part of {key}" for key in inside]
         report("WARN", "Quickhowl user password",

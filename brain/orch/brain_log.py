@@ -53,7 +53,8 @@ _cleaned = False             # the cleanup runs once per process
 def mask(text: str) -> str:
     """Emails, phone numbers and secret values from the environment, hidden."""
     for name, value in os.environ.items():
-        if SECRET_NAME.search(name) and value and len(value) >= 8:
+        # passwords from 6 characters (Quickhowl accepts 6); other secrets from 8 (shorter ones are not keys)
+        if SECRET_NAME.search(name) and value and len(value) >= (6 if "PASSWORD" in name.upper() else 8):
             text = text.replace(value, "********")
     text = EMAIL.sub(lambda m: m.group(1) + "***@***", text)
     return PHONE.sub(lambda m: (m.group(1) or m.group(2)) + "***", text)
@@ -144,7 +145,8 @@ def selftest() -> bool:
         checks.append(bool(condition))
         print(f"  {'PASS' if condition else 'FAIL'}  {label}")
 
-    saved = {name: os.environ.get(name) for name in ("BRAIN_LOG_DIR", "BRAIN_LOG", "SELFTEST_API_KEY", "BRAIN_LOG_KEEP_DAYS")}
+    saved = {name: os.environ.get(name) for name in ("BRAIN_LOG_DIR", "BRAIN_LOG", "SELFTEST_API_KEY", "BRAIN_LOG_KEEP_DAYS",
+                                                     "SELFTEST_USER_PASSWORD", "SELFTEST_SHORT_KEY")}
     try:
         os.environ["SELFTEST_API_KEY"] = "sk-selftest-0123456789"
         text = mask("mail rahul.sharma@acme.co.in, call +91 98765 43210 or 9876543210, key sk-selftest-0123456789, "
@@ -153,6 +155,9 @@ def selftest() -> bool:
                "value -> '********'; run keys, references and counts stay readable",
                text == "mail rah***@***, call +91*** or 987***, key ********, run selftest-20261015-101059-123456, "
                        "ref MOTM-ACME-HYPER-20261015-101059, 3 rows")
+        os.environ["SELFTEST_USER_PASSWORD"], os.environ["SELFTEST_SHORT_KEY"] = "Pw6chr", "abc1234"
+        expect("masking: a PASSWORD setting from 6 characters (Quickhowl accepts 6); other secrets from 8",
+               mask("login Pw6chr, flag abc1234") == "login ********, flag abc1234")
 
         with tempfile.TemporaryDirectory() as folder:
             os.environ["BRAIN_LOG_DIR"] = folder
