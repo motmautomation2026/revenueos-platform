@@ -483,20 +483,30 @@ def smtp_settings() -> dict:
 
 def with_sender(body: dict) -> dict:
     """
-    The request as it is SENT. A customer whose own mailbox details were handed to this process
-    (run_for.py, from the platform's checklist) gets them added here, at send time only, next to
-    client_reference: the tool connects the mailbox on the first campaign and updates it after
-    that. The request that is saved and resent therefore never holds the mailbox password.
+    The request as it is SENT. Two secrets are added here, at send time only, so the request that is
+    saved and resent never holds them:
+      - the workspace login password (EMAIL_TOOL_USER_PASSWORD), set when the project was created,
+        with which the tool opens the client's account. Sent on every request, unchanged, so the
+        tool's 'user must stay the same for a client_reference' rule is met. Empty: not sent.
+      - the mailbox details (SMTP_*), for a client whose own mailbox was handed to this process
+        (run_for.py, from the platform's checklist): the tool connects it on the first campaign and
+        updates it after that.
     """
-    if "smtp" in body or not os.getenv("SMTP_HOST"):
-        return body
-    return {**body, "smtp": smtp_settings()}
+    result = dict(body)
+    password = os.getenv("EMAIL_TOOL_USER_PASSWORD")
+    if password and isinstance(result.get("user"), dict):
+        result["user"] = {**result["user"], "password": password}
+    if "smtp" not in result and os.getenv("SMTP_HOST"):
+        result["smtp"] = smtp_settings()
+    return result
 
 
 def without_password(text: str) -> str:
-    """A tool reply can echo what it was sent: never let the mailbox password into a message or a log."""
-    password = os.getenv("SMTP_PASSWORD")
-    return text.replace(password, "********") if password else text
+    """A tool reply can echo what it was sent: never let a password into a message or a log."""
+    for secret in (os.getenv("SMTP_PASSWORD"), os.getenv("EMAIL_TOOL_USER_PASSWORD")):
+        if secret:
+            text = text.replace(secret, "********")
+    return text
 
 
 # ================= STANDARD OR HYPER-PERSONALIZED (code decides) =================

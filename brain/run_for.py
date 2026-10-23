@@ -243,7 +243,8 @@ SENDER_SECURITY = {                       # the email tool accepts only these, o
     "SSL/TLS (port 465)": ("IMPLICIT_TLS", "465"),
 }
 SENDER_SETTINGS = ("SMTP_HOST", "SMTP_PORT", "SMTP_SECURITY", "SMTP_USERNAME", "SMTP_PASSWORD",
-                   "SMTP_DISPLAY_NAME", "SMTP_IMAP_HOST", "EMAIL_WORKSPACE_NAME", "EMAIL_CAMPAIGN_TYPE")
+                   "SMTP_DISPLAY_NAME", "SMTP_IMAP_HOST", "EMAIL_WORKSPACE_NAME", "EMAIL_CAMPAIGN_TYPE",
+                   "EMAIL_TOOL_USER_PASSWORD")
 
 
 def sender_of(customer_email: str | None, items: list[dict]) -> dict | None:
@@ -525,6 +526,9 @@ def environment_for(selection: dict, dotenv_customer_key: str | None, accounts: 
             "CLIENT_REFERENCE": selection["customer_key"],
             "EMAIL_TOOL_USER_EMAIL": sender["login_email"],
             "EMAIL_WORKSPACE_NAME": selection["customer_name"],
+            # The workspace login password set when the project was created, used when the email tool
+            # opens the account. Empty for older projects: the account is then made without one.
+            "EMAIL_TOOL_USER_PASSWORD": ((accounts or {}).get("workspace_password") or "").strip(),
             "SMTP_HOST": sender["host"], "SMTP_PORT": sender["port"], "SMTP_SECURITY": sender["mode"],
             "SMTP_USERNAME": sender["email"], "SMTP_PASSWORD": sender["password"],
             "SMTP_DISPLAY_NAME": sender["name"], "SMTP_IMAP_HOST": sender["imap_host"],
@@ -1274,6 +1278,9 @@ def selftest() -> None:
            (fresh["SMTP_HOST"], fresh["SMTP_PORT"], fresh["SMTP_SECURITY"], fresh["SMTP_USERNAME"], fresh["SMTP_PASSWORD"],
             fresh["SMTP_DISPLAY_NAME"], fresh["SMTP_IMAP_HOST"])
            == ("smtp.new.co", "465", "IMPLICIT_TLS", "sales@new.co", "mail-secret", "New Co Sales", "imap.new.co"))
+    expect("the workspace password opens the email account too, empty when none was set",
+           environment_for(selection, "old-co", {"workspace_password": " chosen-pass "}, sender)["EMAIL_TOOL_USER_PASSWORD"]
+           == "chosen-pass" and fresh["EMAIL_TOOL_USER_PASSWORD"] == "")
     calling = environment_for(selection, "old-co", {}, sender, "owner@new.co")
     expect("the same customer email opens the customer's own calling account, under its key",
            (calling["QUICKHOWL_CLIENT_REFERENCE"], calling["QUICKHOWL_USER_EMAIL"], calling["QUICKHOWL_USER_PASSWORD"],

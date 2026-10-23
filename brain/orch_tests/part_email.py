@@ -353,6 +353,30 @@ def selftest_email() -> bool:
                 else:
                     os.environ[name] = value
 
+        # F0c. with_sender / without_password: the workspace login password is added at send time
+        # (so the saved request never holds it) and masked in logs; no password set -> nothing added.
+        saved_secrets = {name: os.environ.get(name) for name in ("EMAIL_TOOL_USER_PASSWORD", "SMTP_HOST")}
+        try:
+            os.environ.pop("SMTP_HOST", None)                                # isolate from mailbox injection
+            body = {"user": {"email": "u@x.test", "workspace_name": "X", "role": "ADMIN"}, "reference": "R"}
+            os.environ["EMAIL_TOOL_USER_PASSWORD"] = "Client@2026Secure"
+            sent = email_tool.with_sender(body)
+            expect("F0c the login password is added to the sent user block but not to the saved body",
+                   sent["user"]["password"] == "Client@2026Secure" and "password" not in body["user"]
+                   and email_tool.with_sender(body)["user"]["password"] == "Client@2026Secure")   # same every send
+            expect("F0c the login password is masked in any logged reply",
+                   "Client@2026Secure" not in email_tool.without_password('{"echo": "Client@2026Secure"}')
+                   and "********" in email_tool.without_password("Client@2026Secure"))
+            os.environ.pop("EMAIL_TOOL_USER_PASSWORD", None)
+            expect("F0c no password set -> the user block is sent unchanged",
+                   "password" not in email_tool.with_sender(body)["user"])
+        finally:
+            for name, value in saved_secrets.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+
         rows_f = [{"id": 951 + i, "customer": customer, "full_name": f"Name{i} X", "email": f"f{i}@prospect.test",
                    "job_position": title, "company": {"company_name": company}}
                   for i, (company, title) in enumerate([("Acme", "CTO"), ("Acme", "VP"), ("Bolt", "CFO"),
