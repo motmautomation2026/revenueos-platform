@@ -42,6 +42,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Literal
@@ -259,6 +260,7 @@ LLM_MAX_RETRIES = 2             # after the first attempt; then STOPPED
 
 USAGE_FILE = "data/llm_usage.jsonl"   # one JSON line per LLM call (git-ignored with data/); never prompt text
 USAGE_TOTAL = {"calls": 0, "input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0, "seconds": 0.0}
+USAGE_LOCK = threading.Lock()          # ask_llm_batch logs from parallel threads: one writer at a time, no line lost
 
 
 class UsageLog(BaseCallbackHandler):
@@ -284,16 +286,17 @@ def log_usage(name: str, response, seconds: float) -> None:
                 "input_tokens": usage.get("input_tokens", "n/a"),
                 "cached_input_tokens": (usage.get("input_token_details") or {}).get("cache_read", "n/a"),
                 "output_tokens": usage.get("output_tokens", "n/a"), "seconds": round(seconds, 1)}
-        USAGE_TOTAL["calls"] += 1
-        USAGE_TOTAL["seconds"] += seconds
-        for key in ("input_tokens", "cached_input_tokens", "output_tokens"):
-            if isinstance(line[key], int):
-                USAGE_TOTAL[key] += line[key]
-        print(f"  [LLM] {name} | {model} | in {line['input_tokens']} (cached {line['cached_input_tokens']}) | "
-              f"out {line['output_tokens']} | {line['seconds']} s")
-        os.makedirs(os.path.dirname(USAGE_FILE) or ".", exist_ok=True)
-        with open(USAGE_FILE, "a", encoding="utf-8") as file:
-            file.write(json.dumps(line) + "\n")
+        with USAGE_LOCK:
+            USAGE_TOTAL["calls"] += 1
+            USAGE_TOTAL["seconds"] += seconds
+            for key in ("input_tokens", "cached_input_tokens", "output_tokens"):
+                if isinstance(line[key], int):
+                    USAGE_TOTAL[key] += line[key]
+            print(f"  [LLM] {name} | {model} | in {line['input_tokens']} (cached {line['cached_input_tokens']}) | "
+                  f"out {line['output_tokens']} | {line['seconds']} s")
+            os.makedirs(os.path.dirname(USAGE_FILE) or ".", exist_ok=True)
+            with open(USAGE_FILE, "a", encoding="utf-8") as file:
+                file.write(json.dumps(line) + "\n")
     except Exception as error:                    # never stop a run because of the usage log
         print(f"  [LLM] {name}: usage not logged ({type(error).__name__})")
 
