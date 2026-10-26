@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { randomUUID } from "@/lib/uuid";
 import {
   ArrowRight,
   CheckCircle2,
@@ -175,7 +176,7 @@ export function Uploader({
   const uploadOne = useCallback(
     async (key: string, file: File, docType: DocType) => {
       patch(key, { phase: "uploading", error: null });
-      const storagePath = `${ownerId}/${projectId}/${crypto.randomUUID()}-${sanitizeFileName(file.name)}`;
+      const storagePath = `${ownerId}/${projectId}/${randomUUID()}-${sanitizeFileName(file.name)}`;
 
       const { error: uploadError } = await createClient()
         .storage.from(STORAGE_BUCKET)
@@ -236,7 +237,7 @@ export function Uploader({
         accepted.push({
           file,
           item: {
-            key: crypto.randomUUID(),
+            key: randomUUID(),
             fileId: null,
             fileName: file.name,
             sizeBytes: file.size,
