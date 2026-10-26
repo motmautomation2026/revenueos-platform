@@ -19,10 +19,12 @@ const nextConfig: NextConfig = {
   //          Docker network names http://crm-frontend:8080 / http://crm-backend:8787); otherwise
   //          /crm simply isn't served.
   async rewrites() {
+    // NOTE: Next evaluates rewrites at BUILD time, so these can't rely on a runtime-only env var.
+    // Default to the fixed targets (dev: local CRM servers; prod: the shared-network container
+    // names), overridable by CRM_FRONTEND_ORIGIN / CRM_BACKEND_ORIGIN at build time if ever needed.
     const dev = process.env.NODE_ENV !== "production";
-    const crmFrontend = process.env.CRM_FRONTEND_ORIGIN ?? (dev ? "http://127.0.0.1:8080" : undefined);
-    const crmBackend = process.env.CRM_BACKEND_ORIGIN ?? (dev ? "http://127.0.0.1:8787" : undefined);
-    if (!crmFrontend || !crmBackend) return [];
+    const crmFrontend = process.env.CRM_FRONTEND_ORIGIN ?? (dev ? "http://127.0.0.1:8080" : "http://crm-frontend:8080");
+    const crmBackend = process.env.CRM_BACKEND_ORIGIN ?? (dev ? "http://127.0.0.1:8787" : "http://crm-backend:8787");
     // Dev: the Vite dev server serves under its base (/crm/), so keep the prefix. Prod: the CRM's
     // nginx serves the build at its root, so strip /crm.
     const crmBase = dev ? `${crmFrontend}/crm` : crmFrontend;
