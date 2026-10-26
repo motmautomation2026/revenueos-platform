@@ -28,8 +28,13 @@ services:
     environment:
       TZ: Asia/Kolkata
     ports:
-      # Only this machine can reach it. Caddy in Docker: set APP_BIND=172.17.0.1:3000 in .env.
       - "${APP_BIND:-127.0.0.1:3000}:3000"
+    # `default` keeps the app reachable as before; `crm` lets it proxy /crm to the CRM containers
+    # (which join the same external network as crm-frontend / crm-backend). The network is optional:
+    # create it with `docker network create revenueos-shared` before deploying the CRM.
+    networks:
+      - default
+      - crm
     restart: unless-stopped
     logging: &logging
       driver: json-file
@@ -54,3 +59,10 @@ services:
 volumes:
   # One folder per customer (plans, maps, logs). Back it up with deploy/backup.sh.
   brain-customers:
+
+networks:
+  # Shared with the CRM's compose so the platform can reach crm-frontend / crm-backend by name.
+  # Create it once on the host: `docker network create revenueos-shared`.
+  crm:
+    external: true
+    name: revenueos-shared

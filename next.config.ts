@@ -12,19 +12,25 @@ const nextConfig: NextConfig = {
     // The filled checklist is uploaded through a server action.
     serverActions: { bodySizeLimit: "5mb" },
   },
-  // Local dev only: make http://localhost:3000 the single origin for the platform AND the CRM, so
-  // the CRM shares the platform's Supabase cookie (no second login) without needing a reverse proxy.
-  // In production Caddy does this instead (deploy/Caddyfile.snippet), so these are skipped there.
+  // The platform is the single door: it serves the CRM under /crm by proxying to the CRM's own
+  // containers, so there is one origin (one Supabase login) and no separate proxy port.
+  //   dev  : defaults to the local CRM dev servers (127.0.0.1:8080 / :8787).
+  //   prod : enabled only when CRM_FRONTEND_ORIGIN + CRM_BACKEND_ORIGIN are set (e.g. the shared
+  //          Docker network names http://crm-frontend:8080 / http://crm-backend:8787); otherwise
+  //          /crm simply isn't served.
   async rewrites() {
-    if (process.env.NODE_ENV === "production") return [];
-    const crmFrontend = process.env.CRM_FRONTEND_ORIGIN ?? "http://127.0.0.1:8080";
-    const crmBackend = process.env.CRM_BACKEND_ORIGIN ?? "http://127.0.0.1:8787";
+    const dev = process.env.NODE_ENV !== "production";
+    const crmFrontend = process.env.CRM_FRONTEND_ORIGIN ?? (dev ? "http://127.0.0.1:8080" : undefined);
+    const crmBackend = process.env.CRM_BACKEND_ORIGIN ?? (dev ? "http://127.0.0.1:8787" : undefined);
+    if (!crmFrontend || !crmBackend) return [];
+    // Dev: the Vite dev server serves under its base (/crm/), so keep the prefix. Prod: the CRM's
+    // nginx serves the build at its root, so strip /crm.
+    const crmBase = dev ? `${crmFrontend}/crm` : crmFrontend;
     return [
-      // The CRM frontend calls /crm-api/api/v1/* ; strip /crm-api so the backend sees /api/v1/*.
+      // The CRM calls /crm-api/api/v1/* ; strip /crm-api so the backend sees /api/v1/*.
       { source: "/crm-api/:path*", destination: `${crmBackend}/:path*` },
-      // The CRM Vite dev server serves under its base (/crm/), so keep the prefix.
-      { source: "/crm", destination: `${crmFrontend}/crm/` },
-      { source: "/crm/:path*", destination: `${crmFrontend}/crm/:path*` },
+      { source: "/crm", destination: `${crmBase}/` },
+      { source: "/crm/:path*", destination: `${crmBase}/:path*` },
     ];
   },
 };
