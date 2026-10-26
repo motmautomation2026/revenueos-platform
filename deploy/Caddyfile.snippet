@@ -1,14 +1,41 @@
 # Add this block to the Caddyfile the VPS already uses, then reload Caddy.
 #
+# One domain serves three things on one origin, so the CRM shares the platform's Supabase login
+# (no second sign-in) and can be reached under /crm:
+#   /crm-api/*  -> CRM backend   (127.0.0.1:8787, from crm/revenueos_crm/compose.yaml)
+#   /crm/*      -> CRM frontend  (127.0.0.1:8080, nginx serving the Vite build; its base is /crm/)
+#   everything else -> the RevenueOS platform (127.0.0.1:3000)
+#
 # Caddy installed on the server (systemd):
 #     sudo nano /etc/caddy/Caddyfile        # paste the block
 #     sudo systemctl reload caddy
 #
 # Caddy running in Docker: 127.0.0.1 inside that container is the container itself, not the VPS.
-# Use the VPS's Docker bridge address instead:  reverse_proxy 172.17.0.1:3000
-# and publish the app there: add APP_BIND=172.17.0.1:3000 to .env, then ./deploy/deploy.sh
+# Use the VPS's Docker bridge address instead (172.17.0.1) for every reverse_proxy below, and
+# publish each service there (platform: APP_BIND=172.17.0.1:3000; CRM: BACKEND_PORT/FRONTEND_PORT
+# bound to 172.17.0.1), then redeploy.
+#
+# The CRM frontend image must be built with VITE_API_BASE_URL=/crm-api (same-origin API path) in
+# crm/revenueos_crm's .env before `docker compose up`.
 
 revenueos.b2botix.ai {
 	encode zstd gzip
-	reverse_proxy 127.0.0.1:3000
+
+	# CRM backend API — strip the /crm-api prefix so the backend still sees /api/v1/*.
+	handle_path /crm-api/* {
+		reverse_proxy 127.0.0.1:8787
+	}
+
+	# CRM frontend SPA — strip /crm; nginx serves the build at its root and the Vite base (/crm/)
+	# puts the prefix back on asset/route URLs.
+	@crmBare path /crm
+	redir @crmBare /crm/ 308
+	handle_path /crm/* {
+		reverse_proxy 127.0.0.1:8080
+	}
+
+	# RevenueOS platform — everything else.
+	handle {
+		reverse_proxy 127.0.0.1:3000
+	}
 }

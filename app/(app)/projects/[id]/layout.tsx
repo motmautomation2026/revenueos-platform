@@ -1,7 +1,7 @@
 import { Suspense } from "react";
 import { cookies } from "next/headers";
 import Link from "next/link";
-import { ChevronRight, Users } from "lucide-react";
+import { ChevronRight, ExternalLink, Users } from "lucide-react";
 import { ProjectArchiveButton } from "@/components/project-archive-button";
 import { ProjectSidebar, type SidebarBadges } from "@/components/project-sidebar";
 import { buttonVariants } from "@/components/ui/button";
@@ -118,6 +118,12 @@ export default async function ProjectLayout({
               </span>
             </dd>
           </div>
+          {/* The CRM is served under /crm on this same domain (Caddy), so this is a full navigation,
+              not Next routing — and the shared session means no second login. */}
+          <a href={`/crm/?project=${project.id}`} className={buttonVariants({ variant: "outline", size: "sm" })}>
+            <ExternalLink aria-hidden />
+            Open CRM
+          </a>
           {isOwner && (
             <Link href={`/projects/${project.id}/access`} className={buttonVariants({ variant: "outline", size: "sm" })}>
               <Users aria-hidden />

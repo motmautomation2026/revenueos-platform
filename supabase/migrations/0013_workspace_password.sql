@@ -11,3 +11,4 @@
 
 alter table public.revenueos_brain_accounts
   add column if not exists workspace_password text;
+

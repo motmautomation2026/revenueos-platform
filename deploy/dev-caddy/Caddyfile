@@ -1,0 +1,30 @@
+# Local dev reverse proxy: puts the platform and the CRM on ONE origin (http://localhost) so the
+# CRM shares the platform's Supabase cookie — no second login — and the "Open CRM" link works.
+#
+# Needs Caddy installed (https://caddyserver.com). Start these first, each in its own terminal:
+#   platform     : (revenueos-platform)        npm run dev        -> 127.0.0.1:3000
+#   CRM backend  : (crm/.../Backend)            npm run dev        -> 127.0.0.1:8787  (.env on RevenueOSDatabase)
+#   CRM frontend : (crm/.../Frontend)           npm run dev        -> 127.0.0.1:8080  (.env.local: VITE_API_BASE_URL=/crm-api)
+# Then:
+#   caddy run --config deploy/dev-caddy/Caddyfile
+# Open http://localhost/ , sign in to the platform, click "Open CRM" on a project.
+
+:80 {
+	# CRM backend API — strip /crm-api so the backend sees /api/v1/*.
+	handle_path /crm-api/* {
+		reverse_proxy 127.0.0.1:8787
+	}
+
+	# CRM frontend — the Vite dev server serves under its base (/crm/), so pass the path through
+	# unchanged (do NOT strip, unlike the production nginx which serves at its root).
+	@crmBare path /crm
+	redir @crmBare /crm/ 308
+	handle /crm/* {
+		reverse_proxy 127.0.0.1:8080
+	}
+
+	# RevenueOS platform — everything else.
+	handle {
+		reverse_proxy 127.0.0.1:3000
+	}
+}
