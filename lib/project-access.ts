@@ -8,7 +8,16 @@ import { TABLES } from "@/lib/supabase/tables";
 // the project's owner (the admin). revenueos_profiles is own-row under RLS, so looking up a person
 // by email also needs the service-role client.
 
-export type ProjectMember = { userId: string; name: string; email: string; addedAt: string };
+/** A salesperson has full access (platform + CRM); a client has CRM read-only access only. */
+export type ProjectRole = "salesperson" | "client";
+
+export type ProjectMember = {
+  userId: string;
+  name: string;
+  email: string;
+  role: ProjectRole;
+  addedAt: string;
+};
 
 type Result = { ok: true } | { ok: false; error: string };
 
@@ -20,10 +29,10 @@ export async function loadProjectMembers(projectId: string): Promise<ProjectMemb
   const admin = createAdminClient();
   const { data: rows } = await admin
     .from(TABLES.projectMembers)
-    .select("user_id, added_at")
+    .select("user_id, role, added_at")
     .eq("project_id", projectId)
     .order("added_at", { ascending: true })
-    .returns<{ user_id: string; added_at: string }[]>();
+    .returns<{ user_id: string; role: ProjectRole; added_at: string }[]>();
   if (!rows?.length) return [];
 
   const { data: profiles } = await admin
@@ -39,12 +48,27 @@ export async function loadProjectMembers(projectId: string): Promise<ProjectMemb
   return rows.map((r) => {
     const profile = byId.get(r.user_id);
     const email = (profile?.email ?? "").trim();
-    return { userId: r.user_id, name: (profile?.full_name ?? "").trim() || email, email, addedAt: r.added_at };
+    return {
+      userId: r.user_id,
+      name: (profile?.full_name ?? "").trim() || email,
+      email,
+      role: r.role === "client" ? "client" : "salesperson",
+      addedAt: r.added_at,
+    };
   });
 }
 
-/** Gives an existing RevenueOS account access to the project by email. */
-export async function addProjectMemberByEmail(projectId: string, ownerId: string, email: string): Promise<Result> {
+/**
+ * Gives an existing RevenueOS account access to the project by email.
+ * `role` decides what kind of access: a salesperson gets the project + its CRM workspace (full),
+ * a client gets the CRM workspace only, read-only.
+ */
+export async function addProjectMemberByEmail(
+  projectId: string,
+  ownerId: string,
+  email: string,
+  role: ProjectRole
+): Promise<Result> {
   const clean = email.trim().toLowerCase();
   if (!clean) return { ok: false, error: "Enter an email address." };
 
@@ -59,7 +83,7 @@ export async function addProjectMemberByEmail(projectId: string, ownerId: string
 
   const { error } = await admin
     .from(TABLES.projectMembers)
-    .upsert({ project_id: projectId, user_id: profile.id, added_by: ownerId }, { onConflict: "project_id,user_id" });
+    .upsert({ project_id: projectId, user_id: profile.id, added_by: ownerId, role }, { onConflict: "project_id,user_id" });
   if (error) return { ok: false, error: error.message.includes(TABLES.projectMembers) ? NOT_APPLIED : "Could not give access. Try again." };
   return { ok: true };
 }
