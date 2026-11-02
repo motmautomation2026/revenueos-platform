@@ -1,7 +1,7 @@
 import { Suspense } from "react";
 import { cookies } from "next/headers";
 import Link from "next/link";
-import { ChevronRight, ExternalLink, Users } from "lucide-react";
+import { ChevronRight, ExternalLink, Pencil, Users } from "lucide-react";
 import { ProjectArchiveButton } from "@/components/project-archive-button";
 import { ProjectSidebar, type SidebarBadges } from "@/components/project-sidebar";
 import { buttonVariants } from "@/components/ui/button";
@@ -124,6 +124,12 @@ export default async function ProjectLayout({
             <ExternalLink aria-hidden />
             Open CRM
           </a>
+          {isOwner && (
+            <Link href={`/projects/${project.id}/edit`} className={buttonVariants({ variant: "outline", size: "sm" })}>
+              <Pencil aria-hidden />
+              Edit
+            </Link>
+          )}
           {isOwner && (
             <Link href={`/projects/${project.id}/access`} className={buttonVariants({ variant: "outline", size: "sm" })}>
               <Users aria-hidden />

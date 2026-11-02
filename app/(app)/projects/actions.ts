@@ -7,7 +7,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { loadExecution } from "@/lib/brain/read";
 import { loadRequest } from "@/lib/brain/request-store";
 import { ENGAGEMENT_TYPE } from "@/lib/projects";
-import { newProjectSchema } from "@/lib/validation";
+import { editProjectSchema, newProjectSchema } from "@/lib/validation";
 import { TABLES } from "@/lib/supabase/tables";
 
 export async function createProject(input: unknown): Promise<{ error: string }> {
@@ -49,6 +49,55 @@ export async function createProject(input: unknown): Promise<{ error: string }> 
   }
 
   redirect(`/projects/${data.id}`);
+}
+
+/**
+ * Edits an existing project's client details. Owner only, like the Edit page. All fields, including
+ * the password, are required; the Edit form pre-fills the current password (read back there for the
+ * owner) so it is edited in place rather than retyped. The password lives in
+ * revenueos_brain_accounts and is written with the server-side key, the same as on creation.
+ */
+export async function updateProject(
+  projectId: unknown,
+  input: unknown
+): Promise<{ error: string } | { ok: true }> {
+  if (typeof projectId !== "string") return { error: "Invalid request." };
+  const { supabase, user, project } = await requireProject(projectId);
+  if (project.owner_id !== user.id) return { error: "Only the project owner can edit this project." };
+
+  const parsed = editProjectSchema.safeParse(input);
+  if (!parsed.success) return { error: "Please check the form and try again." };
+  const { clientName, clientEmail, clientPassword, description } = parsed.data;
+
+  const { error } = await supabase
+    .from(TABLES.projects)
+    .update({ customer_name: clientName, customer_email: clientEmail, description: description || null })
+    .eq("id", project.id);
+  if (error) {
+    return {
+      error: error.message.includes("customer_email")
+        ? "The database update that adds the customer email has not been applied (0005_project_customer_email.sql)."
+        : "Could not save the changes. Please try again.",
+    };
+  }
+
+  const { error: passwordError } = await createAdminClient()
+    .from("revenueos_brain_accounts")
+    .upsert(
+      { project_id: project.id, updated_by: user.id, workspace_password: clientPassword },
+      { onConflict: "project_id" }
+    );
+  if (passwordError) {
+    return {
+      error: passwordError.message.includes("workspace_password")
+        ? "The database update that adds the client password has not been applied (0013_workspace_password.sql)."
+        : "Could not save the client password. Please try again.",
+    };
+  }
+
+  revalidatePath("/projects");
+  revalidatePath(`/projects/${project.id}`, "layout");
+  return { ok: true };
 }
 
 type ArchiveResult = { ok: true } | { ok: false; error: string };

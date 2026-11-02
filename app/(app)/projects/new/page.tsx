@@ -58,7 +58,7 @@ export default function NewProjectPage() {
               id="clientPassword"
               label="Client password"
               error={errors.clientPassword?.message}
-              hint="Used to create the client's workspace in the calling tool. At least 6 characters. Kept on the server and never shown again."
+              hint="Used to create the client's workspace in the email and calling tools. At least 8 characters. Kept on the server and never shown again."
             >
               <Input id="clientPassword" type="password" autoComplete="new-password" {...register("clientPassword")} />
             </FormField>
