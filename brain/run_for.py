@@ -524,7 +524,11 @@ def environment_for(selection: dict, dotenv_customer_key: str | None, accounts: 
     if sender and values.get("CLIENT_REFERENCE") == "":       # no existing email account for this customer
         values.update({
             "CLIENT_REFERENCE": selection["customer_key"],
-            "EMAIL_TOOL_USER_EMAIL": sender["login_email"],
+            # Log the email account in under the PROJECT's client email (same identity as the voice
+            # account), so one project credential opens both tools. The sending mailbox is separate:
+            # it stays the SMTP_* sender below (the tool keeps `user` and `smtp` apart). Older
+            # projects with no client email fall back to the sender login.
+            "EMAIL_TOOL_USER_EMAIL": customer_email or sender["login_email"],
             "EMAIL_WORKSPACE_NAME": selection["customer_name"],
             # The workspace login password set when the project was created, used when the email tool
             # opens the account. Empty for older projects: the account is then made without one.
@@ -1271,9 +1275,12 @@ def selftest() -> None:
            read_sender(FakeClient({PROJECTS: [new], "revenueos_checklists": []}), new["id"]) is None
            and read_sender(FakeClient({}), new["id"]) is None)
     fresh = environment_for(selection, "old-co", {"calls_client_reference": "qh-new"}, sender)
-    expect("a new customer gets its OWN email account: its key as the reference, its email as the user",
+    expect("a new customer gets its OWN email account: its key as the reference; the login user falls "
+           "back to the sender login when the project has no client email",
            fresh["CLIENT_REFERENCE"] == "new-co-222222" and fresh["EMAIL_TOOL_USER_EMAIL"] == "owner@new.co"
            and fresh["EMAIL_WORKSPACE_NAME"] == "New Co" and fresh["QUICKHOWL_CLIENT_REFERENCE"] == "qh-new")
+    expect("the email login user is the project's client email when it is set (the mailbox stays the SMTP sender)",
+           environment_for(selection, "old-co", {}, sender, "client@raj.co")["EMAIL_TOOL_USER_EMAIL"] == "client@raj.co")
     expect("and its mailbox details are handed to the email step",
            (fresh["SMTP_HOST"], fresh["SMTP_PORT"], fresh["SMTP_SECURITY"], fresh["SMTP_USERNAME"], fresh["SMTP_PASSWORD"],
             fresh["SMTP_DISPLAY_NAME"], fresh["SMTP_IMAP_HOST"])
