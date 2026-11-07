@@ -9,9 +9,11 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { EmptyTool, ExecutionEmpty, ExecutionHeader, Pill } from "@/components/brain/parts";
+import { ToolHealthPanel } from "@/components/brain/tool-health-panel";
 import { loadWorkerStatus } from "@/lib/brain/worker-status";
 import { cn } from "@/lib/utils";
 import { loadExecutionPage, type ExecutionPageProps } from "../load";
+import { checkToolHealth } from "./actions";
 
 export const metadata: Metadata = { title: "Diagnostics" };
 
@@ -154,6 +156,11 @@ export default async function DiagnosticsPage(props: ExecutionPageProps) {
             );
           })}
         </ul>
+      </section>
+
+      {/* Connectivity (Phase 2a) — on-demand reachability of the tool hosts */}
+      <section aria-label="Connectivity">
+        <ToolHealthPanel check={checkToolHealth} />
       </section>
 
       {/* Waiting / failed */}
