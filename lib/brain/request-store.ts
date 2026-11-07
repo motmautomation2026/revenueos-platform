@@ -124,6 +124,11 @@ export async function replanExecution(input: {
       .eq("id", run.id);
   }
 
+  // Fresh start: drop the previous run's companies and people so the new run searches anew and the Data
+  // research page shows only the current run's results (not stale contacts from the run just closed).
+  await admin.from("quickicp_revenueos_client_company_data").delete().eq("customer", customer);
+  await admin.from("quickicp_revenueos_client_people_data").delete().eq("customer", customer);
+
   // The old run is no longer active, so a fresh request plans the month again from the updated plan.
   return createRequest(input);
 }

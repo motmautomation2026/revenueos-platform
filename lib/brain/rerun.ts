@@ -10,7 +10,9 @@ import { createAdminClient } from "@/lib/supabase/admin";
  * Deleting the decisions is the safety boundary: an email/call task re-opens a FRESH approval and waits
  * again, so nothing is re-sent without a new 'yes'. (Mirrors brain/state_store.rerun_tasks.)
  *
- * NOT cleared here: a data task's saved rows (QuickICP companies/people), so a data task reuses them.
+ * A data task (accounts/contacts) in the reset set also clears its saved rows (QuickICP companies/people)
+ * for this customer, so a re-run truly re-fetches instead of reusing stale data — and the Data research
+ * page then shows only the current run's results.
  */
 
 type TaskRow = { id: number; task_id: string; depends_on: string[] | null; status: string; output_type: string | null };
@@ -88,6 +90,15 @@ export async function rerunFrom(projectId: string, taskId: string): Promise<Reru
     })
     .in("id", ids);
   await admin.from("brain_customer_runs").update({ status: "running" }).eq("id", run.id);
+
+  // Clear a reset data task's saved rows so it re-fetches (and Data research shows only current results).
+  // Accounts feed contacts, so re-running accounts clears both companies and people.
+  if (closureTasks.some((t) => t.output_type === "accounts")) {
+    await admin.from("quickicp_revenueos_client_company_data").delete().eq("customer", req.customer_key);
+    await admin.from("quickicp_revenueos_client_people_data").delete().eq("customer", req.customer_key);
+  } else if (closureTasks.some((t) => t.output_type === "contacts")) {
+    await admin.from("quickicp_revenueos_client_people_data").delete().eq("customer", req.customer_key);
+  }
 
   return {
     ok: true,
