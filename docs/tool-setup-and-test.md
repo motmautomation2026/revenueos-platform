@@ -12,11 +12,19 @@ details** for the email and call tools, then sends **a real test to their own in
 Nothing hits the real audience until the user has seen a test email arrive and heard a test call.
 
 ## Where it lives
-A step on the **plan-ready → execution** boundary: a **"Set up & test your tools"** page at
-`app/(app)/projects/[id]/execution/setup/`, linked from the Dashboard and reached automatically the
-first time a user opens Execution. Owner-only writes (same as the Accounts page). A soft gate: starting
-execution warns (or blocks, configurable) if sender details are incomplete; the test is strongly
-recommended.
+The **test actions live on the existing cards**, right where the sender/line is configured — not on a
+separate page:
+- **Email page** → the **"Sender account" card** (`components/brain/sender-card.tsx`): a **"Send test
+  email"** action next to *Update sender details*.
+- **Calls page** → the **"Calling account" card** (`components/brain/caller-card.tsx`): a **"Call my
+  number"** action next to *Change*.
+
+The **"Set up tools" page** (Phase 1, already built) stays as the **pre-run readiness overview + gate**:
+it shows whether each tool is ready and routes to those cards. Owner-only writes (same as today). A soft
+gate: starting execution warns (or blocks, configurable) if sender details are incomplete; testing is
+strongly recommended. Putting the test on the Calling account card is especially valuable — it proves a
+**borrowed** account (e.g. "Anvika Ai's calling account / motm-tech") actually dials, which the readiness
+flag alone cannot.
 
 ## Scope
 **In:** confirm/edit sender details for both tools; one-click **test email** to a user-supplied address;
