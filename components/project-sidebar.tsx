@@ -15,6 +15,7 @@ import {
   PanelLeftOpen,
   Phone,
   Search,
+  Stethoscope,
   UsersRound,
   type LucideIcon,
 } from "lucide-react";
@@ -170,6 +171,14 @@ export function ProjectSidebar({
           label: "Activity log",
           hint: "Every step, newest first",
           icon: Activity,
+          state: execution,
+        },
+        {
+          key: "diagnostics",
+          href: `${base}/execution/diagnostics${runQuery}`,
+          label: "Diagnostics",
+          hint: "Tool health & what's stuck",
+          icon: Stethoscope,
           state: execution,
         },
       ],
