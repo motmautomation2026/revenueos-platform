@@ -1,10 +1,16 @@
 "use client";
 
 import { useState } from "react";
-import { Bot, CalendarDays, Columns3, Link2, UserRound } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { Bot, CalendarDays, Columns3, Link2, Loader2, RotateCcw, UserRound } from "lucide-react";
+import { toast } from "sonner";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import type { ColumnKey, ExecutionView, TaskCard, TaskStatus } from "@/lib/brain/view";
+import type { RerunResult } from "@/lib/brain/rerun";
+
+type Rerun = (input: { projectId: string; taskId: string }) => Promise<RerunResult>;
 
 const number = new Intl.NumberFormat("en-IN");
 // A fixed time zone keeps server and browser rendering identical.
@@ -111,9 +117,15 @@ function Card({ card, showStatus, onOpen }: { card: TaskCard; showStatus: boolea
 export function ExecutionBoard({
   columns,
   weeks,
+  projectId,
+  canRerun,
+  rerun,
 }: {
   columns: ExecutionView["columns"];
   weeks: ExecutionView["weeks"];
+  projectId: string;
+  canRerun: boolean;
+  rerun: Rerun;
 }) {
   // With nothing in motion every card sits in "Done" or "Stopped", so the month laid out by week reads better.
   const active = columns.some((c) => ["next", "running", "person"].includes(c.key) && c.cards.length > 0);
@@ -272,11 +284,64 @@ export function ExecutionBoard({
                   </ul>
                 </Section>
               )}
+
+              {canRerun && <RerunControl projectId={projectId} taskId={open.taskId} rerun={rerun} />}
             </div>
           </DialogContent>
         )}
       </Dialog>
     </section>
+  );
+}
+
+function RerunControl({ projectId, taskId, rerun }: { projectId: string; taskId: string; rerun: Rerun }) {
+  const router = useRouter();
+  const [confirming, setConfirming] = useState(false);
+  const [loading, setLoading] = useState(false);
+
+  const run = async () => {
+    setLoading(true);
+    try {
+      const result = await rerun({ projectId, taskId });
+      if (!result.ok) {
+        toast.error(result.error);
+        return;
+      }
+      toast.success(
+        `Re-run queued: ${result.reset.join(", ")} reset to pending. ` +
+          (result.paid.length ? `Paid data steps: ${result.paid.join(", ")}. ` : "") +
+          "Email and calls will pause for your approval."
+      );
+      setConfirming(false);
+      router.refresh();
+    } catch {
+      toast.error("Could not start the re-run. Try again.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <Section title="Re-run">
+      <p className="text-muted-foreground">
+        Re-run {taskId} and every step that depends on it. Email and call steps pause for your approval, so nothing is
+        re-sent automatically; data steps may cost credits.
+      </p>
+      {!confirming ? (
+        <Button type="button" variant="outline" size="sm" className="mt-2" onClick={() => setConfirming(true)}>
+          <RotateCcw className="size-4" aria-hidden /> Re-run from here
+        </Button>
+      ) : (
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <Button type="button" size="sm" onClick={run} disabled={loading}>
+            {loading && <Loader2 className="size-4 animate-spin" aria-hidden />} Confirm re-run
+          </Button>
+          <Button type="button" variant="ghost" size="sm" onClick={() => setConfirming(false)} disabled={loading}>
+            Cancel
+          </Button>
+        </div>
+      )}
+    </Section>
   );
 }
 

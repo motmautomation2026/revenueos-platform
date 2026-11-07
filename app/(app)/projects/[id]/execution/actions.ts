@@ -24,6 +24,21 @@ import {
 } from "@/lib/brain/request-store";
 import { MAX_ANSWER_TEXT } from "@/lib/brain/requests";
 import { recordAnswer, type AnswerResult } from "@/lib/brain/write";
+import { rerunFrom, type RerunResult } from "@/lib/brain/rerun";
+
+/**
+ * Re-run a step and everything downstream of it. Owner only. Resets the task + its dependents to
+ * pending so the Brain worker re-runs them; email/call steps re-ask for approval, so nothing is re-sent.
+ */
+export async function rerunTask(input: unknown): Promise<RerunResult> {
+  const { projectId, taskId } = (input ?? {}) as { projectId?: string; taskId?: string };
+  if (typeof projectId !== "string" || typeof taskId !== "string") return { ok: false, error: "Invalid request." };
+  const { user, project } = await requireProject(projectId);
+  if (project.owner_id !== user.id) return { ok: false, error: "Only the project owner can re-run steps." };
+  const result = await rerunFrom(projectId, taskId);
+  if (result.ok) revalidatePath(`/projects/${projectId}`, "layout");
+  return result;
+}
 
 const schema = z.object({
   projectId: z.uuid(),

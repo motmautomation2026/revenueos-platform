@@ -33,6 +33,8 @@ import {
 import type { ExecutionView } from "@/lib/brain/view";
 import { cn } from "@/lib/utils";
 import { loadExecutionPage, type ExecutionPageProps } from "./load";
+import { requireUser } from "@/lib/auth";
+import { rerunTask } from "./actions";
 
 export const metadata: Metadata = { title: "Dashboard" };
 
@@ -48,6 +50,7 @@ const ACTION_STATE = {
 
 export default async function ExecutionPage(props: ExecutionPageProps) {
   const { project, data, base } = await loadExecutionPage(props);
+  const { user } = await requireUser();
   // Starting execution is asked for here and done by the Brain's worker; see lib/brain/requests.ts.
   const [request, gaps] = await Promise.all([
     loadRequest(project.id),
@@ -342,7 +345,13 @@ export default async function ExecutionPage(props: ExecutionPageProps) {
         </section>
       )}
 
-      <ExecutionBoard columns={view.columns} weeks={view.weeks} />
+      <ExecutionBoard
+        columns={view.columns}
+        weeks={view.weeks}
+        projectId={project.id}
+        canRerun={project.owner_id === user.id}
+        rerun={rerunTask}
+      />
 
       {view.review && <Review review={view.review} />}
 
