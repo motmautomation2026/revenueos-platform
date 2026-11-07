@@ -523,6 +523,27 @@ def industry_options(keywords: list[str], lookup=None) -> dict[str, list[str]]:
     return options
 
 
+def location_options(keywords: list[str], lookup=None) -> dict[str, list[str]]:
+    """
+    {keyword: Prospeo location names}. Like industry_options, a keyword with no names is retried once
+    with each of its words, so a national phrase resolves to the country: 'Pan-India' -> 'India',
+    'across Maharashtra' -> 'Maharashtra'. Without this, a location keyword Prospeo does not know (very
+    common for 'Pan-India') leaves no locations and the whole search fails the exact-name check.
+    lookup: prospeo_suggestions (default); a selftest passes a fake.
+    """
+    lookup = lookup or prospeo_suggestions
+    options = {}
+    for keyword in keywords:
+        names = list(lookup("location_search", keyword))
+        words = [word for word in re.split(r"[\s/&,\-]+", keyword.strip()) if len(word) >= 4]
+        if not names and words:
+            for word in words:
+                names += [name for name in lookup("location_search", word) if name not in names]
+            print(f"  Location '{keyword}': no Prospeo names; its words {words} -> {names or 'still none'}")
+        options[keyword] = names
+    return options
+
+
 def pick_exact_names(work_order: dict, industry_options: dict, location_options: dict) -> ExactNames:
     """Step 3: LLM picks the matching names, only from Prospeo's suggestions."""
     prompt = (
@@ -543,13 +564,13 @@ def build_company_payload(work_order: dict, understanding: dict) -> CompanyPaylo
     print("\n[1] Keywords:", keywords.model_dump())
 
     industries_found = industry_options(keywords.industry_keywords)
-    location_options = {kw: prospeo_suggestions("location_search", kw) for kw in keywords.location_keywords}
+    locations_found = location_options(keywords.location_keywords)
     print("\n[2] Industry suggestions:", json.dumps(industries_found, indent=2, ensure_ascii=False))
-    print("[2] Location suggestions:", json.dumps(location_options, indent=2, ensure_ascii=False))
+    print("[2] Location suggestions:", json.dumps(locations_found, indent=2, ensure_ascii=False))
 
-    picked = pick_exact_names(work_order, industries_found, location_options)
+    picked = pick_exact_names(work_order, industries_found, locations_found)
     valid_industries = {name for names in industries_found.values() for name in names}
-    valid_locations = {name for names in location_options.values() for name in names}
+    valid_locations = {name for names in locations_found.values() for name in names}
     industries = [name for name in picked.industries if name in valid_industries]
     locations = [name for name in picked.locations if name in valid_locations]
     print("\n[3] Exact names kept:", {"industries": industries, "locations": locations})

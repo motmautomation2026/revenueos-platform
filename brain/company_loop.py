@@ -64,6 +64,7 @@ from quickicp import (
     ask_llm,
     clean_domain,
     industry_options,
+    location_options,
     max_number,
     pick_exact_names,
     prospeo_suggestions,
@@ -234,11 +235,11 @@ def brain_adjust(work_order: dict, log: list[dict], summary: dict, shortfall: in
 def resolve_payload(adjust: SearchAdjustment, work_order: dict, shortfall: int) -> CompanyPayload:
     """New filters -> Prospeo exact names -> payload for a NEW search (coveredpages = 0)."""
     industries_found = industry_options(adjust.industry_keywords)   # synonyms once if a keyword finds nothing
-    location_options = {kw: prospeo_suggestions("location_search", kw) for kw in adjust.location_keywords}
+    locations_found = location_options(adjust.location_keywords)    # word fallback so 'Pan-India' -> 'India'
 
-    picked = pick_exact_names(work_order, industries_found, location_options)
+    picked = pick_exact_names(work_order, industries_found, locations_found)
     valid_industries = {name for names in industries_found.values() for name in names}
-    valid_locations = {name for names in location_options.values() for name in names}
+    valid_locations = {name for names in locations_found.values() for name in names}
     industries = [name for name in picked.industries if name in valid_industries]
     locations = [name for name in picked.locations if name in valid_locations]
     if not industries or not locations:
