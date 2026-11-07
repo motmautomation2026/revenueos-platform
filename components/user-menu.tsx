@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { ChevronDown, LogOut, UserRound } from "lucide-react";
+import { ChevronDown, FlaskConical, LogOut, UserRound } from "lucide-react";
 import { signOut } from "@/app/(auth)/actions";
 
 function initials(name: string) {
@@ -40,6 +40,14 @@ export function UserMenu({ name }: { name: string }) {
           >
             <UserRound className="size-4 text-muted-foreground" aria-hidden />
             Profile
+          </Link>
+          <Link
+            href="/test-tools"
+            role="menuitem"
+            className="flex items-center gap-2 rounded-md px-2.5 py-2 outline-none hover:bg-muted focus-visible:bg-muted"
+          >
+            <FlaskConical className="size-4 text-muted-foreground" aria-hidden />
+            Test tools
           </Link>
           <form action={signOut}>
             <button
