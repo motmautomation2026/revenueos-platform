@@ -17,6 +17,7 @@ import {
   Search,
   Stethoscope,
   UsersRound,
+  Wrench,
   type LucideIcon,
 } from "lucide-react";
 import { SIDEBAR_COOKIE } from "@/lib/sidebar";
@@ -117,6 +118,14 @@ export function ProjectSidebar({
       title: "Execution",
       note: planReady ? undefined : "Opens when the plan is ready",
       items: [
+        {
+          key: "setup",
+          href: `${base}/execution/setup${runQuery}`,
+          label: "Set up tools",
+          hint: "Sender & call line, before you run",
+          icon: Wrench,
+          state: execution,
+        },
         {
           key: "dashboard",
           href: `${base}/execution${runQuery}`,
