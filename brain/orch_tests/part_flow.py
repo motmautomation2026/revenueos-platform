@@ -727,7 +727,8 @@ def selftest_run_data() -> bool:
 
         def make_profile(understanding, work_order):
             profiled.update(understanding=understanding, work_order=work_order)
-            return {"profile": {"company_name": "Run Customer"}}
+            return {"welcome_message": "{time_greeting} {name} ji",
+                    "system_prompt": "Help {name} at {company}.", "variables": {}}
         quickhowl.make_profile, quickhowl.check_settings = make_profile, lambda *names: None
         quickhowl.assert_safe = lambda request_: None
         RealCallTools(run["run_key"], "T4", run_understanding_, calls_wo).build_request(

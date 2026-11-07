@@ -179,7 +179,7 @@ class FakeCallTools:
     def build_request(self, contacts):
         self.calls["build"] += 1
         return {"client_reference": "selftest", "reference": f"motm-selftest-call-{uuid.uuid4().hex[:12]}",
-                "contacts": contacts, "company_profile": {"company_name": "Anvixa"}}
+                "contacts": contacts, "agent": {"name": "Simran", "language": "hinglish"}}
 
     def launch(self, request, auto_start):
         from runner_quickicp_accounts import SimulatedCrash
