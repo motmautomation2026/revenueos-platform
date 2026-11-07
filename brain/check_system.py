@@ -119,11 +119,14 @@ def check_git() -> None:
 def check_secret_leaks() -> None:
     """Look for the exact secret values from .env inside any project file."""
     secrets = {key: os.getenv(key) for key in SECRET_KEYS if os.getenv(key) and len(os.getenv(key)) >= 12}
-    # A customer whose calling account was opened with its email (run_for.py): the first password IS that
-    # email, which is not a secret and is in the customer's own files. check_quickhowl WARNs about it. Guard
-    # the key's presence first: it is often unset (the email-login fallback), and None == None must not match.
+    # A calling account opened with its login email (run_for.py): the password IS the login email, or part
+    # of it (e.g. "revenueosplatform" inside "revenueosplatform@gmail.com"). That is not a secret and
+    # legitimately appears in the customer's own files, so it must not be flagged as a leak. The login email
+    # is QUICKHOWL_USER_EMAIL, or EMAIL_TOOL_USER_EMAIL when the calls login falls back to the email tool's
+    # (quickhowl.login). check_quickhowl WARNs about the weak password separately.
+    login_email = os.getenv("QUICKHOWL_USER_EMAIL") or os.getenv("EMAIL_TOOL_USER_EMAIL") or ""
     password = secrets.get("QUICKHOWL_USER_PASSWORD")
-    if password and password == os.getenv("QUICKHOWL_USER_EMAIL"):
+    if password and login_email and password in login_email:
         secrets.pop("QUICKHOWL_USER_PASSWORD", None)
     leaks = []
     for root, folders, files in os.walk("."):
