@@ -82,6 +82,52 @@ export async function createRequest(input: {
   return { ok: true, message: "Sent to the Brain. It will write the month plan and ask for your approval here." };
 }
 
+/**
+ * Level 2 re-run: re-plan execution from the current (edited) GTM plan. Stops the active run — cancels
+ * its open decisions, stops its unfinished tasks, marks the run stopped — then starts a fresh execution
+ * request, which re-plans the month and loads a new run from the updated plan. Destructive: the current
+ * run's progress is closed (kept as history). The new run does not know who the old run already emailed
+ * or called, so for real prospects an "already contacted" filter is still needed (not built).
+ */
+export async function replanExecution(input: {
+  projectId: string;
+  userId: string;
+  userName: string;
+}): Promise<RequestResult> {
+  const customer = await brainCustomerFor(input.projectId);
+  if (!customer) return { ok: false, error: "This project has no Brain key yet." };
+
+  const admin = createAdminClient();
+  const now = new Date().toISOString();
+  const { data: runs, error: runsError } = await admin
+    .from("brain_customer_runs")
+    .select("id")
+    .eq("customer", customer)
+    .in("status", ACTIVE_RUNS)
+    .returns<{ id: number }[]>();
+  if (runsError) return { ok: false, error: "The Brain's data could not be read. Try again." };
+
+  for (const run of runs ?? []) {
+    await admin
+      .from("brain_decisions")
+      .update({ status: "answered", answer: "stop", decided_by: "user", reason: "re-planned with the updated plan", answered_at: now })
+      .eq("run_id", run.id)
+      .eq("status", "open");
+    await admin
+      .from("brain_plan_tasks")
+      .update({ status: "stopped", finished_at: now, last_error: "stopped: re-planned with the updated plan" })
+      .eq("run_id", run.id)
+      .in("status", ["pending", "running", "waiting_human"]);
+    await admin
+      .from("brain_customer_runs")
+      .update({ status: "stopped", stop_reason: "Closed to re-run execution with the updated GTM plan." })
+      .eq("id", run.id);
+  }
+
+  // The old run is no longer active, so a fresh request plans the month again from the updated plan.
+  return createRequest(input);
+}
+
 /** Records the person's answer to the published month plan. The Brain reads it and checks it again. */
 export async function answerRequest(input: {
   projectId: string;

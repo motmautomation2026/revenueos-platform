@@ -34,7 +34,8 @@ import type { ExecutionView } from "@/lib/brain/view";
 import { cn } from "@/lib/utils";
 import { loadExecutionPage, type ExecutionPageProps } from "./load";
 import { requireUser } from "@/lib/auth";
-import { rerunTask } from "./actions";
+import { ReplanButton } from "@/components/brain/replan-button";
+import { rerunTask, replanExecutionWithPlan } from "./actions";
 
 export const metadata: Metadata = { title: "Dashboard" };
 
@@ -343,6 +344,10 @@ export default async function ExecutionPage(props: ExecutionPageProps) {
           </div>
           <DecisionList projectId={project.id} decisions={view.openDecisions} />
         </section>
+      )}
+
+      {project.owner_id === user.id && (
+        <ReplanButton projectId={project.id} replan={replanExecutionWithPlan} />
       )}
 
       <ExecutionBoard

@@ -19,6 +19,7 @@ import {
   answerRequest,
   cancelRequest,
   createRequest,
+  replanExecution,
   retryRequest,
   type RequestResult,
 } from "@/lib/brain/request-store";
@@ -37,6 +38,21 @@ export async function rerunTask(input: unknown): Promise<RerunResult> {
   if (project.owner_id !== user.id) return { ok: false, error: "Only the project owner can re-run steps." };
   const result = await rerunFrom(projectId, taskId);
   if (result.ok) revalidatePath(`/projects/${projectId}`, "layout");
+  return result;
+}
+
+/**
+ * Re-run execution from the updated GTM plan (Level 2). Owner only, and destructive: it stops the current
+ * run and starts a fresh one planned from the edited plan. Progress on the current run is closed.
+ */
+export async function replanExecutionWithPlan(input: unknown): Promise<RequestResult> {
+  const { projectId } = (input ?? {}) as { projectId?: string };
+  if (typeof projectId !== "string") return { ok: false, error: "Invalid request." };
+  const { user, project } = await requireProject(projectId);
+  if (project.owner_id !== user.id) return { ok: false, error: "Only the project owner can re-plan execution." };
+  const name = (user.user_metadata?.full_name as string | undefined)?.trim() || user.email || user.id;
+  const result = await replanExecution({ projectId, userId: user.id, userName: name });
+  if (result.ok) revalidatePath(`/projects/${project.id}`, "layout");
   return result;
 }
 
