@@ -3,7 +3,9 @@ quickhowl.py
 ============
 
 AI voice calling (Quickhowl) for MOTM Revenue OS.
-Follows the developer's guide for https://revenueoscall.b2botix.ai (tested 8 Oct 2026).
+Follows the v2 payload guide for https://revenueoscall.b2botix.ai (Nov 2026): Sarvam voices only, the
+per-contact script comes from {placeholders} in the agent, and there is no company_profile or Prime
+(sending either is refused with 422).
 
 HOW IT IS USED
 --------------
@@ -51,12 +53,12 @@ WHAT IS SENT
     user            every request (email must match the account; password only used the first time)
     phone_number    only if QUICKHOWL_VOBIZ_AUTH_ID, _AUTH_TOKEN and QUICKHOWL_DID are set
                     (needed on the client's first launch; resending the same DID is harmless)
-    company_profile every request. NOTE: it REPLACES the client's saved profile, including for
-                    that client's running campaigns. One client_reference = one customer.
-    agent           AGENT_* settings below
+    agent           name, language, voice_id (a Sarvam voice for the language, "" = default),
+                    welcome_message and system_prompt (both with {placeholders} the platform fills per
+                    contact), variables (placeholder fallbacks) and speech_pace. See AGENT_* and make_profile.
     campaign        name, description, goal (CAMPAIGN_GOAL, set by code)
-    contacts        name, phone, company, website, custom_fields (designation, industry, city, size)
-                    No email, no LinkedIn: the caller does not need them.
+    contacts        name, phone, company, website, custom_fields (designation, industry, city, size).
+                    custom_fields also fill the agent's {placeholders}. No email, no LinkedIn.
     schedule        not sent: the server default is 09:00-19:00, Mon-Sat, Asia/Kolkata.
 
 SAFETY
@@ -113,7 +115,7 @@ DEBUGGING
     - 503: server settings (launch or auto-start switched off). Nothing was created.
     - start_status 'blocked': read start_reason (e.g. phone_number failed to connect).
     - contacts_rejected: bad, duplicate or do-not-call numbers; the rest still go through.
-    - Silent calls with elevenlabs: the ElevenLabs plan must be paid; or use voice_provider sarvam.
+    - 422 naming 'voice_id': it must be a Sarvam voice for AGENT_LANGUAGE ("" picks the default).
     - "has no stored calls campaign in the ledger yet": the calls task has not stored its campaign.
     - "has 2 campaigns": add --reference <one of the listed references>.
 """
@@ -138,10 +140,12 @@ REAL_CALLS_ENABLED = True       # switched on at go-live 2026-10-12 (Rameshwar).
 MAX_TEST_CALLS = 3              # never more than this many contacts in test mode
 
 # ---- Agent (the voice) ----
-AGENT_NAME = "Nilam"
-AGENT_LANGUAGE = "hinglish"     # hinglish, hindi, english, marathi
-AGENT_VOICE_PROVIDER = "elevenlabs"
-AGENT_VOICE_ID = "0iMlxZ0uHXOOsLck9tMa"   # Nilam (needs a paid ElevenLabs plan); or sarvam + "ritu"
+# v2 runs on Sarvam only: no voice_provider, no ElevenLabs. voice_id must be a Sarvam voice for
+# AGENT_LANGUAGE; "" picks that language's default. The per-language voice list is in the payload guide.
+AGENT_NAME = "Simran"
+AGENT_LANGUAGE = "hinglish"     # hinglish, hindi, english, marathi, ... (see the guide)
+AGENT_VOICE_ID = "simran_enhi_customer"   # a Sarvam hinglish voice ("" = language default)
+AGENT_SPEECH_PACE = 1.0         # 0.7 to 1.5
 
 # ---- Campaign goal (decided by code, not the LLM) ----
 CAMPAIGN_GOAL = "lead_generation"   # allowed: lead_generation, follow_up, survey, announcement
@@ -345,13 +349,14 @@ def contacts_from_people(people: list[dict]) -> list[dict]:
 
 # ================= BRAIN: COMPANY PROFILE (LLM) =================
 
-class CallProfile(BaseModel):
-    industry: str = Field(description="The customer's own industry, one short line")
-    what_we_offer: str = Field(description="What the customer sells, 2-3 plain sentences")
-    value_proposition: str = Field(description="Why a buyer should care: outcomes, 1-2 sentences")
-    target_customers: str = Field(description="Who the product is for, 1 sentence")
-    key_points: str = Field(description="2-4 short facts from the documents only, no invented numbers")
-    call_objective: str = Field(description="What one call should achieve, 1-2 sentences")
+class CallScript(BaseModel):
+    welcome_message: str = Field(description="The first line the caller speaks, in the agent's language. "
+                                "One or two short spoken sentences. Use {name} for the person; you may use "
+                                "{time_greeting}.")
+    system_prompt: str = Field(description="The caller's full instructions, in the agent's language: who they "
+                              "represent and what it offers, why a buyer should care, the goal of the call, and "
+                              "how to behave. Use {name} for the person and {company} for their company. Use "
+                              "ONLY facts given; invent nothing.")
 
 
 def customer_display_name(understanding: dict) -> str:
@@ -370,7 +375,13 @@ def internal_words_in(profile) -> dict:
 
 
 def make_profile(understanding: dict, work_order: dict) -> dict:
-    """LLM writes the profile from the brain; code adds name, website and the fixed tone rules."""
+    """
+    The agent's script for v2. The LLM writes welcome_message and system_prompt (in the agent's language,
+    with {placeholders}); code appends the fixed tone and supplies placeholder defaults. There is no
+    company_profile and no Prime any more: the per-contact wording comes from the placeholders the platform
+    fills for each call (the contact's own fields win; `variables` are the fallbacks).
+    Returns {"welcome_message", "system_prompt", "variables"}.
+    """
     company = customer_display_name(understanding)
     facts = {
         "customer": company,
@@ -380,41 +391,45 @@ def make_profile(understanding: dict, work_order: dict) -> dict:
         "calls_work_order": {k: work_order.get(k) for k in ("task", "target", "instructions") if k in work_order},
     }
     prompt = (
-        "You write the company profile an AI voice caller uses to pitch on behalf of the customer.\n"
+        f"You write what an AI voice caller named {AGENT_NAME} says on behalf of {company}, in "
+        f"{AGENT_LANGUAGE}. Write two things:\n"
+        f"- welcome_message: the opening line. {AGENT_NAME} greets the person and says she is calling from "
+        f"{company}. Use {{name}} for the person; you may use {{time_greeting}}.\n"
+        "- system_prompt: the caller's instructions — what the company offers, why a buyer should care, the "
+        f"goal (find out how they handle this today, check interest, and offer a short follow-up meeting with "
+        f"the {company} team), and how to behave. Use {{name}} and {{company}} for the person and their "
+        "company.\n"
         "Rules:\n"
         "- Use ONLY facts in the documents. Never invent numbers, clients, prices or awards.\n"
-        "- Write for the person being called: plain, short, spoken-language sentences.\n"
-        "- No internal words: never mention MOTM, segments, P1/P2, clusters, targets, months, "
-        "enquiries, work orders or lead generation.\n"
-        "- call_objective: briefly find out how they handle these workflows today, check interest, "
-        "and book a short demo with the customer's team.\n\n"
+        "- Write for the person being called: plain, short, spoken sentences.\n"
+        "- The ONLY placeholders allowed are {name}, {company}, {industry}, {city} and (welcome only) "
+        "{time_greeting}. Write every other detail as plain words, never as a placeholder.\n"
+        "- No internal words: never mention MOTM, segments, P1/P2, clusters, targets, months, enquiries, "
+        "work orders or lead generation.\n\n"
         "Documents:\n" + json.dumps(facts, ensure_ascii=False)
     )
-    profile = ask_llm(CallProfile, prompt, "Call profile")
-    leaks = internal_words_in(profile)
+    script = ask_llm(CallScript, prompt, "Call script")
+    leaks = internal_words_in(script)
     if leaks:
         # One rewrite, shown exactly what leaked (the same rule as the email step's forbidden phrases).
-        print(f"  Call profile contains internal words {leaks}: asking for one rewrite.")
-        profile = ask_llm(CallProfile, prompt + "\n\nYour previous answer used internal words that the person "
-                          f"being called must never hear: {json.dumps(leaks, ensure_ascii=False)}. Write it again "
-                          "without them. Say who the customers are in plain words (for example 'companies that "
-                          "build water pipelines'), never 'segments' or 'clusters'.", "Call profile (rewrite)")
-        leaks = internal_words_in(profile)
+        print(f"  Call script contains internal words {leaks}: asking for one rewrite.")
+        script = ask_llm(CallScript, prompt + "\n\nYour previous answer used internal words that the person "
+                         f"being called must never hear: {json.dumps(leaks, ensure_ascii=False)}. Write it again "
+                         "without them, in plain words (for example 'companies that build water pipelines'), "
+                         "never 'segments' or 'clusters'.", "Call script (rewrite)")
+        leaks = internal_words_in(script)
     if leaks:
-        raise ToolError(f"Call profile contains internal words {leaks}. Run 'preview' again.")
+        raise ToolError(f"Call script contains internal words {leaks}. Run 'preview' again.")
 
-    tone = (f"The caller is a woman named {AGENT_NAME} and must introduce herself as {AGENT_NAME} "
-            f"calling from {company}. Polite, brief and consultative. Never promise prices, discounts "
-            f"or guarantees. If the person is not interested or asks not to be called again, thank "
-            f"them and end the call politely.")
-    result = {"company_name": company}
-    if os.getenv("CUSTOMER_WEBSITE"):
-        result["website"] = os.getenv("CUSTOMER_WEBSITE")
-    data = profile.model_dump()
-    result.update({k: data[k] for k in ("industry", "what_we_offer", "value_proposition",
-                                        "target_customers", "key_points", "call_objective")})
-    result["tone_notes"] = tone
-    return {"profile": result}
+    tone = (" Always be polite, brief and consultative. Never promise prices, discounts or guarantees. If the "
+            "person is not interested or asks not to be called again, thank them and end the call politely.")
+    # Fallbacks so an optional placeholder is never spoken as a gap (a contact's own value always wins).
+    variables = {"industry": "your industry", "city": "your area"}
+    return {
+        "welcome_message": script.welcome_message.strip(),
+        "system_prompt": script.system_prompt.strip() + tone,
+        "variables": variables,
+    }
 
 
 # ================= REQUEST: BUILD, SECRETS, SAFETY =================
@@ -438,9 +453,15 @@ def build_request(contacts: list[dict], understanding: dict, work_order: dict) -
     request = {
         "client_reference": os.getenv("QUICKHOWL_CLIENT_REFERENCE"),
         "reference": f"motm-{slug(company)}-call-{stamp}"[:120],
-        "company_profile": made["profile"],
-        "agent": {"name": AGENT_NAME, "language": AGENT_LANGUAGE,
-                  "voice_provider": AGENT_VOICE_PROVIDER, "voice_id": AGENT_VOICE_ID},
+        "agent": {
+            "name": AGENT_NAME,
+            "language": AGENT_LANGUAGE,
+            "voice_id": AGENT_VOICE_ID,
+            "welcome_message": made["welcome_message"],
+            "system_prompt": made["system_prompt"],
+            "variables": made["variables"],
+            "speech_pace": AGENT_SPEECH_PACE,
+        },
         "campaign": {
             "name": f"{company} - decision makers - {datetime.now():%B %Y}"
                     + (" (TEST)" if TEST_MODE else ""),
@@ -448,7 +469,6 @@ def build_request(contacts: list[dict], understanding: dict, work_order: dict) -
             "goal": CAMPAIGN_GOAL,
         },
         "contacts": contacts,
-        "prime": True,
     }
     return request
 
