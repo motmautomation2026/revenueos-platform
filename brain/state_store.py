@@ -661,6 +661,58 @@ def next_ready_task(run_id: int) -> dict | None:
     return first(ready_tasks(run_id))
 
 
+# ================= RE-RUN (a task and everything downstream) =================
+
+def dependents_closure(tasks: list[dict], task_id: str) -> set[str]:
+    """
+    `task_id` and every task that depends on it, transitively (depends_on followed backwards). Pure, no
+    DB. This is the set a re-run must reset, so each downstream task rebuilds from the re-run output.
+    """
+    ids = {t["task_id"] for t in tasks}
+    if task_id not in ids:
+        return set()
+    closure = {task_id}
+    changed = True
+    while changed:
+        changed = False
+        for t in tasks:
+            if t["task_id"] in closure:
+                continue
+            if any(dep in closure for dep in (t.get("depends_on") or [])):
+                closure.add(t["task_id"])
+                changed = True
+    return closure
+
+
+def rerun_tasks(run_id: int, task_id: str, by: str = "user") -> dict:
+    """
+    Re-run a task and everything downstream of it. For every task in the dependents closure: delete its
+    decisions and its steps, and reset it to 'pending' (clearing result, error, numbers and timing). The
+    run is set back to 'running' so the worker resumes and re-runs them in dependency order (ready_tasks).
+
+    Deleting the decisions is deliberate and is the safety boundary: an email or call task that re-runs
+    must open a FRESH approval (email_approve / call_start) and wait for a person again — the earlier
+    'yes' must never carry over, so nothing is re-sent without a new approval. The runners draft a new
+    campaign under a new reference once the steps are gone.
+
+    NOT cleared here: the data rows a task saved (QuickICP companies/people). A data task reuses the data
+    it already has, so clearing those (scoped to the run's customer) is a separate, explicit step.
+    Returns {"reset": [task_id, ...]} in plan order.
+    """
+    tasks = get_tasks(run_id)
+    if not any(t["task_id"] == task_id for t in tasks):
+        raise ToolError(f"STOPPED: no task {task_id} in this run.")
+    closure = dependents_closure(tasks, task_id)
+    reset = [t for t in tasks if t["task_id"] in closure]
+    for task in reset:
+        backend().delete(STEPS, {"task_row_id": task["id"]})
+        backend().delete(DECISIONS, {"run_id": run_id, "task_row_id": task["id"]})
+        update_task(task["id"], status="pending", waiting_for=None, result=None, last_error=None,
+                    achieved_number=None, attempts=0, started_at=None, finished_at=None)
+    update_run(run_id, status="running")
+    return {"reset": [t["task_id"] for t in reset], "by": by}
+
+
 # ================= STEPS (external calls) =================
 
 def get_step(idempotency_key: str) -> dict | None:

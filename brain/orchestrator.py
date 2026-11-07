@@ -173,9 +173,9 @@ from plan_approval import describe, read_proof
 from quickicp import TEST_MODE, ToolError, load_json
 from state_store import (
     ALLOWED_ANSWERS, answer_decision, add_tasks, check_customer_key, create_run, current_customer,
-    force_unlock, get_decisions, get_run, get_runs, get_tasks, list_open_decisions, lock_holder,
-    now_iso, open_decision, ready_tasks, record_decision, release_run_lock, renew_run_lock, take_run_lock, update_run,
-    update_task,
+    dependents_closure, force_unlock, get_decisions, get_run, get_runs, get_tasks, list_open_decisions,
+    lock_holder, now_iso, open_decision, ready_tasks, record_decision, release_run_lock, renew_run_lock,
+    rerun_tasks, take_run_lock, update_run, update_task,
 )
 from runner_kit import RunnerContext, RunnerResult, run_understanding
 from runner_quickicp_accounts import RealAccountsTools, run_quickicp_accounts
@@ -205,7 +205,38 @@ USAGE = """Usage:
   python orchestrator.py review <YYYY-MM>
   python orchestrator.py unlock <YYYY-MM>
   python orchestrator.py close <YYYY-MM> "reason"
+  python orchestrator.py rerun <YYYY-MM> <task id like T4>
   <YYYY-MM> may be a revision: 2026-10-r2"""
+
+
+def cmd_rerun(customer: str, month: str, task_id: str, confirm=input) -> None:
+    """
+    Re-run one task and everything downstream of it. Shows exactly which tasks reset, then needs the run
+    key typed (like unlock / close), then resets them to pending so the next 'run' re-executes them.
+    Email/call tasks re-draft and ask for approval again; nothing is re-sent without a new answer.
+    """
+    run = find_run(customer, month)
+    tasks = get_tasks(run["id"])
+    if not any(t["task_id"] == task_id for t in tasks):
+        raise ToolError(f"STOPPED: no task {task_id} in run {run['run_key']}.")
+    closure = sorted(dependents_closure(tasks, task_id))
+    paid = [t["task_id"] for t in tasks if t["task_id"] in closure and t["output_type"] in ("accounts", "contacts")]
+    print(f"\nRe-run {task_id} of {run['run_key']}: these tasks RESET to pending and re-run in order:")
+    print("  " + ", ".join(closure))
+    print("  Their steps and decisions are cleared. Email/call tasks re-draft and ask for approval again;")
+    print("  nothing is re-sent without a new 'yes'.")
+    if paid:
+        print(f"  Paid data tasks in the set: {', '.join(paid)} (they reuse saved data unless it is cleared).")
+    try:
+        typed = confirm(f"Type the run key to confirm ({run['run_key']}): ").strip()
+    except EOFError:
+        typed = ""
+    if typed != run["run_key"]:
+        print("Not re-run (the run key did not match).")
+        return
+    result = rerun_tasks(run["id"], task_id, by="user")
+    print(f"Reset to pending: {', '.join(result['reset'])}. Run -> running. Now: run {month}")
+
 
 if __name__ == "__main__":
     from quickicp import run_cli
@@ -236,6 +267,8 @@ if __name__ == "__main__":
                 cmd_unlock(current_customer(), check_month(args[1]))
             elif command == "close" and len(args) == 3:
                 cmd_close(current_customer(), args[1], args[2])
+            elif command == "rerun" and len(args) == 3 and re.fullmatch(r"T\d+", args[2]):
+                cmd_rerun(current_customer(), check_month(args[1]), args[2])
             elif command == "decisions":
                 cmd_decisions(current_customer())
             elif command == "answer" and len(args) in (3, 4) and args[1].isdigit():

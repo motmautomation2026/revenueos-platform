@@ -31,6 +31,54 @@ from orch_tests.part_flow import *  # noqa: F401,F403
 from orch_tests.part_manual import *  # noqa: F401,F403
 
 
+def selftest_rerun() -> bool:
+    """rerun_tasks resets a task and everything downstream only, clears their steps + decisions (so no stale
+    approval can re-send), keeps other branches, and resumes the run."""
+    import state_store as ss
+    key = f"selftest-rerun-{datetime.now(timezone.utc):%Y%m%d%H%M%S%f}"
+    run = ss.create_run(f"{key}-2026-10", key, True)
+    rid = run["id"]
+    try:
+        ss.add_tasks(rid, [
+            {"task_id": "T1", "agent": "QuickICP", "output_type": "accounts", "depends_on": []},
+            {"task_id": "T2", "agent": "QuickICP", "output_type": "contacts", "depends_on": ["T1"]},
+            {"task_id": "T3", "agent": "Email Agent", "output_type": "emails", "depends_on": ["T1"]},
+            {"task_id": "T4", "agent": "Quickhowl", "output_type": "calls", "depends_on": ["T2"]},
+            {"task_id": "T5", "agent": "CAM", "output_type": "handover", "depends_on": ["T4"]},
+        ])
+        tid = {t["task_id"]: t["id"] for t in ss.get_tasks(rid)}
+        expect("rerun: T2's closure is T2 and everything downstream (T4, T5)",
+               ss.dependents_closure(ss.get_tasks(rid), "T2") == {"T2", "T4", "T5"})
+        expect("rerun: an independent branch (T3) is not in T2's closure",
+               ss.dependents_closure(ss.get_tasks(rid), "T3") == {"T3"})
+
+        for t in ("T1", "T2", "T3", "T4"):
+            ss.update_task(tid[t], status="done", result={"ok": True}, achieved_number=5, finished_at=ss.now_iso())
+        ss.update_task(tid["T5"], status="waiting_human", waiting_for="human_task")
+        ss.start_step(tid["T2"], "search", f"{key}-T2", "quickicp", True, {"q": 1})
+        ss.open_decision(rid, "email_approve", {"text": "approve?"}, tid["T3"])   # kept: T3 is not in the closure
+        d4 = ss.open_decision(rid, "call_start", {"text": "call?"}, tid["T4"])
+        ss.answer_decision(d4["id"], "yes")                                       # stale approval must be removed
+
+        result = ss.rerun_tasks(rid, "T2", by="selftest")
+        expect("rerun: resets exactly T2, T4, T5", result["reset"] == ["T2", "T4", "T5"])
+        after = {t["task_id"]: t for t in ss.get_tasks(rid)}
+        expect("rerun: reset tasks go back to pending and are cleared",
+               all(after[t]["status"] == "pending" and after[t]["result"] is None
+                   and after[t]["achieved_number"] is None for t in ("T2", "T4", "T5")))
+        expect("rerun: a reset task's steps and decisions are deleted, so no stale 'yes' can re-send",
+               ss.get_steps(tid["T2"]) == []
+               and [d for d in ss.get_decisions(rid) if d["task_row_id"] == tid["T4"]] == [])
+        expect("rerun: an untouched branch stays done, with its decision kept",
+               after["T1"]["status"] == "done" and after["T3"]["status"] == "done"
+               and any(d["task_row_id"] == tid["T3"] for d in ss.get_decisions(rid)))
+        expect("rerun: the run resumes (status running)", ss.get_run(f"{key}-2026-10")["status"] == "running")
+        expect("rerun: an unknown task id stops", raises(lambda: ss.rerun_tasks(rid, "T99")))
+        return True
+    finally:
+        ss.delete_test_run(rid)
+
+
 def selftest() -> bool:
     """All parts: load/status/next/answer, run (human tasks), tools (fake QuickICP). Each deletes its own rows."""
     import tempfile
@@ -47,7 +95,8 @@ def selftest() -> bool:
         with network_guard() as blocked:
             results = [selftest_load(), selftest_run(), selftest_tools(), selftest_contacts(),
                        selftest_email(), selftest_calls(), selftest_5a(), selftest_5b(), selftest_close(),
-                       selftest_run_data(), selftest_percent(), selftest_network(), selftest_manual_tools(), selftest_imports()]
+                       selftest_rerun(), selftest_run_data(), selftest_percent(), selftest_network(),
+                       selftest_manual_tools(), selftest_imports()]
         print(f"\nNetwork guard: {len(blocked)} call(s) outside Supabase attempted (blocked): {blocked}")
         return all(results) and not blocked
     finally:
