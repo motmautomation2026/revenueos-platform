@@ -48,22 +48,30 @@ export default async function DiagnosticsPage(props: ExecutionPageProps) {
   const { view, runs, rows } = data;
 
   const taskIdOf = new Map(rows.tasks.map((t) => [t.id, t.task_id]));
+  const taskById = new Map(rows.tasks.map((t) => [t.id, t]));
 
-  // The latest tool call in each tool's bucket, and how healthy it looks.
+  // The latest tool call in each tool's bucket, its task's numbers, and how healthy it looks.
   const tools = TOOLS.map((tool) => {
     const calls = rows.toolCalls.filter((c) => tool.match(c.tool));
     const last = calls.length ? calls.reduce((a, b) => (b.id > a.id ? b : a)) : null;
     const status = last?.status ?? null;
+    const task = last ? (taskById.get(last.task_row_id) ?? null) : null;
+    const target = task?.target_number ?? null;
+    const achieved = task?.achieved_number ?? null;
+    // "done" but nothing found is a silent blocker: show it as a warning, not a green tick.
+    const emptyDone = !!last && status === "done" && (target ?? 0) > 0 && (achieved ?? 0) === 0;
     const tone: Tone = !last
       ? "idle"
       : last.error || (status != null && PROBLEM_STATUS.has(status))
         ? "problem"
-        : status === "done"
-          ? "ok"
-          : status != null && ATTENTION_STATUS.has(status)
-            ? "attention"
-            : "attention";
-    return { ...tool, last, status, tone };
+        : emptyDone
+          ? "attention"
+          : status === "done"
+            ? "ok"
+            : status != null && ATTENTION_STATUS.has(status)
+              ? "attention"
+              : "attention";
+    return { ...tool, last, status, tone, target, achieved, emptyDone };
   });
 
   const failedTasks = rows.tasks.filter((t) => t.status === "failed" || t.last_error);
@@ -122,6 +130,11 @@ export default async function DiagnosticsPage(props: ExecutionPageProps) {
                 <span className={cn("size-2.5 shrink-0 rounded-full", DOT[tool.tone])} aria-hidden />
                 <Icon className="size-4 shrink-0 text-muted-foreground" aria-hidden />
                 <span className="font-medium">{tool.label}</span>
+                {tool.target != null ? (
+                  <Pill className={cn(tool.emptyDone ? "bg-amber-500/15 text-amber-800" : "bg-muted text-muted-foreground")}>
+                    {tool.achieved ?? 0}/{tool.target}
+                  </Pill>
+                ) : null}
                 <span className="ml-auto text-xs text-muted-foreground tabular-nums">
                   {tool.last ? fmt(tool.last.finished_at ?? tool.last.started_at) : ""}
                 </span>
@@ -130,6 +143,7 @@ export default async function DiagnosticsPage(props: ExecutionPageProps) {
                     <>
                       last: {taskId ? `${taskId} ` : ""}
                       {tool.last.step} · {tool.last.status}
+                      {tool.emptyDone ? <span className="text-amber-800"> — finished but found nothing</span> : null}
                       {tool.last.error ? <span className="text-destructive"> — {tool.last.error}</span> : null}
                     </>
                   ) : (
