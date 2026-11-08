@@ -125,6 +125,14 @@ export async function placeTestCall(projectId: string, target: string): Promise<
         "This is a line test. Greet briefly, say it is a test call to check the calling line, confirm the person can hear you, then thank them and end. Keep it under 20 seconds.",
     },
     campaign: { name: "Line test" },
+    // A line test rings the person's OWN number, so it must dial immediately — it should not obey the
+    // business-hours calling window that real prospect campaigns use. Open it 24/7, every day.
+    schedule: {
+      calling_window_start: "00:00:00",
+      calling_window_end: "23:59:00",
+      calling_days: ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+      timezone: "Asia/Kolkata",
+    },
     contacts: [{ name: "Line test", phone: target }],
     auto_start: true,
   };
