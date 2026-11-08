@@ -612,7 +612,11 @@ def build_launch_request(rows: list[dict], *, understanding: dict, work_order: d
         "reference": reference,
         "user": {"email": os.getenv("EMAIL_TOOL_USER_EMAIL"), "workspace_name": workspace, "role": "ADMIN"},
         "recipients": recipients,
-        "campaign": {"name": content.campaign_name, "description": content.campaign_description},
+        # run_tag (the HHMMSS of the campaign stamp) makes the name unique per launch, like `reference`.
+        # The LLM's name is month-level ('<Customer> - <role> - <Month Year>'), so a same-month re-run
+        # could repeat it; the tool can reject a reused name with different content. Nothing on our side
+        # looks a campaign up by name (samples/approve use campaign_id + workspace_id), so this is cosmetic-safe.
+        "campaign": {"name": f"{content.campaign_name} · {run_tag}", "description": content.campaign_description},
         "emails": [email.model_dump() for email in content.emails],
         "schedule": {
             "timezone": "Asia/Kolkata",

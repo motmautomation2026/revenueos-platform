@@ -463,7 +463,11 @@ def build_request(contacts: list[dict], understanding: dict, work_order: dict) -
             "speech_pace": AGENT_SPEECH_PACE,
         },
         "campaign": {
-            "name": f"{company} - decision makers - {datetime.now():%B %Y}"
+            # Unique per launch, like `reference` above. The month-level name on its own repeats on a
+            # same-month re-run (the reference is fresh, but the name is not), and the voice platform can
+            # reject a reused name that carries different content. The time part of `stamp` (HHMMSS) makes
+            # every re-run its own campaign, so an edited re-run never collides on the name.
+            "name": f"{company} - decision makers - {datetime.now():%B %Y} · {stamp[-6:]}"
                     + (" (TEST)" if TEST_MODE else ""),
             "description": "First-touch AI calls to validated decision makers",
             "goal": CAMPAIGN_GOAL,
