@@ -1,6 +1,8 @@
 import "server-only";
+import nodemailer from "nodemailer";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { TABLES } from "@/lib/supabase/tables";
+import { loadSenderSmtp } from "@/lib/brain/sender-store";
 
 /**
  * Standalone tool testing — a separate pipeline from the Brain's run/orchestration. The platform calls
@@ -8,7 +10,8 @@ import { TABLES } from "@/lib/supabase/tables";
  * No run, no task, no approval. Credentials for the tools come from the platform env; the per-project
  * sender/line comes from revenueos_brain_accounts (read with the service-role key, owner-checked above).
  *
- * The call test is live. The email test needs the sender/SMTP assembly and is not wired yet.
+ * The call test uses QUICKHOWL_URL/KEY + the project's calling account. The email test sends directly
+ * over SMTP using the project's configured sender mailbox (loadSenderSmtp) — no email-tool API needed.
  */
 
 export type TestProject = {
@@ -153,12 +156,47 @@ export async function placeTestCall(projectId: string, target: string): Promise<
   }
 }
 
-/** Email test: not wired yet (needs the sender/SMTP assembly + the email API's immediate-send path). */
+const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/**
+ * Send ONE test email from the customer's own mailbox, over SMTP, using the sender details already
+ * configured for this project (host, security, login email and password — loadSenderSmtp). This checks
+ * the exact mailbox campaigns send from; no email-tool API is involved. The recipient is the person's
+ * own inbox, so nothing reaches a prospect.
+ */
 export async function sendTestEmail(projectId: string, target: string): Promise<TestResult> {
-  if (!projectId || !target) return { ok: false, detail: "Invalid request." };
-  return {
-    ok: false,
-    pending: true,
-    detail: "Email testing is coming next — it needs the sender/SMTP wiring and the email tool's immediate-send path.",
-  };
+  if (!EMAIL.test(target)) return { ok: false, detail: "Enter a valid email address to send the test to." };
+
+  const smtp = await loadSenderSmtp(projectId);
+  if (!smtp) {
+    return { ok: false, detail: "Add this customer's sender details first (mailbox host, security and password)." };
+  }
+
+  try {
+    const transport = nodemailer.createTransport({
+      host: smtp.host,
+      port: smtp.port,
+      secure: smtp.secure, // true on 465 (SSL/TLS), false on 587 (STARTTLS)
+      requireTLS: !smtp.secure,
+      auth: { user: smtp.email, pass: smtp.password },
+      connectionTimeout: 15000,
+      greetingTimeout: 10000,
+      socketTimeout: 20000,
+    });
+    await transport.sendMail({
+      from: `"${smtp.name}" <${smtp.email}>`,
+      to: target,
+      subject: "RevenueOS — sender test",
+      text:
+        "This is a test email from RevenueOS to check your sending setup.\n\n" +
+        "If you received it, your mailbox is configured correctly and campaigns can go out from this address.",
+    });
+    return {
+      ok: true,
+      detail: `Sent from ${smtp.email}. Check ${target} (and the spam folder) — if it arrived, your sender is set up correctly.`,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "unknown error";
+    return { ok: false, detail: `Could not send through ${smtp.host}: ${message}` };
+  }
 }

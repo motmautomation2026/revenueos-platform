@@ -6,6 +6,7 @@ import {
   SENDER_CATEGORY,
   SENDER_CODES,
   SENDER_ITEMS,
+  SENDER_SECURITY,
   buildSenderView,
   senderAnswers,
   type SenderInput,
@@ -72,6 +73,34 @@ export const loadSender = cache(async (projectId: string): Promise<SenderState> 
     return empty;
   }
 });
+
+export type SenderSmtp = {
+  name: string;
+  email: string;
+  host: string;
+  port: number;
+  secure: boolean;
+  password: string;
+};
+
+/**
+ * The customer's SMTP credentials for a direct sender test (name + mailbox host/port/security + the
+ * login email and password). Server-only; the password never leaves the server. Null when the sender
+ * details are incomplete. Reuses the very checklist answers the Brain hands the email tool — so the
+ * test checks the exact mailbox that campaigns will send from.
+ */
+export async function loadSenderSmtp(projectId: string): Promise<SenderSmtp | null> {
+  const checklist = await activeChecklist(projectId);
+  if (!checklist) return null;
+  const get = (code: string) => (checklist.items.find((item) => item.code === code)?.answer ?? "").trim();
+  const email = get("SENDER-EMAIL");
+  const host = get("SENDER-SMTP-HOST");
+  const password = get("SENDER-SMTP-PASSWORD");
+  const security = get("SENDER-SMTP-SECURITY");
+  if (!email || !host || !password || !(security in SENDER_SECURITY)) return null;
+  const { mode, port } = SENDER_SECURITY[security as keyof typeof SENDER_SECURITY];
+  return { name: get("SENDER-NAME") || "RevenueOS", email, host, port, secure: mode === "IMPLICIT_TLS", password };
+}
 
 /**
  * When the sender's IMAP host was given (null: never). The Brain hands the mailbox to the email tool

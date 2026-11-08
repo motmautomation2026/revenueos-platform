@@ -10,7 +10,8 @@ import { Input } from "@/components/ui/input";
 import { FormField } from "@/components/form-field";
 import { callerSchema, type CallerInput, type CallerView } from "@/lib/brain/caller";
 import { cn } from "@/lib/utils";
-import { saveCallerAccount } from "@/app/(app)/projects/[id]/execution/actions";
+import { saveCallerAccount, testCallerLine } from "@/app/(app)/projects/[id]/execution/actions";
+import { ToolTest } from "@/components/brain/tool-test";
 
 const CHOICES = [
   {
@@ -103,6 +104,18 @@ export function CallerCard({ projectId, view }: { projectId: string; view: Calle
           </Button>
         )}
       </div>
+
+      {view.ready && !editing && (
+        <ToolTest
+          title="Test this calling line"
+          hint="Make one real call to your own number to check the line and voice — no run, no approval."
+          inputLabel="Your phone number"
+          placeholder="+9198XXXXXXXX"
+          buttonLabel="Make a test call"
+          inputType="tel"
+          run={(target) => testCallerLine({ projectId, target })}
+        />
+      )}
 
       {editing && (
         <div className="grid gap-4 border-t pt-4">

@@ -9,6 +9,7 @@ import { callerSchema } from "@/lib/brain/caller";
 import { saveCaller } from "@/lib/brain/caller-store";
 import { approvePaidStep } from "@/lib/brain/paid-steps";
 import { saveSender } from "@/lib/brain/sender-store";
+import { placeTestCall, sendTestEmail, type TestResult } from "@/lib/tools/test-tools";
 import { brainCustomerFor } from "@/lib/brain/read";
 import { contactColumns, contactSchema, stagingColumns, stagingSchema } from "@/lib/brain/staging";
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -236,4 +237,23 @@ export async function saveCallerAccount(input: unknown): Promise<RequestResult> 
   if (!parsed.success) return { ok: false, error: parsed.error.issues[0]?.message ?? "Check the form and try again." };
   const { user, project } = await requireProject(parsed.data.projectId);
   return finish(project.id, await saveCaller(project.id, user.id, parsed.data.caller));
+}
+
+/**
+ * Make one real test call to the signed-in person's own number, using THIS project's calling line.
+ * No run, no task, no approval — a direct line check so they can set up and verify in one place.
+ */
+export async function testCallerLine(input: unknown): Promise<TestResult> {
+  const parsed = z.object({ projectId: z.uuid(), target: z.string() }).safeParse(input);
+  if (!parsed.success) return { ok: false, detail: "Enter your number in full international form, e.g. +9198XXXXXXXX." };
+  await requireProject(parsed.data.projectId);
+  return placeTestCall(parsed.data.projectId, parsed.data.target.trim());
+}
+
+/** Send one test email from THIS project's sender account. (Email send path is not wired yet.) */
+export async function testSenderEmail(input: unknown): Promise<TestResult> {
+  const parsed = z.object({ projectId: z.uuid(), target: z.string() }).safeParse(input);
+  if (!parsed.success) return { ok: false, detail: "Enter a valid email address." };
+  await requireProject(parsed.data.projectId);
+  return sendTestEmail(parsed.data.projectId, parsed.data.target.trim());
 }

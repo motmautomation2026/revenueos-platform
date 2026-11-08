@@ -17,7 +17,8 @@ import {
   type SenderInput,
   type SenderView,
 } from "@/lib/checklist-sender";
-import { saveSenderAccount } from "@/app/(app)/projects/[id]/execution/actions";
+import { saveSenderAccount, testSenderEmail } from "@/app/(app)/projects/[id]/execution/actions";
+import { ToolTest } from "@/components/brain/tool-test";
 
 /**
  * The customer's own sending account: who emails come from. Filled in once, before the first
@@ -93,6 +94,18 @@ export function SenderCard({ projectId, view }: { projectId: string; view: Sende
           The account is created in the email tool with this customer&apos;s first campaign. If the mailbox cannot be
           connected, that campaign stops and says why; nothing is sent.
         </p>
+      )}
+
+      {ready && !view.existingAccount && !editing && (
+        <ToolTest
+          title="Test the sender"
+          hint="Send a test email to your own inbox, straight from this mailbox, to check it arrives."
+          inputLabel="Your email address"
+          placeholder="you@example.com"
+          buttonLabel="Send a test email"
+          inputType="email"
+          run={(target) => testSenderEmail({ projectId, target })}
+        />
       )}
 
       {editing && (
