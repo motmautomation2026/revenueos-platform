@@ -513,16 +513,26 @@ export async function loadEmailStats(campaignIds: string[]): Promise<Map<string,
     for (const row of data as Record<string, unknown>[]) {
       const int = (value: unknown) => (typeof value === "number" && Number.isFinite(value) ? value : 0);
       const byStatus = (row.messages_by_status ?? {}) as Record<string, unknown>;
-      const failureReasons = countsOf(row.failure_reasons);
+      // A follow-up the email tool did NOT send because the recipient replied is a reply, not a failure.
+      // The stats function reports it under failure_reasons, so pull it out: count it as a reply, and keep
+      // it out of "failed" and "still to send" — otherwise "Replies received" (0) disagreed with the
+      // "Recipient replied" note, and a stopped-on-reply follow-up looked like a send failure.
+      const allFailureReasons = countsOf(row.failure_reasons);
+      const repliedFromFailures = allFailureReasons
+        .filter((r) => /replied/i.test(r.label))
+        .reduce((sum, r) => sum + r.count, 0);
+      const failureReasons = allFailureReasons.filter((r) => !/replied/i.test(r.label));
       const sent = int(row.accepted);
-      const failed = Math.max(int(byStatus.FAILED), failureReasons.reduce((sum, r) => sum + r.count, 0));
+      const failedRaw = Math.max(int(byStatus.FAILED), allFailureReasons.reduce((sum, r) => sum + r.count, 0));
+      const failed = Math.max(0, failedRaw - repliedFromFailures);
+      const replies = Math.max(int(row.replies), repliedFromFailures);
       result.set(text(row.campaign_id), {
         campaignId: text(row.campaign_id),
         status: label(text(row.campaign_status).toLowerCase()),
         recipients: int(row.recipients),
         messages: int(row.messages),
         sent,
-        waiting: Math.max(0, int(row.messages) - sent - failed),
+        waiting: Math.max(0, int(row.messages) - sent - failed - repliedFromFailures),
         failed,
         firstSentAt: text(row.first_accepted_at) || null,
         lastSentAt: text(row.last_accepted_at) || null,
@@ -530,7 +540,7 @@ export async function loadEmailStats(campaignIds: string[]): Promise<Map<string,
         failureReasons,
         events: countsOf(row.events_by_kind),
         outcomes: countsOf(row.outcomes_by_kind),
-        replies: int(row.replies),
+        replies,
       });
     }
   } catch {
