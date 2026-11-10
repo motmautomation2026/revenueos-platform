@@ -24,6 +24,7 @@ import {
 import type { PlanDocument } from "@/lib/plan/document";
 import { cn } from "@/lib/utils";
 import { PlanParts } from "./plan-document";
+import { PlanEditDialog } from "./plan-edit-dialog";
 
 export function PlanReview({
   projectId,
@@ -130,6 +131,7 @@ export function PlanReview({
               {showInternal ? <EyeOff aria-hidden /> : <Eye aria-hidden />}
               {showInternal ? "Hide internal notes" : "Show internal notes"}
             </Button>
+            <PlanEditDialog projectId={projectId} />
             <Button variant="ghost" disabled={starting} onClick={() => setConfirmRerun(true)}>
               {starting ? <Loader2 className="animate-spin" aria-hidden /> : <RefreshCw aria-hidden />}
               Re-run plan

@@ -203,6 +203,101 @@ export async function applyPlanAction(
 }
 
 // ---------------------------------------------------------------------------
+// AI-assisted edit: change one section of a ready plan from a plain-language
+// request, saved as a new version (runs synchronously as the signed-in owner).
+// ---------------------------------------------------------------------------
+
+export const planEditSchema = z.object({
+  section: z.enum(["diagnosis", "strategy", "execution"]),
+  instruction: z.string().trim().min(3, "Describe the change you want.").max(2000),
+});
+export type PlanEdit = z.infer<typeof planEditSchema>;
+
+function editMessage(section: PlanStep, current: Record<string, unknown>, instruction: string): string {
+  return [
+    `You previously wrote the ${section.toUpperCase()} section of this customer's GTM plan, given below as JSON.`,
+    `Apply the following change requested by the customer — and nothing else:`,
+    ``,
+    instruction.trim(),
+    ``,
+    `Rules:`,
+    `- Return the COMPLETE ${section} JSON with the change applied; keep every other field exactly as it is.`,
+    `- Do not invent numbers or facts beyond what the change states or the section already contains.`,
+    `- Keep the same structure; the output must still match the JSON Schema.`,
+    ``,
+    `Current ${section} JSON:`,
+    JSON.stringify(current),
+  ].join("\n");
+}
+
+/**
+ * Applies a plain-language change to one section of the project's latest READY plan and saves the
+ * result as a new ready version (the old version stays in the version list). The edit is produced by
+ * the same schema-validated agent that writes that section, so it cannot break how the Brain parses
+ * the plan into tasks. Owner-only; runs synchronously (one LLM call). The new version is what makes the
+ * dashboard's "Re-run execution with the updated plan" card appear.
+ */
+export async function editPlanSection(
+  supabase: SupabaseClient,
+  project: Project,
+  userId: string,
+  input: PlanEdit
+): Promise<ActionResult> {
+  if (project.owner_id !== userId) return refuse("Only the project owner can edit the plan.", 403);
+
+  const latest = await latestPlan(supabase, project.id);
+  if (!latest) return refuse("There is no plan to edit yet.", 404);
+  if (latest.status !== "ready") return refuse("Wait for the current plan to finish before editing it.");
+  const current = latest[input.section];
+  if (!current) return refuse(`This plan has no ${input.section} section to edit.`);
+
+  const admin = createAdminClient();
+  let revised: Record<string, unknown>;
+  try {
+    const { data } = await runAgent<Record<string, unknown>>({
+      agent: input.section,
+      projectId: project.id,
+      planId: latest.id,
+      userMessage: editMessage(input.section, current, input.instruction),
+      supabase: admin,
+    });
+    revised = data;
+  } catch (error) {
+    return refuse(error instanceof AgentError ? error.message : "The AI could not apply the change. Try again.", 502);
+  }
+
+  const sections = {
+    diagnosis: input.section === "diagnosis" ? revised : latest.diagnosis,
+    strategy: input.section === "strategy" ? revised : latest.strategy,
+    execution: input.section === "execution" ? revised : latest.execution,
+  };
+  const finishedAt = new Date().toISOString();
+  const html = renderPlanHtml(
+    buildPlanDocument({ customerName: project.customer_name, ...sections }),
+    planFooter({ version: latest.version + 1, finished_at: finishedAt }, OPENAI_MODEL)
+  );
+
+  const { data: created, error } = await admin
+    .from(TABLES.plans)
+    .insert({
+      project_id: project.id,
+      version: latest.version + 1,
+      status: "ready",
+      diagnosis: sections.diagnosis,
+      strategy: sections.strategy,
+      execution: sections.execution,
+      override_reason: latest.override_reason,
+      started_at: finishedAt,
+      finished_at: finishedAt,
+      html,
+    })
+    .select("id")
+    .single<{ id: string }>();
+  if (error || !created) return refuse("Could not save the edited plan.", 500);
+  return { ok: true, planId: created.id };
+}
+
+// ---------------------------------------------------------------------------
 // The pipeline (runs in the background with the service-role client)
 // ---------------------------------------------------------------------------
 
