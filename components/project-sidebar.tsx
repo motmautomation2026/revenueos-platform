@@ -189,7 +189,7 @@ export function ProjectSidebar({
     <nav
       aria-label="Project sections"
       className={cn(
-        "flex gap-1 overflow-x-auto rounded-xl border bg-background p-2 lg:sticky lg:top-18 lg:grid lg:gap-0 lg:overflow-visible lg:p-2 lg:transition-[width] print:hidden",
+        "flex gap-1 overflow-x-auto rounded-xl border bg-background p-2 lg:sticky lg:top-18 lg:grid lg:max-h-[calc(100dvh-5.5rem)] lg:gap-0 lg:overflow-y-auto lg:p-2 lg:transition-[width] print:hidden",
         collapsed ? "lg:w-[3.75rem]" : "lg:w-[15.5rem] xl:w-[17rem]"
       )}
     >
