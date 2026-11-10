@@ -83,6 +83,31 @@ export async function createRequest(input: {
 }
 
 /**
+ * Whether the project's GTM plan has been re-finalised since the given run was planned, so the running
+ * execution is based on an older plan version and re-running with the updated plan is meaningful. A run
+ * is planned from the latest `ready` plan, so that plan's finished_at is normally just before the run's
+ * created_at; editing or regenerating the plan produces a newer ready version whose finished_at is later.
+ * Read-only; any failure is treated as "no change" so the re-run card simply stays hidden.
+ */
+export async function planChangedSince(projectId: string, runStartedAt: string | null): Promise<boolean> {
+  if (!runStartedAt || !Number.isFinite(Date.parse(runStartedAt))) return false;
+  try {
+    const { data } = await createAdminClient()
+      .from("revenueos_plans")
+      .select("finished_at")
+      .eq("project_id", projectId)
+      .eq("status", "ready")
+      .order("version", { ascending: false })
+      .limit(1)
+      .maybeSingle<{ finished_at: string | null }>();
+    const finishedAt = data?.finished_at;
+    return !!finishedAt && Number.isFinite(Date.parse(finishedAt)) && Date.parse(finishedAt) > Date.parse(runStartedAt);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Level 2 re-run: re-plan execution from the current (edited) GTM plan. Stops the active run — cancels
  * its open decisions, stops its unfinished tasks, marks the run stopped — then starts a fresh execution
  * request, which re-plans the month and loads a new run from the updated plan. Destructive: the current

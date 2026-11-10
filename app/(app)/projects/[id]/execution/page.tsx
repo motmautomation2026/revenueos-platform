@@ -24,7 +24,7 @@ import { loadSetupGaps } from "@/lib/brain/setup";
 import { readStaging } from "@/lib/brain/staging";
 import { loadPaidStep } from "@/lib/brain/paid-steps";
 import { loadCallRecords } from "@/lib/brain/read";
-import { loadRequest } from "@/lib/brain/request-store";
+import { loadRequest, planChangedSince } from "@/lib/brain/request-store";
 import {
   buildCallsReport,
   buildFunnel,
@@ -84,6 +84,10 @@ export default async function ExecutionPage(props: ExecutionPageProps) {
   // A new month can be planned only when the latest run is over.
   const latestOver =
     runs[0]?.status === "done" || runs[0]?.status === "stopped";
+
+  // The "re-run with the updated plan" card is only meaningful when the GTM plan was re-finalised after
+  // this run was planned; otherwise it is just noise. Owner-only, and only when the plan is genuinely newer.
+  const canReplan = project.owner_id === user.id && (await planChangedSince(project.id, view.startedAt));
 
   // The Brain never starts a task that buys data on its own; it waits here for a person.
   const paidStep = latestOver ? null : await loadPaidStep(project.id);
@@ -346,7 +350,7 @@ export default async function ExecutionPage(props: ExecutionPageProps) {
         </section>
       )}
 
-      {project.owner_id === user.id && (
+      {canReplan && (
         <ReplanButton projectId={project.id} replan={replanExecutionWithPlan} />
       )}
 
