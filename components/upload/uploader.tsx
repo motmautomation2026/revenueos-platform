@@ -277,6 +277,7 @@ export function Uploader({
       }
     }
     setItems((current) => current.filter((it) => it.key !== item.key));
+    toast.success(`Deleted ${item.fileName}.`);
   };
 
   const retry = (item: Item) => {
