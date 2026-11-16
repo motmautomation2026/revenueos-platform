@@ -84,10 +84,10 @@ export const SENDER_ITEMS: readonly {
     key: "imapHost",
     code: "SENDER-IMAP-HOST",
     question: "What is the IMAP host of that mailbox, so replies can be read?",
-    label: "IMAP host (optional)",
-    hint: "Needed to count replies. Leave empty to send without reading replies.",
+    label: "IMAP host",
+    hint: "Needed to read replies, e.g. imap.gmail.com.",
     options: [],
-    required: false,
+    required: true,
   },
   {
     key: "style",
@@ -134,20 +134,36 @@ export function withFixedSenderQuestions<T extends Question>(
 
 const HOST = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/i;
 const line = (max: number) => z.string().trim().max(max, `Keep it under ${max} characters.`);
-const host = line(253).refine((value) => !value || HOST.test(value), "Enter a host name such as smtp.gmail.com.");
-const email = line(320).refine((value) => !value || z.email().safeParse(value).success, "Enter a valid email.");
+const reqLine = (max: number, message: string) => line(max).min(1, message);
+const requiredHost = (message: string) =>
+  reqLine(253, message).refine((value) => HOST.test(value), "Enter a host name such as smtp.gmail.com.");
+const requiredEmail = (message: string) =>
+  reqLine(320, message).refine((value) => z.email().safeParse(value).success, "Enter a valid email.");
 
-/** The Sender account form. Everything may be left empty; an empty password keeps the saved one. */
-export const senderSchema = z.object({
-  loginEmail: email,
-  name: line(200),
-  email,
-  host,
-  security: z.union([z.enum(SENDER_SECURITY_OPTIONS), z.literal("")]),
-  password: z.string().max(500, "Keep it under 500 characters."),
-  imapHost: host,
-  style: z.union([z.enum(SENDER_STYLE_OPTIONS), z.literal("")]),
-});
+/**
+ * The Sender account form. All the mailbox details (customer email, sender name, sender email, SMTP
+ * host, SMTP security and IMAP host) are required. The password may be left empty ONLY when one is
+ * already saved (it then keeps the saved one) — pass passwordRequired for a first setup so a blank
+ * password is refused.
+ */
+export function makeSenderSchema(passwordRequired: boolean) {
+  return z.object({
+    loginEmail: requiredEmail("Enter the customer's email."),
+    name: reqLine(200, "Enter a sender name."),
+    email: requiredEmail("Enter the sender email."),
+    host: requiredHost("Enter the SMTP host."),
+    // Required: an empty selection ("Choose…") is refused.
+    security: z.enum(SENDER_SECURITY_OPTIONS, { error: "Choose the SMTP security." }),
+    password: passwordRequired
+      ? reqLine(500, "Enter the SMTP password.")
+      : z.string().max(500, "Keep it under 500 characters."),
+    imapHost: requiredHost("Enter the IMAP host."),
+    style: z.union([z.enum(SENDER_STYLE_OPTIONS), z.literal("")]),
+  });
+}
+
+/** Base schema (password optional — an empty one keeps the saved password on update). */
+export const senderSchema = makeSenderSchema(false);
 export type SenderInput = z.infer<typeof senderSchema>;
 
 export type SenderView = {

@@ -7,6 +7,7 @@ import {
   SENDER_ITEMS,
   SENDER_SECURITY,
   buildSenderView,
+  makeSenderSchema,
   senderAnswers,
   senderSchema,
   withFixedSenderQuestions,
@@ -56,7 +57,7 @@ test("the password question is treated as a secret everywhere", () => {
 
 test("the page is told what is missing, and never the password", () => {
   const empty = buildSenderView({}, null);
-  assert.deepEqual(empty.missing, ["Customer email", "Sender name", "Sender email", "SMTP host", "SMTP security", "SMTP password"]);
+  assert.deepEqual(empty.missing, ["Customer email", "Sender name", "Sender email", "SMTP host", "SMTP security", "SMTP password", "IMAP host"]);
 
   const answers = {
     "SENDER-NAME": "Durel Sales",
@@ -64,9 +65,10 @@ test("the page is told what is missing, and never the password", () => {
     "SENDER-SMTP-HOST": "smtp.durel.com",
     "SENDER-SMTP-SECURITY": "STARTTLS (port 587)",
     "SENDER-SMTP-PASSWORD": "mail-secret",
+    "SENDER-IMAP-HOST": "imap.durel.com",
   };
   const ready = buildSenderView(answers, "owner@durel.com");
-  assert.deepEqual(ready.missing, [], "the IMAP host is optional");
+  assert.deepEqual(ready.missing, [], "all required sender details are present");
   assert.equal(ready.values.password, "");
   assert.equal(ready.passwordSaved, true);
   assert.ok(!JSON.stringify(ready).includes("mail-secret"));
@@ -78,23 +80,45 @@ test("the page is told what is missing, and never the password", () => {
 });
 
 test("saving keeps the stored password when the field is left empty", () => {
-  const input = senderSchema.parse({ loginEmail: "owner@durel.com", name: " Durel Sales ", email: "sales@durel.com", host: "smtp.durel.com", security: "SSL/TLS (port 465)", password: "", imapHost: "", style: "Same email for everyone" });
+  const input = senderSchema.parse({ loginEmail: "owner@durel.com", name: " Durel Sales ", email: "sales@durel.com", host: "smtp.durel.com", security: "SSL/TLS (port 465)", password: "", imapHost: "imap.durel.com", style: "Same email for everyone" });
   const answers = senderAnswers(input);
   assert.ok(!("SENDER-SMTP-PASSWORD" in answers));
   assert.equal(answers["SENDER-NAME"], "Durel Sales");
-  assert.equal(answers["SENDER-IMAP-HOST"], null);
+  assert.equal(answers["SENDER-IMAP-HOST"], "imap.durel.com");
   assert.equal(answers["SENDER-STYLE"], "Same email for everyone");
   assert.equal(senderAnswers({ ...input, password: "new-secret" })["SENDER-SMTP-PASSWORD"], "new-secret");
 });
 
-test("bad hosts, emails and security choices are refused", () => {
-  const base = { loginEmail: "", name: "", email: "", host: "", security: "", password: "", imapHost: "", style: "" };
-  assert.ok(senderSchema.safeParse(base).success, "everything may be left empty");
-  assert.ok(!senderSchema.safeParse({ ...base, host: "http://smtp.x.com/path" }).success);
-  assert.ok(!senderSchema.safeParse({ ...base, host: "127.0.0.1" }).success);
-  assert.ok(!senderSchema.safeParse({ ...base, email: "not-an-email" }).success);
-  assert.ok(!senderSchema.safeParse({ ...base, security: "None" }).success);
-  assert.ok(!senderSchema.safeParse({ ...base, style: "Fancy" }).success);
+test("required fields must be filled, and bad hosts, emails and security choices are refused", () => {
+  // A complete form (password left empty, to keep a saved one) is accepted by the base schema.
+  const valid = {
+    loginEmail: "owner@durel.com",
+    name: "Durel Sales",
+    email: "sales@durel.com",
+    host: "smtp.durel.com",
+    security: "SSL/TLS (port 465)",
+    password: "",
+    imapHost: "imap.durel.com",
+    style: "Same email for everyone",
+  };
+  assert.ok(senderSchema.safeParse(valid).success, "a complete form is accepted (empty password keeps the saved one)");
+
+  // The required fields may not be left empty.
+  for (const field of ["loginEmail", "name", "email", "host", "security", "imapHost"] as const) {
+    assert.ok(!senderSchema.safeParse({ ...valid, [field]: "" }).success, `${field} is required`);
+  }
+
+  // Bad formats and unknown choices are refused.
+  assert.ok(!senderSchema.safeParse({ ...valid, host: "http://smtp.x.com/path" }).success);
+  assert.ok(!senderSchema.safeParse({ ...valid, host: "127.0.0.1" }).success);
+  assert.ok(!senderSchema.safeParse({ ...valid, email: "not-an-email" }).success);
+  assert.ok(!senderSchema.safeParse({ ...valid, security: "None" }).success);
+  assert.ok(!senderSchema.safeParse({ ...valid, style: "Fancy" }).success);
+
+  // On first setup (no saved password) the password is required.
+  assert.ok(!makeSenderSchema(true).safeParse(valid).success, "password required on first setup");
+  assert.ok(makeSenderSchema(true).safeParse({ ...valid, password: "app-password" }).success);
+
   assert.equal(buildSenderView({}, null).values.style, "Personalised for each recipient", "personalised unless chosen otherwise");
 });
 

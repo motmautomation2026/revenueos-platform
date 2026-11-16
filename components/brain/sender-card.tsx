@@ -13,7 +13,7 @@ import {
   SENDER_ITEMS,
   SENDER_SECURITY_OPTIONS,
   SENDER_STYLE_OPTIONS,
-  senderSchema,
+  makeSenderSchema,
   type SenderInput,
   type SenderView,
 } from "@/lib/checklist-sender";
@@ -34,7 +34,8 @@ export function SenderCard({ projectId, view }: { projectId: string; view: Sende
     reset,
     formState: { errors, isSubmitting, isDirty },
   } = useForm<SenderInput>({
-    resolver: zodResolver(senderSchema),
+    // The password is required only on first setup; once saved, an empty field keeps it.
+    resolver: zodResolver(makeSenderSchema(!view.passwordSaved)),
     defaultValues: {
       loginEmail: view.loginEmail,
       ...view.values,

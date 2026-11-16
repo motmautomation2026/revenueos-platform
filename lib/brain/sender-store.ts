@@ -147,6 +147,13 @@ export async function saveSender(
 
   const answers = senderAnswers(input);
   const byCode = new Map(checklist.items.map((item) => [item.code, item]));
+
+  // A blank password is allowed only to KEEP one already saved; on first setup it is required.
+  const passwordSaved = !!(byCode.get("SENDER-SMTP-PASSWORD")?.answer ?? "").trim();
+  if (!passwordSaved && !input.password.trim()) {
+    return { ok: false, error: "Enter the SMTP password." };
+  }
+
   const now = new Date().toISOString();
   let position = Math.max(0, ...checklist.items.map((item) => item.position));
 
