@@ -394,12 +394,7 @@
           },
           "source": {
             "type": "string",
-            "enum": [
-              "customer",
-              "handover",
-              "proposal",
-              "assumption"
-            ]
+            "description": "Where the figure comes from. Prefer: customer, handover, proposal, or assumption. A descriptive label (e.g. checklist) is accepted and must not block the plan."
           },
           "confidence": {
             "type": "string",
