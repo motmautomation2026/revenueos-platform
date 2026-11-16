@@ -103,7 +103,17 @@ export function PlanReview({
               <Download aria-hidden />
               Download HTML
             </a>
-            <Button variant="outline" size="lg" onClick={() => window.print()}>
+            <Button
+              variant="outline"
+              size="lg"
+              onClick={() =>
+                window.open(
+                  `/api/plans/${planId}/html?print=1${showInternal ? "&internal=1" : ""}`,
+                  "_blank",
+                  "noopener,noreferrer"
+                )
+              }
+            >
               <Printer aria-hidden />
               Download PDF
             </Button>
