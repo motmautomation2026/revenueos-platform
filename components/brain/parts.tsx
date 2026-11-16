@@ -55,7 +55,7 @@ export function ExecutionEmpty({ data }: { data: Exclude<ExecutionData, { state:
     other_project:
       "The Brain is currently set up for a different project. Execution for this customer has not been started.",
     no_runs:
-      "The plan is ready, but the Brain has not planned a month for this customer yet. Starting it from here needs the database update in supabase/migrations/0003_project_brain_key.sql.",
+      "The plan is ready, but the Brain has not planned a month for this customer yet. Go to the Dashboard and click “Start execution” to request one.",
     error: data.state === "error" ? data.message : "",
   }[data.state];
   return (
