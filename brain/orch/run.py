@@ -24,7 +24,7 @@ from orch.common import find_run, month_of
 # ================= RUN (part 1: human tasks; tool runners plug in later) =================
 
 # People do these tasks: the orchestrator opens a decision and the person answers it.
-HUMAN_AGENTS = {"CAM", "Content & Training", "Human Tele Calling", "LinkedIn Agent", "Sales Engineer"}
+HUMAN_AGENTS = {"CAM", "Content & Training", "Human Tele Calling", "LinkedIn Agent", "Sales Engineer", "Human Field"}
 # Gate tasks can never be skipped: only done or stop (code rule, enforced by the decision kind).
 GATE_TYPES = {"data_approval", "content", "client_training", "readiness"}
 HUMAN_KINDS = {"human_task", "human_gate_task"}
