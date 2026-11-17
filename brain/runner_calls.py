@@ -48,7 +48,7 @@ import time
 import uuid
 
 from quickicp import TEST_MODE, ToolError, save_json
-from runner_kit import RunnerContext, RunnerResult, contacts_people_ids
+from runner_kit import RunnerContext, RunnerResult, contacts_split
 from state_store import owned_rows_output, renew_run_lock
 from supabase_store import phone_type
 
@@ -259,7 +259,11 @@ def run_calls(ctx: RunnerContext, tools) -> RunnerResult:
 
     # 1. contacts: MOBILE numbers only (FREE, done once)
     def pick():
-        people = tools.people(customer, contacts_people_ids(ctx))
+        kept, crm_skipped = contacts_split(ctx)      # drop leads a human is already working in the CRM
+        if not kept and crm_skipped:
+            raise ToolError(f"STOPPED: all {len(crm_skipped)} of T4's contacts are already being worked in "
+                            "the CRM; nothing to call.")
+        people = tools.people(customer, kept)
         mobile = [p for p in people if phone_type(p.get("phone_number")) == "mobile"]
         skipped = [{"person_id": p["id"], "name": p.get("full_name"), "phone_type": phone_type(p.get("phone_number"))}
                    for p in people if phone_type(p.get("phone_number")) != "mobile"]
@@ -268,7 +272,8 @@ def run_calls(ctx: RunnerContext, tools) -> RunnerResult:
                             f"({len(skipped)} landline / unknown).")
         if TEST_MODE:
             mobile = mobile[:tools.test_cap()]           # each one gets one of OUR test numbers
-        return {"contacts": tools.contacts(mobile), "person_ids": [p["id"] for p in mobile], "skipped": skipped}
+        return {"contacts": tools.contacts(mobile), "person_ids": [p["id"] for p in mobile],
+                "skipped": skipped, "crm_skipped": crm_skipped}
     picked = ctx.free_call("contacts", pick, tool="supabase")
 
     # 2. the request (profile by the LLM), made ONCE
@@ -293,10 +298,11 @@ def run_calls(ctx: RunnerContext, tools) -> RunnerResult:
         lines = [f"Contacts:               {len(request['contacts'])} (mobile only"
                  + (", TEST MODE: our TEST_CALL_NUMBERS only" if TEST_MODE else "") + ")",
                  f"Skipped:                {len(picked['skipped'])} landline / unknown number(s)",
+                 f"Left out (CRM):         {len(picked['crm_skipped'])} already being worked in the CRM",
                  "Would do:               store the campaign (nobody called), then ask you before dialling"]
         lines += [f"  {c.get('name')} | {c.get('company')} | phone {c.get('phone')}" for c in request["contacts"]]
         return RunnerResult("dry", output={"contacts": len(request["contacts"]), "skipped": len(picked["skipped"]),
-                                           "lines": lines})
+                                           "crm_skipped": len(picked["crm_skipped"]), "lines": lines})
 
     # 3. store (PAID, auto_start false; the tool de-duplicates by our reference)
     ctx.resendable_call("store", f"{reference}:store", store,
@@ -375,7 +381,8 @@ def run_calls(ctx: RunnerContext, tools) -> RunnerResult:
                                rejected_do_not_call=sum(1 for r in rejected if is_do_not_call(r)),
                                dnd_confirmation=dnd_confirmation,
                                target=len(request["contacts"]), reference=reference, outcomes=outcomes,
-                               outcome_counts=counts, skipped_landlines=picked["skipped"], test_mode=TEST_MODE)
+                               outcome_counts=counts, skipped_landlines=picked["skipped"],
+                               skipped_crm_handled=picked["crm_skipped"], test_mode=TEST_MODE)
     note = (f"campaign {reference} finished: {completed} of {len(request['contacts'])} call(s) completed, "
             f"outcomes {counts}" + (" (TEST MODE: our test numbers)" if TEST_MODE else ""))
     return RunnerResult.done(completed, len(request["contacts"]), output, note)

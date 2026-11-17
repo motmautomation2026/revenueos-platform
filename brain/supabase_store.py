@@ -444,6 +444,9 @@ def crm_handled_quickicp_ids(customer: str) -> set[int]:
     from their target list, so the brain never re-contacts a lead someone is already working.
     Empty set on ANY error (fail-open: a feed problem never changes a run).
     """
+    # Selftest customers have no CRM side; skip the read so the offline selftest stays offline.
+    if not customer or customer.startswith(SELFTEST_PREFIX):
+        return set()
     handled: set[int] = set()
     try:
         contacts = (db.table("crm_feed_contacts")

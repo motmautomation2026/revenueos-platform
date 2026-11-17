@@ -60,7 +60,7 @@ import uuid
 
 import email_tool
 from quickicp import TEST_MODE, ToolError
-from runner_kit import RunnerContext, RunnerResult, contacts_people_ids
+from runner_kit import RunnerContext, RunnerResult, contacts_split
 from state_store import owned_rows_output
 
 FEEDBACK_ROUNDS = 3              # feedback rounds on the samples; after that only yes or no
@@ -326,7 +326,11 @@ def run_email(ctx: RunnerContext, tools) -> RunnerResult:
 
     # 1. the request: recipients + content + reference, made ONCE (FREE, then reused)
     def build():
-        rows = tools.people(customer, contacts_people_ids(ctx))
+        kept, crm_skipped = contacts_split(ctx)      # drop leads a human is already working in the CRM
+        if not kept and crm_skipped:
+            raise ToolError(f"STOPPED: all {len(crm_skipped)} of T4's contacts are already being worked in "
+                            "the CRM; nothing to email.")
+        rows = tools.people(customer, kept)
         if not rows:
             raise ToolError(f"STOPPED: none of T4's people belong to customer '{customer}'.")
         return tools.build_request(rows)

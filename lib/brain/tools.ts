@@ -523,6 +523,8 @@ export type CallCampaign = {
   skippedLandlines: { name: string; phoneType: string }[];
   rejectedDoNotCall: number | null;
   rejectedByTool: number | null;
+  /** Left out because a human is already working them in the CRM (crm_feed_* feedback). */
+  skippedCrmHandled: number;
   dnd: string;
   approval: Approval | null;
   /** How many contacts the person was asked to approve calling. */
@@ -574,6 +576,7 @@ export function buildCallsReport({ tasks, decisions, toolCalls }: RunRows): Call
           .map((s) => ({ name: str(s.name), phoneType: str(s.phone_type) })),
         rejectedDoNotCall: num(r.rejected_do_not_call),
         rejectedByTool: num(r.rejected_by_quickhowl),
+        skippedCrmHandled: list(r.skipped_crm_handled).length,
         dnd: str(r.dnd_confirmation),
         approval: approved?.approval ?? null,
         contactsApproved: list(obj(approved?.row.question).contacts).length,
@@ -713,11 +716,14 @@ export function buildCallTiles(
   const landlines = campaign.skippedLandlines.length;
   const doNotCall = campaign.rejectedDoNotCall ?? 0;
   const byTool = campaign.rejectedByTool ?? 0;
-  const notCalled = landlines + doNotCall + byTool;
+  const crmHandled = campaign.skippedCrmHandled;
+  const notCalled = landlines + doNotCall + byTool + crmHandled;
   const reasons: string[] = [];
   if (landlines) reasons.push(`${plain.format(landlines)} ${landlines === 1 ? "has" : "have"} only a landline.`);
   if (doNotCall) reasons.push(`${plain.format(doNotCall)} ${doNotCall === 1 ? "is" : "are"} on the do-not-call list.`);
   if (byTool) reasons.push(`${plain.format(byTool)} ${byTool === 1 ? "was" : "were"} rejected by Quickhowl.`);
+  if (crmHandled)
+    reasons.push(`${plain.format(crmHandled)} ${crmHandled === 1 ? "is" : "are"} already being worked in the CRM.`);
   tiles.push({
     key: "notCalled",
     label: "Left out before calling",
