@@ -196,14 +196,30 @@ class RunnerContext:
 
 
 def contacts_people_ids(ctx: RunnerContext) -> list[int]:
-    """The person ids recorded by this run's done QuickICP contacts task (T4). Stops if there are none."""
+    """
+    The person ids recorded by this run's done QuickICP contacts task (T4), MINUS any the CRM
+    reports as already handled by a human (crm_feed_*), so the brain never re-contacts a lead
+    someone is already working. Both outreach runners (calls, email) select their people through
+    this. Stops if T4 recorded none; the CRM filter is fail-open (a feed problem changes nothing).
+    """
     from state_store import get_tasks
     done = [t for t in get_tasks(ctx.run["id"]) if t["agent"] == "QuickICP" and t["output_type"] == "contacts"
             and t["status"] == "done" and (t["result"] or {}).get("people_ids")]
     if not done:
         raise ToolError(f"STOPPED: {ctx.task['task_id']} needs the people ids of a done QuickICP contacts task "
                         "in this run (e.g. T4). Run that task first.")
-    return done[-1]["result"]["people_ids"]
+    people_ids = done[-1]["result"]["people_ids"]
+
+    from supabase_store import crm_handled_quickicp_ids
+    handled = crm_handled_quickicp_ids(ctx.run["customer"])
+    if not handled:
+        return people_ids
+    kept = [pid for pid in people_ids if pid not in handled]
+    if len(kept) != len(people_ids):
+        from orch import brain_log
+        brain_log.write("INFO", f"crm feedback: {ctx.task['task_id']} skipped {len(people_ids) - len(kept)} of "
+                                f"{len(people_ids)} contact(s) already handled in the CRM.")
+    return kept
 
 
 def run_understanding(run: dict) -> dict:

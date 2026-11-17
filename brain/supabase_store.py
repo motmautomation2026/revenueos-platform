@@ -404,6 +404,67 @@ def check_save(customer: str) -> None:
     print("Nothing was written.")
 
 
+# ================= CRM FEEDBACK (what humans did in the CRM) =================
+#
+# The CRM exposes its own working progress back to us through read-only views
+# public.crm_feed_contacts and public.crm_feed_deals (CRM migration 020_crm_feed_views.sql), the
+# reverse of the brain_feed_* views the CRM reads from us. They are keyed by the same `customer`
+# key and carry each contact's quickicp person id, and only the service_role key may read them --
+# so we read them with db (the service_role client) exactly like our own tables.
+#
+# A contact is "already handled by the CRM / a human" -- so the brain must NOT cold-call or email
+# it again -- when:
+#   - it is in an OPEN or WON deal (someone is actively working it, or it is already won), or
+#   - its lifecycle has moved past cold (engaged / qualified / customer).
+# A lost / nurture / discarded deal is NOT a reason to skip (the brain may still nurture it), and a
+# do_not_contact status is already handled by the suppression feed, so neither is read here.
+#
+# Fail-open: ANY error reading the feed returns an empty set, so a feed problem never blocks or
+# changes a run -- the worst case is the brain's existing behaviour (it may re-contact a handled lead).
+
+CRM_HANDLED_LIFECYCLE = {"engaged", "qualified", "customer"}
+CRM_HANDLED_DEAL_OUTCOMES = {"open", "won"}
+
+
+def quickicp_ids_of(external_ids) -> list[int]:
+    """The quickicp person ids inside a crm_feed external_ids array (other sources are ignored)."""
+    ids = []
+    for ref in external_ids or []:
+        if isinstance(ref, dict) and ref.get("source") == "quickicp":
+            value = str(ref.get("externalId") or "").strip()
+            if value.isdigit():
+                ids.append(int(value))
+    return ids
+
+
+def crm_handled_quickicp_ids(customer: str) -> set[int]:
+    """
+    The quickicp people ids a human / the CRM has already handled for THIS customer, read from the
+    CRM feedback views (crm_feed_contacts + crm_feed_deals). The calls and email runners drop these
+    from their target list, so the brain never re-contacts a lead someone is already working.
+    Empty set on ANY error (fail-open: a feed problem never changes a run).
+    """
+    handled: set[int] = set()
+    try:
+        contacts = (db.table("crm_feed_contacts")
+                      .select("lifecycle_stage, external_ids")
+                      .eq("customer", customer).execute().data) or []
+        for row in contacts:
+            if row.get("lifecycle_stage") in CRM_HANDLED_LIFECYCLE:
+                handled.update(quickicp_ids_of(row.get("external_ids")))
+        deals = (db.table("crm_feed_deals")
+                   .select("outcome, contact_external_ids")
+                   .eq("customer", customer).execute().data) or []
+        for row in deals:
+            if row.get("outcome") in CRM_HANDLED_DEAL_OUTCOMES:
+                handled.update(quickicp_ids_of(row.get("contact_external_ids")))
+    except Exception as error:   # noqa: BLE001 -- optional feed; must never break a run
+        from orch import brain_log
+        brain_log.write("WARNING", f"crm feedback: could not read the CRM feed for {customer}", error=error)
+        return set()
+    return handled
+
+
 # ================= SEPARATION TEST (selftest-* customer only) =================
 
 def expect(label: str, condition: bool) -> None:
