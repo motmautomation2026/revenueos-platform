@@ -24,7 +24,9 @@ import {
   number,
 } from "@/components/brain/parts";
 import { CallerCard } from "@/components/brain/caller-card";
+import { AccountStatusCard } from "@/components/brain/account-status-card";
 import { explainCallProblem } from "@/lib/brain/call-errors";
+import { loadAccountStatus } from "@/lib/brain/account-status";
 import { loadCaller } from "@/lib/brain/caller-store";
 import { loadCallRecords, type CallRecord } from "@/lib/brain/read";
 import {
@@ -74,6 +76,10 @@ export default async function CallsPage(props: ExecutionPageProps) {
   const callerCard = caller.available ? (
     <CallerCard projectId={project.id} view={caller.view} />
   ) : null;
+  const accountStatus = await loadAccountStatus(project.id);
+  const callsStatusCard = accountStatus.available ? (
+    <AccountStatusCard projectId={project.id} status={accountStatus} only="calls" />
+  ) : null;
 
   // Before the first run there is still something to do here: say where the calls come from.
   if (data.state === "no_runs" && callerCard) {
@@ -81,6 +87,7 @@ export default async function CallsPage(props: ExecutionPageProps) {
       <div className="grid gap-6">
         <h2 className="text-xl font-semibold tracking-tight">Calls</h2>
         {callerCard}
+        {callsStatusCard}
       </div>
     );
   }
@@ -102,6 +109,7 @@ export default async function CallsPage(props: ExecutionPageProps) {
         basePath={`${base}/calls`}
       />
       {callerCard}
+      {callsStatusCard}
 
       {report.campaigns.length === 0 && (
         <EmptyTool>This month plan has no calling task.</EmptyTool>
