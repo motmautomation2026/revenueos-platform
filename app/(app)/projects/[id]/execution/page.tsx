@@ -21,8 +21,6 @@ import { PaidStepCard } from "@/components/brain/paid-step-card";
 import { RequestPanel } from "@/components/brain/request-panel";
 import { RunModeCard } from "@/components/brain/run-mode-card";
 import { loadSetupGaps } from "@/lib/brain/setup";
-import { loadAccountStatus } from "@/lib/brain/account-status";
-import { AccountStatusCard } from "@/components/brain/account-status-card";
 import { readStaging } from "@/lib/brain/staging";
 import { loadPaidStep } from "@/lib/brain/paid-steps";
 import { loadCallRecords } from "@/lib/brain/read";
@@ -55,10 +53,9 @@ export default async function ExecutionPage(props: ExecutionPageProps) {
   const { project, data, base } = await loadExecutionPage(props);
   const { user } = await requireUser();
   // Starting execution is asked for here and done by the Brain's worker; see lib/brain/requests.ts.
-  const [request, gaps, accountStatus] = await Promise.all([
+  const [request, gaps] = await Promise.all([
     loadRequest(project.id),
     loadSetupGaps(project.id),
-    loadAccountStatus(project.id),
   ]);
   // Email first: it is the one a new customer always has to fill in.
   const accountsHref = gaps.email
@@ -161,8 +158,6 @@ export default async function ExecutionPage(props: ExecutionPageProps) {
           </p>
         )}
       </div>
-
-      {accountStatus.available && <AccountStatusCard projectId={project.id} status={accountStatus} />}
 
       {request.available && (request.view.active || latestOver) && (
         <RequestPanel
