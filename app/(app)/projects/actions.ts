@@ -36,9 +36,14 @@ export async function createProject(input: unknown): Promise<{ error: string }> 
   // The password the client's tool workspaces are created with. Written with the server-side key
   // (the row has no browser policies). If it cannot be saved, the project is removed again rather
   // than left without one, so the person can simply try the form afresh.
+  // email_user_email = the client email so the email tool opens the account under THIS project's own
+  // email (not a connected mailbox's login); the Brain reads it via EMAIL_TOOL_USER_EMAIL.
   const { error: passwordError } = await createAdminClient()
     .from("revenueos_brain_accounts")
-    .upsert({ project_id: data.id, updated_by: user.id, workspace_password: clientPassword }, { onConflict: "project_id" });
+    .upsert(
+      { project_id: data.id, updated_by: user.id, workspace_password: clientPassword, email_user_email: clientEmail },
+      { onConflict: "project_id" }
+    );
   if (passwordError) {
     await supabase.from(TABLES.projects).delete().eq("id", data.id);
     return {
@@ -84,7 +89,7 @@ export async function updateProject(
   const { error: passwordError } = await createAdminClient()
     .from("revenueos_brain_accounts")
     .upsert(
-      { project_id: project.id, updated_by: user.id, workspace_password: clientPassword },
+      { project_id: project.id, updated_by: user.id, workspace_password: clientPassword, email_user_email: clientEmail },
       { onConflict: "project_id" }
     );
   if (passwordError) {

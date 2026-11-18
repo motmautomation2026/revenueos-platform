@@ -5,6 +5,7 @@ import { z } from "zod";
 import { requireProject } from "@/lib/auth";
 import { MAX_NOTE_LENGTH } from "@/lib/brain/answers";
 import { saveAccounts } from "@/lib/brain/account-store";
+import { refreshAccountStatus } from "@/lib/brain/account-status";
 import { callerSchema } from "@/lib/brain/caller";
 import { saveCaller } from "@/lib/brain/caller-store";
 import { approvePaidStep } from "@/lib/brain/paid-steps";
@@ -256,4 +257,20 @@ export async function testSenderEmail(input: unknown): Promise<TestResult> {
   if (!parsed.success) return { ok: false, detail: "Enter a valid email address." };
   await requireProject(parsed.data.projectId);
   return sendTestEmail(parsed.data.projectId, parsed.data.target.trim());
+}
+
+/**
+ * Re-read whether each tool account was created / reused / failed from the Brain's ledger and save the
+ * result, for the "Tool accounts" acknowledgement card. No external tool is called and nothing is sent.
+ */
+export async function refreshToolAccountStatus(
+  input: unknown
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const parsed = z.object({ projectId: z.uuid() }).safeParse(input);
+  if (!parsed.success) return { ok: false, error: "Invalid request." };
+  const { user, project } = await requireProject(parsed.data.projectId);
+  const result = await refreshAccountStatus(project.id, user.id);
+  if (!result.ok) return result;
+  revalidatePath(`/projects/${project.id}/execution`, "layout");
+  return { ok: true };
 }

@@ -25,6 +25,8 @@ import {
   number,
 } from "@/components/brain/parts";
 import { SenderCard } from "@/components/brain/sender-card";
+import { AccountStatusCard } from "@/components/brain/account-status-card";
+import { loadAccountStatus } from "@/lib/brain/account-status";
 import { loadImapAddedAt, loadSender } from "@/lib/brain/sender-store";
 import {
   buildEmailReport,
@@ -45,6 +47,10 @@ export default async function EmailPage(props: ExecutionPageProps) {
   const { project, data, base, query } = await loadExecutionPage(props);
   const sender = await loadSender(project.id);
   const senderCard = sender.available ? <SenderCard projectId={project.id} view={sender.view} /> : null;
+  const accountStatus = await loadAccountStatus(project.id);
+  const emailStatusCard = accountStatus.available ? (
+    <AccountStatusCard projectId={project.id} status={accountStatus} only="email" />
+  ) : null;
 
   // Before the first run there is still something to do here: say who the emails come from.
   if (data.state === "no_runs" && senderCard) {
@@ -52,6 +58,7 @@ export default async function EmailPage(props: ExecutionPageProps) {
       <div className="grid gap-6">
         <h2 className="text-xl font-semibold tracking-tight">Email</h2>
         {senderCard}
+        {emailStatusCard}
         <EmptyTool>No email campaign yet. It appears here once execution starts and the Brain reaches its email task.</EmptyTool>
       </div>
     );
@@ -74,6 +81,7 @@ export default async function EmailPage(props: ExecutionPageProps) {
     <div className="grid gap-8">
       <ExecutionHeader title="Email" view={view} runs={runs} basePath={`${base}/email`} />
       {senderCard}
+      {emailStatusCard}
 
       {report.campaigns.length === 0 && <EmptyTool>This month plan has no email task.</EmptyTool>}
 
