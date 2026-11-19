@@ -10,12 +10,37 @@ import { ENGAGEMENT_TYPE } from "@/lib/projects";
 import { editProjectSchema, newProjectSchema } from "@/lib/validation";
 import { TABLES } from "@/lib/supabase/tables";
 
+type DbClient = Awaited<ReturnType<typeof requireUser>>["supabase"];
+
+/**
+ * Whether this owner already has an active (non-archived) project with this name, compared without
+ * case or surrounding space. `excludeId` leaves a project out of the check, so renaming to its own
+ * name is allowed. Archived projects do not count, so a name can be reused after archiving the old one.
+ */
+async function nameTaken(supabase: DbClient, ownerId: string, name: string, excludeId?: string): Promise<boolean> {
+  const target = name.trim().toLowerCase();
+  if (!target) return false;
+  const { data } = await supabase
+    .from(TABLES.projects)
+    .select("id, customer_name, archived_at")
+    .eq("owner_id", ownerId)
+    .is("archived_at", null)
+    .returns<{ id: string; customer_name: string | null }[]>();
+  return (data ?? []).some((p) => p.id !== excludeId && (p.customer_name ?? "").trim().toLowerCase() === target);
+}
+
 export async function createProject(input: unknown): Promise<{ error: string }> {
   const { supabase, user } = await requireUser();
 
   const parsed = newProjectSchema.safeParse(input);
   if (!parsed.success) return { error: "Please check the form and try again." };
   const { clientName, clientEmail, clientPassword, description } = parsed.data;
+
+  // No two of this owner's active projects may share a name (case-insensitive). An archived project
+  // does not block reusing its name; a different owner's project never clashes with this one.
+  if (await nameTaken(supabase, user.id, clientName)) {
+    return { error: `A project named “${clientName}” already exists. Choose a different name.` };
+  }
 
   const { data, error } = await supabase
     .from(TABLES.projects)
@@ -73,6 +98,11 @@ export async function updateProject(
   const parsed = editProjectSchema.safeParse(input);
   if (!parsed.success) return { error: "Please check the form and try again." };
   const { clientName, clientEmail, clientPassword, description } = parsed.data;
+
+  // Renaming must not collide with another of this owner's active projects (case-insensitive).
+  if (await nameTaken(supabase, user.id, clientName, project.id)) {
+    return { error: `A project named “${clientName}” already exists. Choose a different name.` };
+  }
 
   const { error } = await supabase
     .from(TABLES.projects)
