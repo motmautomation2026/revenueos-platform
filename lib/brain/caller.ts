@@ -23,11 +23,17 @@ export const CALLS_ACCOUNT_COLUMNS = [
   "calls_user_company",
 ] as const;
 
-/** A phone number in international form, e.g. +918065382389. Null if it is not one. */
+/**
+ * An Indian caller number (DID) in international form, e.g. +918065382389, or null if the value is
+ * not one. A valid Indian number is +91 and a 10-digit national number (mobile or landline) that
+ * never starts with 0. It may be written with +91, 91, a trunk 0, or nothing; separators are ignored.
+ * The old rule accepted any 8-to-15 digit string and would fabricate a "+" on a bare number with no
+ * country code, so clearly invalid numbers (wrong length, a leading 0, no country code) got through.
+ */
 export function normaliseDid(value: string): string | null {
   const digits = value.replace(/[\s\-().]/g, "");
-  const match = digits.match(/^\+?(\d{8,15})$/);
-  return match ? `+${match[1]}` : null;
+  const match = digits.match(/^(?:\+?91|0)?([1-9]\d{9})$/);
+  return match ? `+91${match[1]}` : null;
 }
 
 export const callerSchema = z
@@ -54,7 +60,11 @@ export const callerSchema = z
       context.addIssue({ code: "custom", path: ["authToken"], message: "Enter the Vobiz auth token." });
     }
     if (!normaliseDid(value.did)) {
-      context.addIssue({ code: "custom", path: ["did"], message: "Enter the caller number with its country code, e.g. +918065382389." });
+      context.addIssue({
+        code: "custom",
+        path: ["did"],
+        message: "Enter a valid Indian caller number with its country code, e.g. +918065382389.",
+      });
     }
   });
 export type CallerInput = z.infer<typeof callerSchema>;
