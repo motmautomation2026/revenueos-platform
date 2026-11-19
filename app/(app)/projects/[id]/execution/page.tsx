@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import {
   ArrowDown,
+  ArrowRight,
   CheckCircle2,
   Hand,
   Lightbulb,
@@ -85,6 +86,14 @@ export default async function ExecutionPage(props: ExecutionPageProps) {
   const latestOver =
     runs[0]?.status === "done" || runs[0]?.status === "stopped";
 
+  // A stopped run that a newer run came after was closed to be re-run (its tasks were cancelled by the
+  // re-plan, so they carry no result). The actual execution is in that newer run — point to it, so an
+  // empty "stopped" run does not look like lost data. runs is newest-first, so the successor is the one
+  // just before the current run in the list.
+  const currentRunIndex = runs.findIndex((r) => r.runKey === view.runKey);
+  const supersededBy =
+    view.status === "stopped" && currentRunIndex > 0 ? runs[currentRunIndex - 1] : null;
+
   // The "re-run with the updated plan" card is only meaningful when the GTM plan was re-finalised after
   // this run was planned; otherwise it is just noise. Owner-only, and only when the plan is genuinely newer.
   const canReplan = project.owner_id === user.id && (await planChangedSince(project.id, view.startedAt));
@@ -156,6 +165,15 @@ export default async function ExecutionPage(props: ExecutionPageProps) {
           <p className="text-sm text-muted-foreground">
             Stopped because: {view.stopReason}
           </p>
+        )}
+        {supersededBy && (
+          <a
+            href={`${base}?run=${encodeURIComponent(supersededBy.runKey)}`}
+            className="inline-flex w-fit items-center gap-1.5 rounded-lg border border-primary/40 bg-primary/5 px-3 py-2 text-sm font-medium text-primary outline-none hover:bg-primary/10 focus-visible:ring-3 focus-visible:ring-ring/50"
+          >
+            This plan was re-run — the actual execution is in the newer run. Open it
+            <ArrowRight className="size-3.5" aria-hidden />
+          </a>
         )}
       </div>
 
