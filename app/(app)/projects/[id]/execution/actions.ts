@@ -215,7 +215,9 @@ export async function updateContact(input: unknown): Promise<{ ok: true } | { ok
     .safeParse(input);
   if (!parsed.success) return { ok: false, error: parsed.error.issues[0]?.message ?? "Check the form and try again." };
   const { project } = await requireProject(parsed.data.projectId);
-  if (project.run_mode !== "staging") return { ok: false, error: "Profiles can be edited only while the project is in Staging." };
+  // Editable in both modes: Staging to point a trial at your own number/inbox, Production to correct a
+  // wrong number or email before the Brain contacts the lead. The customer check below still scopes it
+  // to this project's own profiles.
   const customer = await brainCustomerFor(project.id);
   if (!customer) return { ok: false, error: "This project has no Brain key yet." };
 

@@ -46,8 +46,10 @@ const TILE_ICONS: Record<ResultTile["key"], LucideIcon> = {
 
 export default async function ResearchPage(props: ExecutionPageProps) {
   const { project, data, base, query } = await loadExecutionPage(props);
-  // Profiles can be edited only in Staging: it is how a trial reaches your own phone and inbox.
-  const canEdit = project.run_mode === "staging";
+  // Profiles can be edited in both modes: in Staging to point a trial at your own phone and inbox, in
+  // Production to correct a wrong number or email before the Brain contacts the lead.
+  const canEdit = true;
+  const isStaging = project.run_mode === "staging";
   if (data.state !== "ok") return <ExecutionEmpty data={data} />;
 
   const { view, runs, rows, customer } = data;
@@ -144,8 +146,9 @@ export default async function ResearchPage(props: ExecutionPageProps) {
 
           {canEdit && list === "contacts" && records.people.length > 0 && (
             <p className="rounded-lg border border-amber-500/50 bg-amber-500/10 px-3 py-2 text-sm text-amber-900">
-              Staging: calls and emails go to the phone and email shown on each profile. Use Edit to put in your
-              own before approving a campaign.
+              {isStaging
+                ? "Staging: calls and emails go to the phone and email shown on each profile. Use Edit to put in your own before approving a campaign."
+                : "Calls and emails go to the phone and email shown on each profile. Use Edit to correct a wrong number or email before approving a campaign."}
             </p>
           )}
 
