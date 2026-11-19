@@ -19,7 +19,9 @@ export function RunModeCard({ projectId, saved }: { projectId: string; saved: St
   const [value, setValue] = useState(saved);
   const [problem, setProblem] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const staging = saved.mode === "staging";
+  // While editing, the header previews the pending choice so it never contradicts the toggle below.
+  const shown = editing ? value : saved;
+  const staging = shown.mode === "staging";
 
   const save = async () => {
     const found = stagingSchema.safeParse(value).error?.issues[0]?.message ?? null;
@@ -61,7 +63,7 @@ export function RunModeCard({ projectId, saved }: { projectId: string; saved: St
           <span className="font-semibold">{staging ? "Staging" : "Production"}</span>
           <span className="text-muted-foreground">
             {staging
-              ? ` · up to ${saved.companies} ${saved.companies === 1 ? "company" : "companies"} and ${saved.people} ${saved.people === 1 ? "profile" : "profiles"}`
+              ? ` · up to ${shown.companies} ${shown.companies === 1 ? "company" : "companies"} and ${shown.people} ${shown.people === 1 ? "profile" : "profiles"}`
               : " · the plan's full targets"}
           </span>
         </p>
