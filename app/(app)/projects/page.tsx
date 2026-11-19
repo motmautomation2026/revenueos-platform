@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { Archive, ArrowRight, CircleCheck, FolderPlus, Plus, Search, TriangleAlert } from "lucide-react";
+import { Archive, ArrowDownUp, ArrowRight, CircleCheck, FolderPlus, Plus, Search, TriangleAlert } from "lucide-react";
 import { LiveIndicator } from "@/components/brain/live-indicator";
 import { buttonVariants } from "@/components/ui/button";
 import { requireUser } from "@/lib/auth";
@@ -34,6 +34,17 @@ const FILTERS = [
 ] as const;
 type FilterKey = (typeof FILTERS)[number]["key"];
 
+const SORTS = [
+  { key: "attention", label: "Needs you first" },
+  { key: "active", label: "Recently active" },
+  { key: "name", label: "Name (A–Z)" },
+  { key: "created", label: "Newest" },
+] as const;
+type SortKey = (typeof SORTS)[number]["key"];
+
+/** How many project cards one page of the list shows (a multiple of the grid's 2/3 columns). */
+const PAGE_SIZE = 12;
+
 function initials(name: string) {
   const words = name.trim().split(/\s+/).filter(Boolean);
   return ((words[0]?.[0] ?? "") + (words[1]?.[0] ?? "")).toUpperCase() || "?";
@@ -66,12 +77,13 @@ type Row = {
 export default async function ProjectsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ show?: string; filter?: string; q?: string }>;
+  searchParams: Promise<{ show?: string; filter?: string; q?: string; sort?: string; page?: string }>;
 }) {
   const query = await searchParams;
   const showArchived = query.show === "archived";
   const filter: FilterKey = FILTERS.some((f) => f.key === query.filter) ? (query.filter as FilterKey) : "all";
   const search = (query.q ?? "").trim().slice(0, 80);
+  const sort: SortKey = SORTS.some((s) => s.key === query.sort) ? (query.sort as SortKey) : "attention";
 
   const { supabase, user } = await requireUser();
   const workerPromise = loadWorkerStatus();
@@ -107,15 +119,21 @@ export default async function ProjectsPage({
     })
   );
 
-  // Clients that need you first (longest waiting first), then the most recently active.
+  // The default, "Needs you first": clients that need you (longest waiting first), then the most
+  // recently active. The person can switch to the other orders below.
   const activity = (row: Row) => Date.parse(row.summary?.lastActivity ?? row.project.updated_at) || 0;
   const oldestNeed = (row: Row) => Math.min(...row.needs.map((n) => (n.since ? Date.parse(n.since) : 0)));
-  rows.sort((a, b) =>
-    a.needs.length && b.needs.length ? oldestNeed(a) - oldestNeed(b)
-    : a.needs.length ? -1
-    : b.needs.length ? 1
-    : activity(b) - activity(a)
-  );
+  const SORTERS: Record<SortKey, (a: Row, b: Row) => number> = {
+    attention: (a, b) =>
+      a.needs.length && b.needs.length ? oldestNeed(a) - oldestNeed(b)
+      : a.needs.length ? -1
+      : b.needs.length ? 1
+      : activity(b) - activity(a),
+    active: (a, b) => activity(b) - activity(a),
+    name: (a, b) => a.project.customer_name.localeCompare(b.project.customer_name, undefined, { sensitivity: "base" }),
+    created: (a, b) => (Date.parse(b.project.created_at) || 0) - (Date.parse(a.project.created_at) || 0),
+  };
+  rows.sort(SORTERS[sort]);
   const worker = await workerPromise;
 
   const inExecution = rows.filter((row) => row.summary).length;
@@ -138,9 +156,22 @@ export default async function ProjectsPage({
   };
   const shown = rows.filter(inFilter).filter((row) => !search || row.project.customer_name.toLowerCase().includes(search.toLowerCase()));
 
+  // Pagination: the grid shows one page of results. Changing filter/sort/search drops the page (href
+  // below never carries it), so you always land on page 1 of the new set; only the page controls set it.
+  const pageCount = Math.max(1, Math.ceil(shown.length / PAGE_SIZE));
+  const page = Math.min(Math.max(1, Math.floor(Number(query.page) || 1)), pageCount);
+  const pageStart = (page - 1) * PAGE_SIZE;
+  const pageShown = shown.slice(pageStart, pageStart + PAGE_SIZE);
+
   const href = (changes: Record<string, string | undefined>) => {
     const params = new URLSearchParams();
-    const next = { show: showArchived ? "archived" : undefined, filter: filter === "all" ? undefined : filter, q: search || undefined, ...changes };
+    const next = {
+      show: showArchived ? "archived" : undefined,
+      filter: filter === "all" ? undefined : filter,
+      q: search || undefined,
+      sort: sort === "attention" ? undefined : sort,
+      ...changes,
+    };
     for (const [key, value] of Object.entries(next)) if (value) params.set(key, value);
     const text = params.toString();
     return text ? `/projects?${text}` : "/projects";
@@ -250,19 +281,44 @@ export default async function ProjectsPage({
             ) : (
               <span />
             )}
-            <form action="/projects" className="relative w-full sm:w-64">
-              {showArchived && <input type="hidden" name="show" value="archived" />}
-              {filter !== "all" && <input type="hidden" name="filter" value={filter} />}
-              <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" aria-hidden />
-              <input
-                type="search"
-                name="q"
-                defaultValue={search}
-                placeholder="Search clients"
-                aria-label="Search clients"
-                className="h-9 w-full rounded-lg border bg-background pr-3 pl-9 text-sm outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
-              />
-            </form>
+            <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
+              <details className="group relative">
+                <summary className="flex cursor-pointer list-none items-center gap-1.5 rounded-lg border bg-background px-3 py-1.5 text-sm font-medium outline-none focus-visible:ring-3 focus-visible:ring-ring/50 [&::-webkit-details-marker]:hidden">
+                  <ArrowDownUp className="size-3.5 text-muted-foreground" aria-hidden />
+                  <span className="text-muted-foreground">Sort:</span>
+                  {SORTS.find((s) => s.key === sort)!.label}
+                </summary>
+                <div className="absolute right-0 z-10 mt-1 grid w-48 gap-0.5 rounded-lg border bg-background p-1 shadow-md">
+                  {SORTS.map((s) => (
+                    <Link
+                      key={s.key}
+                      href={href({ sort: s.key === "attention" ? undefined : s.key })}
+                      aria-current={sort === s.key ? "true" : undefined}
+                      className={cn(
+                        "rounded-md px-2.5 py-1.5 text-sm outline-none hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50",
+                        sort === s.key ? "font-semibold text-primary" : "text-foreground"
+                      )}
+                    >
+                      {s.label}
+                    </Link>
+                  ))}
+                </div>
+              </details>
+              <form action="/projects" className="relative w-full sm:w-64">
+                {showArchived && <input type="hidden" name="show" value="archived" />}
+                {filter !== "all" && <input type="hidden" name="filter" value={filter} />}
+                {sort !== "attention" && <input type="hidden" name="sort" value={sort} />}
+                <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" aria-hidden />
+                <input
+                  type="search"
+                  name="q"
+                  defaultValue={search}
+                  placeholder="Search clients"
+                  aria-label="Search clients"
+                  className="h-9 w-full rounded-lg border bg-background pr-3 pl-9 text-sm outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+                />
+              </form>
+            </div>
           </div>
 
           {shown.length === 0 ? (
@@ -273,15 +329,79 @@ export default async function ProjectsPage({
               </Link>
             </p>
           ) : (
-            <ul className="grid gap-4 lg:grid-cols-2 2xl:grid-cols-3">
-              {shown.map((row) => (
-                <ProjectCard key={row.project.id} row={row} archived={showArchived} myUserId={user.id} />
-              ))}
-            </ul>
+            <>
+              <ul className="grid gap-4 lg:grid-cols-2 2xl:grid-cols-3">
+                {pageShown.map((row) => (
+                  <ProjectCard key={row.project.id} row={row} archived={showArchived} myUserId={user.id} />
+                ))}
+              </ul>
+              {pageCount > 1 && (
+                <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+                  <p className="text-xs text-muted-foreground tabular-nums">
+                    Showing {number.format(pageStart + 1)}–{number.format(pageStart + pageShown.length)} of {number.format(shown.length)}
+                  </p>
+                  <nav aria-label="Pagination" className="flex items-center gap-1">
+                    <PageStep href={page > 1 ? href({ page: page - 1 === 1 ? undefined : String(page - 1) }) : undefined} label="Previous" />
+                    {pageNumbers(page, pageCount).map((p, i) =>
+                      p === null ? (
+                        <span key={`gap-${i}`} className="px-1.5 text-sm text-muted-foreground">
+                          …
+                        </span>
+                      ) : (
+                        <Link
+                          key={p}
+                          href={href({ page: p === 1 ? undefined : String(p) })}
+                          aria-current={p === page ? "page" : undefined}
+                          className={cn(
+                            "min-w-9 rounded-lg border px-2.5 py-1.5 text-center text-sm font-medium tabular-nums outline-none focus-visible:ring-3 focus-visible:ring-ring/50",
+                            p === page ? "border-primary bg-primary text-primary-foreground" : "bg-background text-foreground hover:bg-muted"
+                          )}
+                        >
+                          {p}
+                        </Link>
+                      )
+                    )}
+                    <PageStep href={page < pageCount ? href({ page: String(page + 1) }) : undefined} label="Next" />
+                  </nav>
+                </div>
+              )}
+            </>
           )}
         </>
       )}
     </div>
+  );
+}
+
+/** A compact page list with gaps, e.g. [1, null, 4, 5, 6, null, 20] — null is an ellipsis. */
+function pageNumbers(current: number, total: number): (number | null)[] {
+  const wanted = [...new Set([1, total, current - 1, current, current + 1])]
+    .filter((p) => p >= 1 && p <= total)
+    .sort((a, b) => a - b);
+  const out: (number | null)[] = [];
+  let prev = 0;
+  for (const p of wanted) {
+    if (prev && p - prev > 1) out.push(null);
+    out.push(p);
+    prev = p;
+  }
+  return out;
+}
+
+/** A Previous/Next control: a link when there is a page to go to, a disabled label otherwise. */
+function PageStep({ href, label }: { href?: string; label: string }) {
+  const base = "rounded-lg border px-3 py-1.5 text-sm font-medium outline-none focus-visible:ring-3 focus-visible:ring-ring/50";
+  if (!href) {
+    return (
+      <span aria-disabled="true" className={cn(base, "cursor-not-allowed text-muted-foreground/50")}>
+        {label}
+      </span>
+    );
+  }
+  return (
+    <Link href={href} className={cn(base, "bg-background text-foreground hover:bg-muted")}>
+      {label}
+    </Link>
   );
 }
 
