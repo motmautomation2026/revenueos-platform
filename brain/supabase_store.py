@@ -468,6 +468,27 @@ def crm_handled_quickicp_ids(customer: str) -> set[int]:
     return handled
 
 
+def auto_approve_seconds(customer: str):
+    """
+    This project's "auto-approve gates after N seconds" (revenueos_projects.auto_approve_seconds,
+    set in the platform), or None when it is off / unknown. When set to a positive number, the run loop
+    auto-answers routine gate decisions older than that (orch/run.py, auto_resolve_overdue).
+    Fail-open: ANY error, or a selftest customer, returns None, so the default behaviour (always ask a
+    person) is never changed by a read problem.
+    """
+    if not customer or customer.startswith(SELFTEST_PREFIX):
+        return None
+    try:
+        rows = (db.table("revenueos_projects").select("auto_approve_seconds")
+                  .eq("brain_customer_key", customer).limit(1).execute().data) or []
+        value = rows[0].get("auto_approve_seconds") if rows else None
+        return int(value) if isinstance(value, (int, float)) and int(value) > 0 else None
+    except Exception as error:   # noqa: BLE001 -- optional setting; must never break a run
+        from orch import brain_log
+        brain_log.write("WARNING", f"auto-approve: could not read the setting for {customer}", error=error)
+        return None
+
+
 # ================= SEPARATION TEST (selftest-* customer only) =================
 
 def expect(label: str, condition: bool) -> None:

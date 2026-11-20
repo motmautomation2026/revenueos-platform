@@ -7,12 +7,15 @@ Moved unchanged from orchestrator.py (Stage C, 2026-10-15). Import it through or
 re-exports every name; this file never imports orchestrator.
 """
 
+from datetime import datetime, timezone
+
 from quickicp import ToolError
 from state_store import (
-    ALLOWED_ANSWERS, force_unlock, get_decisions, get_run, get_tasks, list_open_decisions, lock_holder,
-    now_iso, open_decision, ready_tasks, record_decision, release_run_lock, renew_run_lock, take_run_lock,
-    update_run, update_task,
+    ALLOWED_ANSWERS, answer_decision, force_unlock, get_decisions, get_run, get_tasks, list_open_decisions,
+    lock_holder, now_iso, open_decision, ready_tasks, record_decision, release_run_lock, renew_run_lock,
+    take_run_lock, update_run, update_task,
 )
+from auto_approve import auto_answer_for
 from runner_kit import RunnerContext, RunnerResult, run_understanding
 from runner_quickicp_accounts import RealAccountsTools, run_quickicp_accounts
 from runner_quickicp_contacts import RealContactsTools, run_quickicp_contacts
@@ -50,6 +53,36 @@ WIRED_RUNNERS: dict = {
 # a run never reads data/understanding.json or data/work_orders.json (they belong to the latest plan).
 # Decisions a tool task can wait for; the runner itself reads and acts on the answer.
 TOOL_DECISION_KINDS = {"goal_check", "goal_check_final", "paid_call_unknown", "email_approve", "call_start"}
+
+
+def auto_resolve_overdue(run: dict, timeout_seconds) -> list[str]:
+    """
+    Timed auto-approval (opt-in per project): answer routine gate decisions that have been open longer
+    than `timeout_seconds` as 'auto (timer)', so the run does not park in "Needs a person" while no one
+    objects. Which gates and which answer are decided by auto_approve.auto_answer_for (a human work task
+    is auto-'skip', a gate is auto-'done', email/call sends are auto-'yes'; exception decisions are left
+    for a person). A no-op when the window is unset / <= 0, so the default behaviour is unchanged.
+    A decision a human answered in the meantime is skipped (answer_decision refuses a non-open decision).
+    """
+    try:
+        timeout = int(timeout_seconds)
+    except (TypeError, ValueError):
+        return []
+    if timeout <= 0:
+        return []
+    now = datetime.now(timezone.utc)
+    applied = []
+    for decision in list_open_decisions(run["id"]):
+        answer = auto_answer_for(decision, timeout, now)
+        if not answer:
+            continue
+        try:
+            answer_decision(decision["id"], answer, decided_by="auto (timer)",
+                            reason=f"auto-approved after {timeout}s (no one objected)")
+            applied.append(f"{decision['kind']} #{decision['id']} -> {answer} (auto after {timeout}s)")
+        except ToolError:
+            continue   # a human answered it just now, or that answer is not offered: leave it
+    return applied
 
 
 def task_types(task: dict) -> set[str]:
@@ -260,7 +293,12 @@ def run_step(run: dict, holder: str, stop_before_new_paid: bool = False) -> dict
     The body of cmd_run (the caller holds the lock).
     stop_before_new_paid (--until-wait): do not START a new QuickICP task (it buys data); report it instead.
     """
-    # Crash recovery FIRST: a human task left 'running' gets its decision (the same one if it exists,
+    # Timed auto-approval FIRST (opt-in per project): answer routine gate decisions that have waited past
+    # the project's window, so the ones answered here are applied in this same step. A no-op when unset.
+    from supabase_store import auto_approve_seconds
+    auto_applied = auto_resolve_overdue(run, auto_approve_seconds(run.get("customer")))
+
+    # Crash recovery: a human task left 'running' gets its decision (the same one if it exists,
     # even if it was already answered), so the answer below is applied in this same run.
     resumed = []
     for task in get_tasks(run["id"]):
@@ -268,7 +306,7 @@ def run_step(run: dict, holder: str, stop_before_new_paid: bool = False) -> dict
             start_human_task(run, task)
             resumed.append(task["task_id"])
 
-    applied = apply_answers(run) + apply_task_failed(run)
+    applied = auto_applied + apply_answers(run) + apply_task_failed(run)
 
     # At most ONE tool runner per call: first a tool task to continue, else (below) a new one.
     tool_line, tool_kind, started, decision, not_wired, blocked_paid = None, None, None, None, [], None
