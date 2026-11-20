@@ -35,7 +35,11 @@ function Row({ icon: Icon, tool, status }: { icon: LucideIcon; tool: string; sta
           </span>
         </div>
         {status.account && <p className="truncate text-sm text-muted-foreground">{status.account}</p>}
-        {status.detail && <p className="text-sm text-muted-foreground">{status.detail}</p>}
+        {/* The detail only adds something for an error, or when there is no account line to carry it —
+            otherwise the badge ("Existing account used") + the account email already say it. */}
+        {status.detail && (status.status === "error" || !status.account) && (
+          <p className="text-sm text-muted-foreground">{status.detail}</p>
+        )}
         {status.status === "unknown" && !status.detail && (
           <p className="text-sm text-muted-foreground">No account activity yet — it is created on this customer&apos;s first campaign.</p>
         )}
@@ -48,8 +52,8 @@ function Row({ icon: Icon, tool, status }: { icon: LucideIcon; tool: string; sta
 }
 
 const HEADING = {
-  email: { title: "Email account", note: "Whether this customer's email account has been created on the tool." },
-  calls: { title: "Calling account", note: "Whether this customer's calling account has been created on the tool." },
+  email: { title: "Account status", note: "Whether this customer's email account has been created on the tool." },
+  calls: { title: "Account status", note: "Whether this customer's calling account has been created on the tool." },
   both: { title: "Tool accounts", note: "Whether this customer's email and calling accounts have been created on the tools." },
 } as const;
 
