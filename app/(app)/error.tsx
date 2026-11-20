@@ -1,10 +1,17 @@
 "use client";
 
+import { useEffect } from "react";
 import Link from "next/link";
 import { AlertTriangle, RotateCw } from "lucide-react";
 import { Button, buttonVariants } from "@/components/ui/button";
 
-export default function AppError({ reset }: { error: Error; reset: () => void }) {
+export default function AppError({ error, reset }: { error: Error & { digest?: string }; reset: () => void }) {
+  // Surface the crash for diagnosis instead of swallowing it. Next.js hides the real message from the
+  // client in production and gives a `digest` that ties this screen to the server log.
+  useEffect(() => {
+    console.error("App error boundary:", error);
+  }, [error]);
+
   return (
     <div className="mx-auto flex max-w-md flex-col items-center gap-4 rounded-xl border bg-background px-6 py-14 text-center">
       <span className="flex size-12 items-center justify-center rounded-full bg-destructive/10">
@@ -25,6 +32,11 @@ export default function AppError({ reset }: { error: Error; reset: () => void })
           Projects
         </Link>
       </div>
+      {error.digest && (
+        <p className="text-xs text-muted-foreground">
+          Reference: <code className="font-mono">{error.digest}</code>
+        </p>
+      )}
     </div>
   );
 }
