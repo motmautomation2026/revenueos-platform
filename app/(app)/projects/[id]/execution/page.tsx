@@ -21,8 +21,10 @@ import {
 import { PaidStepCard } from "@/components/brain/paid-step-card";
 import { RequestPanel } from "@/components/brain/request-panel";
 import { RunModeCard } from "@/components/brain/run-mode-card";
+import { AutoApproveCard } from "@/components/brain/auto-approve-card";
 import { loadSetupGaps } from "@/lib/brain/setup";
 import { readStaging } from "@/lib/brain/staging";
+import { readAutoApprove } from "@/lib/brain/auto-approve";
 import { loadPaidStep } from "@/lib/brain/paid-steps";
 import { loadCallRecords } from "@/lib/brain/read";
 import { loadRequest, planChangedSince } from "@/lib/brain/request-store";
@@ -66,6 +68,10 @@ export default async function ExecutionPage(props: ExecutionPageProps) {
       : undefined;
   const saved = readStaging(project);
   const staging = saved.available ? saved : undefined;
+  const autoApprove = readAutoApprove(project as { auto_approve_seconds?: number | null });
+  const autoApproveSaved = autoApprove.available
+    ? { enabled: autoApprove.enabled, seconds: autoApprove.seconds }
+    : undefined;
   if (data.state !== "ok") {
     if (data.state === "no_runs" && request.available) {
       return (
@@ -190,6 +196,10 @@ export default async function ExecutionPage(props: ExecutionPageProps) {
 
       {staging && !latestOver && (
         <RunModeCard projectId={project.id} saved={staging} />
+      )}
+
+      {autoApproveSaved && !latestOver && (
+        <AutoApproveCard projectId={project.id} saved={autoApproveSaved} />
       )}
 
       {paidStep && (

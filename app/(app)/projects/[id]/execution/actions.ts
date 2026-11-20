@@ -13,6 +13,7 @@ import { saveSender } from "@/lib/brain/sender-store";
 import { placeTestCall, sendTestEmail, type TestResult } from "@/lib/tools/test-tools";
 import { brainCustomerFor } from "@/lib/brain/read";
 import { contactColumns, contactSchema, stagingColumns, stagingSchema } from "@/lib/brain/staging";
+import { autoApproveColumns, autoApproveSchema } from "@/lib/brain/auto-approve";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { TABLES } from "@/lib/supabase/tables";
 import { senderSchema } from "@/lib/checklist-sender";
@@ -201,6 +202,29 @@ export async function saveRunMode(input: unknown): Promise<RequestResult> {
       parsed.data.run.mode === "staging"
         ? "Staging is on: the next steps fetch no more than your limits."
         : "Production is on for the next steps.",
+  });
+}
+
+/** Timed auto-approval: auto-answer routine gates after N seconds, or off. Read by the Brain's run loop. */
+export async function saveAutoApprove(input: unknown): Promise<RequestResult> {
+  const parsed = z.object({ projectId: z.uuid(), settings: autoApproveSchema }).safeParse(input);
+  if (!parsed.success) return { ok: false, error: parsed.error.issues[0]?.message ?? "Check the form and try again." };
+  const { supabase, project, ready } = await readyProject(parsed.data.projectId);
+  if (!ready) return NOT_READY;
+  const { error } = await supabase.from(TABLES.projects).update(autoApproveColumns(parsed.data.settings)).eq("id", project.id);
+  if (error) {
+    return {
+      ok: false,
+      error: error.message.includes("auto_approve_seconds")
+        ? "The database update for auto-approval has not been applied (0017_auto_approve.sql)."
+        : "The auto-approval setting could not be saved. Try again.",
+    };
+  }
+  return finish(project.id, {
+    ok: true,
+    message: parsed.data.settings.enabled
+      ? `Auto-approval is on: routine gates proceed after ${parsed.data.settings.seconds}s.`
+      : "Auto-approval is off: every gate waits for a person.",
   });
 }
 
