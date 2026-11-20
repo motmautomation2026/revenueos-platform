@@ -8,6 +8,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import type { ColumnKey, ExecutionView, TaskCard, TaskStatus } from "@/lib/brain/view";
+import { stepLabel, toolLabel } from "@/lib/brain/tools";
 import type { RerunResult } from "@/lib/brain/rerun";
 
 type Rerun = (input: { projectId: string; taskId: string }) => Promise<RerunResult>;
@@ -269,11 +270,18 @@ export function ExecutionBoard({
                   <ul className="divide-y rounded-lg border">
                     {open.calls.map((call) => (
                       <li key={call.id} className="flex flex-wrap items-center gap-x-3 gap-y-0.5 px-3 py-2">
-                        <span className="font-medium">
-                          {call.tool} · {call.step}
+                        <span className="font-medium">{stepLabel(call.tool, call.step)}</span>
+                        <span className="text-xs text-muted-foreground">
+                          {toolLabel(call.tool)}
+                          {call.paid ? " · paid" : ""}
                         </span>
-                        <span className={cn("text-xs", call.status === "done" ? "text-muted-foreground" : "font-medium text-destructive")}>
-                          {call.status}
+                        <span
+                          className={cn(
+                            "text-xs",
+                            call.status === "done" ? "text-muted-foreground" : call.status === "running" ? "text-amber-700" : "font-medium text-destructive"
+                          )}
+                        >
+                          {call.status === "running" ? "in progress" : call.status}
                         </span>
                         <span className="ml-auto text-xs text-muted-foreground">
                           {dateTime.format(new Date(call.startedAt))}

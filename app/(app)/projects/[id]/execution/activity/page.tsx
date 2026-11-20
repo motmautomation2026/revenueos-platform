@@ -175,6 +175,11 @@ export default async function ActivityPage(props: ExecutionPageProps) {
   return (
     <div className="grid gap-8">
       <ExecutionHeader title="Activity log" view={view} runs={runs} basePath={`${base}/activity`} />
+      <p className="-mt-4 max-w-2xl text-sm text-muted-foreground">
+        Everything RevenueOS has done for this customer, in plain words — what it is doing right now, anything that needs
+        you, and the full step-by-step history. You only need to act on items marked <span className="font-medium text-amber-700">waiting</span>{" "}
+        or <span className="font-medium text-destructive">failed</span>.
+      </p>
 
       {/* ===================== Right now (live) ===================== */}
       <div className="grid gap-4">

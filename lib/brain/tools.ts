@@ -792,6 +792,16 @@ const STEP_TITLES: Record<string, string> = {
   "quickhowl:poll": "Checked for call results",
 };
 
+/** A tool's name said plainly: "quickhowl" -> "Quickhowl", "email_tool" -> "Email tool". */
+export function toolLabel(tool: string): string {
+  return TOOL_NAMES[tool] ?? words(tool);
+}
+
+/** One tool step in plain words: ("quickhowl","poll") -> "Checked for call results". Falls back to the raw step. */
+export function stepLabel(tool: string, step: string): string {
+  return STEP_TITLES[`${tool}:${step}`] ?? words(step);
+}
+
 const ANSWER_WORDS: Record<string, string> = {
   yes: "Approved",
   no: "Not approved",
@@ -857,7 +867,9 @@ export function buildActivity({ tasks, decisions, toolCalls }: RunRows): Activit
         times: 1,
       });
     } else {
-      const source: ActivitySource = decision.decided_by === "brain" ? "Brain" : decision.decided_by === "auto" ? "Automatic" : "Person";
+      // "auto", "auto (timer)", … all read as the automatic rule, not a person.
+      const source: ActivitySource =
+        decision.decided_by === "brain" ? "Brain" : (decision.decided_by ?? "").startsWith("auto") ? "Automatic" : "Person";
       events.push({
         key: `answer-${decision.id}`,
         at: decision.answered_at ?? decision.created_at,
