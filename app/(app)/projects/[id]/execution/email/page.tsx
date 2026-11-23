@@ -3,8 +3,10 @@ import Link from "next/link";
 import {
   ArrowRight,
   CalendarClock,
+  ChevronDown,
   Info,
   ListOrdered,
+  Mail,
   MousePointerClick,
   TriangleAlert,
   Users,
@@ -52,11 +54,48 @@ export default async function EmailPage(props: ExecutionPageProps) {
     <AccountStatusCard projectId={project.id} status={accountStatus} only="email" />
   ) : null;
 
+  // A plain-language orientation so a first-time viewer knows what the Email tab is and the order of things.
+  const intro = (
+    <p className="max-w-3xl text-sm text-muted-foreground">
+      This is your AI email outreach. First connect a{" "}
+      <span className="font-medium text-foreground">sender account</span> — the mailbox emails go out from — and send
+      yourself a test email to check it. Each run, the AI emails this customer&apos;s leads, and every campaign&apos;s
+      sequence, schedule, and delivery stats appear below. You only need to step in where something is marked{" "}
+      <span className="font-medium text-amber-700">waiting</span> or{" "}
+      <span className="font-medium text-destructive">failed</span>.
+    </p>
+  );
+
+  // Once the sender is connected, tuck its setup + status into a collapsible so the page leads with results;
+  // it stays open while the sender still needs setting up.
+  const senderReady = sender.view.missing.length === 0;
+  const setupSection = senderCard ? (
+    <details className="group grid gap-4" open={!senderReady}>
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 rounded-xl border bg-background px-4 py-3 text-sm font-semibold outline-none focus-visible:ring-3 focus-visible:ring-ring/50 [&::-webkit-details-marker]:hidden">
+        <span className="flex items-center gap-2">
+          <Mail className="size-4 text-muted-foreground" aria-hidden />
+          Sender account
+        </span>
+        <span className="flex items-center gap-2 font-normal text-muted-foreground">
+          {senderReady ? "Connected · view or change" : "Needs setup"}
+          <ChevronDown className="size-4 transition-transform group-open:rotate-180" aria-hidden />
+        </span>
+      </summary>
+      <div className="grid gap-4">
+        {senderCard}
+        {emailStatusCard}
+      </div>
+    </details>
+  ) : null;
+
   // Before the first run there is still something to do here: say who the emails come from.
   if (data.state === "no_runs" && senderCard) {
     return (
       <div className="grid gap-6">
-        <h2 className="text-xl font-semibold tracking-tight">Email</h2>
+        <div className="grid gap-2">
+          <h2 className="text-xl font-semibold tracking-tight">Email</h2>
+          {intro}
+        </div>
         {senderCard}
         {emailStatusCard}
         <EmptyTool>No email campaign yet. It appears here once execution starts and the Brain reaches its email task.</EmptyTool>
@@ -80,8 +119,8 @@ export default async function EmailPage(props: ExecutionPageProps) {
   return (
     <div className="grid gap-8">
       <ExecutionHeader title="Email" view={view} runs={runs} basePath={`${base}/email`} />
-      {senderCard}
-      {emailStatusCard}
+      {intro}
+      {setupSection}
 
       {report.campaigns.length === 0 && <EmptyTool>This month plan has no email task.</EmptyTool>}
 

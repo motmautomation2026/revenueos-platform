@@ -547,6 +547,26 @@ export type CallOutcome = {
   summary: string;
 };
 
+export type CallHealth = {
+  attempted: number;
+  connected: number;
+  failed: number;
+  /** Calls were attempted but none connected — the campaign ran, yet every call failed to reach anyone. */
+  noneConnected: boolean;
+};
+
+/**
+ * How many of a campaign's calls actually connected, from the Brain's recorded outcomes. A call counts
+ * as connected when it has talk time or a "completed" status; "failed" means it never reached the person.
+ * `noneConnected` flags the signature of a calling outage: calls placed, zero connected.
+ */
+export function callHealth(outcomes: CallOutcome[]): CallHealth {
+  const attempted = outcomes.length;
+  const connected = outcomes.filter((o) => (o.durationSeconds ?? 0) > 0 || o.status.trim().toLowerCase() === "completed").length;
+  const failed = outcomes.filter((o) => o.status.trim().toLowerCase() === "failed").length;
+  return { attempted, connected, failed, noneConnected: attempted > 0 && connected === 0 };
+}
+
 export type CallCampaign = {
   taskId: string;
   /** The Brain's row id of the task, to find its agent script (loadCallScripts). */

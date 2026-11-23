@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import {
   ArrowRight,
+  ChevronDown,
   Clock,
   PhoneCall,
   PhoneOff,
@@ -35,6 +36,7 @@ import { loadCallRecords, loadCallScripts, type CallRecord } from "@/lib/brain/r
 import {
   buildCallTiles,
   buildCallsReport,
+  callHealth,
   type CallOutcome,
 } from "@/lib/brain/tools";
 import { cn } from "@/lib/utils";
@@ -103,11 +105,50 @@ export default async function CallsPage(props: ExecutionPageProps) {
       </div>
     ) : null;
 
+  // Once a calling line is connected, tuck the account config + status into a collapsible so the page
+  // leads with call results; it stays open while a line still needs setting up. The Test call tool and
+  // any alerts stay outside it, always visible.
+  const callerReady = caller.view.ready;
+  const setupSection = callerCard ? (
+    <details className="group grid gap-4" open={!callerReady}>
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 rounded-xl border bg-background px-4 py-3 text-sm font-semibold outline-none focus-visible:ring-3 focus-visible:ring-ring/50 [&::-webkit-details-marker]:hidden">
+        <span className="flex items-center gap-2">
+          <PhoneCall className="size-4 text-muted-foreground" aria-hidden />
+          Calling account
+        </span>
+        <span className="flex items-center gap-2 font-normal text-muted-foreground">
+          {callerReady ? "Connected · view or change" : "Needs setup"}
+          <ChevronDown className="size-4 transition-transform group-open:rotate-180" aria-hidden />
+        </span>
+      </summary>
+      <div className="grid gap-4">
+        {callerCard}
+        {callsStatusCard}
+      </div>
+    </details>
+  ) : null;
+
+  // A plain-language orientation so a first-time viewer knows what the Calls tab is and the order of things.
+  const intro = (
+    <p className="max-w-3xl text-sm text-muted-foreground">
+      This is your AI phone calling. First connect a{" "}
+      <span className="font-medium text-foreground">calling account</span> — the number calls go out from — then send
+      yourself a <span className="font-medium text-foreground">test call</span> to hear the agent. Each run, the AI calls
+      this customer&apos;s leads, and every campaign&apos;s progress, outcomes, and what each prospect said appear below.
+      You only need to step in where something is marked{" "}
+      <span className="font-medium text-amber-700">waiting</span> or{" "}
+      <span className="font-medium text-destructive">failed</span>.
+    </p>
+  );
+
   // Before the first run there is still something to do here: say where the calls come from.
   if (data.state === "no_runs" && callerCard) {
     return (
       <div className="grid gap-6">
-        <h2 className="text-xl font-semibold tracking-tight">Calls</h2>
+        <div className="grid gap-2">
+          <h2 className="text-xl font-semibold tracking-tight">Calls</h2>
+          {intro}
+        </div>
         {callerCard}
         {callsStatusCard}
         {testCallCard}
@@ -134,8 +175,8 @@ export default async function CallsPage(props: ExecutionPageProps) {
         runs={runs}
         basePath={`${base}/calls`}
       />
-      {callerCard}
-      {callsStatusCard}
+      {intro}
+      {setupSection}
       {testCallCard}
       {syncWarning}
 
@@ -171,6 +212,8 @@ export default async function CallsPage(props: ExecutionPageProps) {
             : stage,
         );
         const waitingOnPerson = campaign.status === "waiting_human";
+        // Calls placed but none connected: the campaign "finished" yet every call failed to reach anyone.
+        const health = callHealth(campaign.outcomes);
 
         // Outcome counts from the calling tool when it has them, otherwise from the Brain's summary.
         const outcomes = record
@@ -207,6 +250,26 @@ export default async function CallsPage(props: ExecutionPageProps) {
             </div>
 
             {scripts.get(campaign.rowId) && <CallScriptCard script={scripts.get(campaign.rowId)!} />}
+
+            {health.noneConnected && !problem && (
+              <div
+                role="alert"
+                className="flex flex-wrap items-start gap-3 rounded-xl border border-destructive/30 bg-destructive/5 p-4"
+              >
+                <TriangleAlert className="mt-0.5 size-5 shrink-0 text-destructive" aria-hidden />
+                <div className="grid min-w-0 flex-1 gap-0.5 text-sm">
+                  <p className="font-semibold text-destructive">
+                    None of these {health.attempted} call{health.attempted === 1 ? "" : "s"} connected
+                  </p>
+                  <p className="text-muted-foreground">
+                    Every call was placed but failed to reach anyone ({health.failed} failed, 0 answered). A whole campaign
+                    failing to connect usually means the calling platform could not place the calls — not a problem with
+                    your leads or this app. Check the caller line; if it keeps happening across campaigns, the voice provider
+                    needs to look at it.
+                  </p>
+                </div>
+              </div>
+            )}
 
             {problem ? (
               <div
