@@ -67,6 +67,7 @@ export function ChecklistForm({
   items,
   submitted,
   canReopen,
+  planExists,
   canRegenerate,
   countWarning,
   internalNotes,
@@ -75,6 +76,8 @@ export function ChecklistForm({
   items: ChecklistItemView[];
   submitted: boolean;
   canReopen: boolean;
+  /** A GTM plan already exists, so reopening will require rebuilding it — confirm first. */
+  planExists: boolean;
   canRegenerate: boolean;
   countWarning: string | null;
   /** The MOTM-only notes panel, rendered between the summary and the questions. */
@@ -86,7 +89,7 @@ export function ChecklistForm({
   );
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [busy, setBusy] = useState<null | "submit" | "regenerate" | "import" | "reopen">(null);
-  const [dialog, setDialog] = useState<null | "submit" | "regenerate">(null);
+  const [dialog, setDialog] = useState<null | "submit" | "regenerate" | "reopen">(null);
   const fileInput = useRef<HTMLInputElement>(null);
 
   // Autosave: one debounce timer per question, plus a count of saves in flight.
@@ -408,8 +411,12 @@ export function ChecklistForm({
               This checklist has been submitted.
             </p>
             {canReopen && (
-              <Button variant="outline" disabled={busy !== null} onClick={doReopen}>
-                <PencilLine aria-hidden />
+              <Button
+                variant="outline"
+                disabled={busy !== null}
+                onClick={() => (planExists ? setDialog("reopen") : void doReopen())}
+              >
+                {busy === "reopen" ? <Loader2 className="animate-spin" aria-hidden /> : <PencilLine aria-hidden />}
                 Edit answers
               </Button>
             )}
@@ -472,6 +479,31 @@ export function ChecklistForm({
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <Button onClick={doRegenerate}>Regenerate</Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={dialog === "reopen"} onOpenChange={(open) => !open && setDialog(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Reopen the checklist and rebuild the plan?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This project already has a GTM plan. Reopening lets you edit the answers, but the current plan
+              is no longer valid — when you re-submit, the plan is rebuilt from your new answers, and any
+              execution already running on the old plan is replaced. Your current answers are kept; you just
+              edit and re-submit.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Keep the plan</AlertDialogCancel>
+            <Button
+              onClick={() => {
+                setDialog(null);
+                void doReopen();
+              }}
+            >
+              Reopen &amp; edit
+            </Button>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>

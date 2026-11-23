@@ -82,14 +82,21 @@ export async function submitChecklist(projectId: unknown): Promise<Result> {
   return { ok: true };
 }
 
-/** Lets the user fix answers after submitting, as long as no plan has been started. */
+/**
+ * Lets the user fix answers after submitting — including after the GTM plan is built (plan_ready /
+ * plan_blocked). Reopening sends the project back to the checklist stage; re-submitting then rebuilds
+ * the plan from the edited answers. Any plan or execution based on the old answers is superseded by that
+ * re-plan, which is why the UI confirms before reopening a project that already has a plan.
+ */
+const REOPENABLE_STATUSES = ["checklist_submitted", "plan_ready", "plan_blocked"];
+
 export async function reopenChecklist(projectId: unknown): Promise<Result> {
   const parsed = id.safeParse(projectId);
   if (!parsed.success) return INVALID;
   const { supabase, project } = await requireProject(parsed.data);
 
   const checklist = await activeChecklist(supabase, project.id);
-  if (!checklist || project.status !== "checklist_submitted") {
+  if (!checklist || !REOPENABLE_STATUSES.includes(project.status)) {
     return { ok: false, error: "This checklist cannot be reopened right now." };
   }
 

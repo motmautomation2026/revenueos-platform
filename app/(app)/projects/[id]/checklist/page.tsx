@@ -45,7 +45,8 @@ export default async function ChecklistPage({ params }: { params: Promise<{ id: 
       projectId={project.id}
       items={items ?? []}
       submitted={checklist.status === "submitted"}
-      canReopen={project.status === "checklist_submitted"}
+      canReopen={["checklist_submitted", "plan_ready", "plan_blocked"].includes(project.status)}
+      planExists={project.status === "plan_ready" || project.status === "plan_blocked"}
       canRegenerate={project.status === "checklist_ready" || project.status === "checklist_submitted"}
       countWarning={countWarning}
       internalNotes={<InternalNotes flags={checklist.flags} camNotes={checklist.cam_notes} />}
