@@ -3,6 +3,8 @@ import nodemailer from "nodemailer";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { TABLES } from "@/lib/supabase/tables";
 import { loadSenderSmtp } from "@/lib/brain/sender-store";
+import { brainCustomerFor } from "@/lib/brain/read";
+import { callScriptOf, type CallScript } from "@/lib/brain/tools";
 
 /**
  * Standalone tool testing — a separate pipeline from the Brain's run/orchestration. The platform calls
@@ -83,11 +85,37 @@ async function loadAccount(projectId: string): Promise<AccountRow | null> {
   return data ?? null;
 }
 
+/** The agent script of the project's latest prepared call campaign (quickhowl 'request' step), or null. */
+async function loadLatestAgentScript(projectId: string): Promise<CallScript | null> {
+  const customer = await brainCustomerFor(projectId);
+  if (!customer) return null;
+  const admin = createAdminClient();
+  const { data: runs } = await admin
+    .from("brain_customer_runs").select("id").eq("customer", customer)
+    .order("id", { ascending: false }).limit(10).returns<{ id: number }[]>();
+  if (!runs?.length) return null;
+  const { data: tasks } = await admin
+    .from("brain_plan_tasks").select("id").in("run_id", runs.map((r) => r.id)).returns<{ id: number }[]>();
+  const taskIds = (tasks ?? []).map((t) => t.id);
+  if (!taskIds.length) return null;
+  const { data: calls } = await admin
+    .from("brain_tool_calls").select("output")
+    .in("task_row_id", taskIds).eq("tool", "quickhowl").eq("step", "request")
+    .order("id", { ascending: false }).limit(1).returns<{ output: unknown }[]>();
+  return calls?.[0] ? callScriptOf(calls[0].output) : null;
+}
+
 /**
- * Place ONE real test call to the user's own number, using the project's configured line/account, by
- * calling the Quickhowl v2 integration directly. Returns the launch outcome (started / blocked + reason).
+ * Place ONE real test call to a number the person enters, using the project's configured line/account,
+ * by calling the Quickhowl v2 integration directly — no QuickICP lead and no run. `name` is the contact
+ * name the agent uses; `useRealScript` makes the call talk with the campaign's real agent (falling back
+ * to a short line test if none is prepared). Returns the launch outcome (started / blocked + reason).
  */
-export async function placeTestCall(projectId: string, target: string): Promise<TestResult> {
+export async function placeTestCall(
+  projectId: string,
+  target: string,
+  opts?: { name?: string; useRealScript?: boolean }
+): Promise<TestResult> {
   const base = process.env.QUICKHOWL_URL?.replace(/\/$/, "");
   const key = process.env.QUICKHOWL_KEY;
   if (!base || !key) {
@@ -106,25 +134,39 @@ export async function placeTestCall(projectId: string, target: string): Promise<
   const authId = account?.calls_vobiz_auth_id?.trim();
   const authToken = account?.calls_vobiz_auth_token?.trim();
 
-  // v2 launch: one contact (the user's own number), auto_start. phone_number only when the project has
-  // its own line; a borrowed account reuses its line. The agent is a short, fixed line-test script.
+  // The agent the test call talks with: the campaign's real script when asked (so it sounds exactly like
+  // a real call), otherwise a short line test. Falls back to the line test when no script is prepared.
+  const contactName = opts?.name?.trim() || "Test contact";
+  const realScript = opts?.useRealScript ? await loadLatestAgentScript(projectId) : null;
+  const agent = realScript
+    ? {
+        name: realScript.name || "Simran",
+        language: realScript.language || "hinglish",
+        ...(realScript.voiceId ? { voice_id: realScript.voiceId } : {}),
+        welcome_message: realScript.welcomeMessage,
+        system_prompt: realScript.systemPrompt,
+      }
+    : {
+        name: "Line test",
+        language: "hinglish",
+        welcome_message: "{time_greeting}. This is a test call from RevenueOS to check the line. If you can hear this, the line works.",
+        system_prompt:
+          "This is a line test. Greet briefly, say it is a test call to check the calling line, confirm the person can hear you, then thank them and end. Keep it under 20 seconds.",
+      };
+
+  // v2 launch: one contact (the number the person entered), auto_start. phone_number only when the
+  // project has its own line; a borrowed account reuses its line.
   const body: Record<string, unknown> = {
     client_reference: clientRef,
-    reference: `motm-linetest-${projectId.slice(0, 8)}-${Date.now()}`,
+    reference: `motm-testcall-${projectId.slice(0, 8)}-${Date.now()}`,
     user: {
       email,
       password: account?.calls_user_password ?? "",
       full_name: account?.calls_user_full_name ?? "RevenueOS",
       company_name: account?.calls_user_company ?? "RevenueOS",
     },
-    agent: {
-      name: "Line test",
-      language: "hinglish",
-      welcome_message: "{time_greeting}. This is a test call from RevenueOS to check the line. If you can hear this, the line works.",
-      system_prompt:
-        "This is a line test. Greet briefly, say it is a test call to check the calling line, confirm the person can hear you, then thank them and end. Keep it under 20 seconds.",
-    },
-    campaign: { name: "Line test" },
+    agent,
+    campaign: { name: "Test call" },
     // A line test rings the person's OWN number, so it must dial immediately — it should not obey the
     // business-hours calling window that real prospect campaigns use. Open it 24/7, every day.
     schedule: {
@@ -133,7 +175,7 @@ export async function placeTestCall(projectId: string, target: string): Promise<
       calling_days: ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
       timezone: "Asia/Kolkata",
     },
-    contacts: [{ name: "Line test", phone: target }],
+    contacts: [{ name: contactName, phone: target }],
     auto_start: true,
   };
   if (did && authId && authToken) body.phone_number = { auth_id: authId, auth_token: authToken, did };
@@ -153,7 +195,10 @@ export async function placeTestCall(projectId: string, target: string): Promise<
     const startStatus = String(data?.start_status ?? "");
     const reason = typeof data?.start_reason === "string" ? data.start_reason : null;
     if (startStatus === "started" || startStatus === "already_started") {
-      return { ok: true, detail: "Calling your number now — pick up to check the line and voice quality." };
+      return {
+        ok: true,
+        detail: `Calling ${contactName} at ${target} now${realScript ? " with the campaign's agent" : " (line test)"} — pick up to hear it.`,
+      };
     }
     if (startStatus === "blocked") {
       return { ok: false, detail: `Could not start: ${reason ?? "the line is not ready"}.` };

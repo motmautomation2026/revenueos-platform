@@ -371,6 +371,45 @@ export function emailPlanOf(output: unknown): EmailPlan | null {
   };
 }
 
+// ---------------------------------------------------------------------------
+// The calling agent's script — the voice equivalent of the email samples. The Brain's LLM writes it
+// per campaign (brain/quickhowl.py, CallScript) and stores it on the quickhowl 'request' tool call
+// (output.agent). loadCallScripts reads it so the Calls page can show how the agent talks.
+// ---------------------------------------------------------------------------
+
+export type CallScript = {
+  /** The agent's name, e.g. "Simran". */
+  name: string;
+  language: string;
+  voiceId: string;
+  speechPace: number | null;
+  /** The first line the agent speaks; {placeholders} like {name} are filled per person. */
+  welcomeMessage: string;
+  /** The agent's full instructions: what it offers, why it matters, what to ask. */
+  systemPrompt: string;
+  /** The placeholder names the script uses, e.g. ["name", "time_greeting"]. */
+  variables: string[];
+};
+
+/** The agent script out of a stored quickhowl 'request' tool call (its output column). Null if there is none. */
+export function callScriptOf(output: unknown): CallScript | null {
+  const agent = obj(obj(output).agent);
+  const welcome = str(agent.welcome_message);
+  const prompt = str(agent.system_prompt);
+  if (!welcome && !prompt) return null;
+  const rawVars = agent.variables;
+  const variables = Array.isArray(rawVars) ? rawVars.map(str).filter(Boolean) : Object.keys(obj(rawVars));
+  return {
+    name: str(agent.name),
+    language: str(agent.language),
+    voiceId: str(agent.voice_id),
+    speechPace: num(agent.speech_pace),
+    welcomeMessage: welcome,
+    systemPrompt: prompt,
+    variables,
+  };
+}
+
 /** How far sending is, over the whole sequence (every recipient x every email), from the email tool's counts. */
 export type SendingProgress = {
   total: number;
@@ -510,6 +549,8 @@ export type CallOutcome = {
 
 export type CallCampaign = {
   taskId: string;
+  /** The Brain's row id of the task, to find its agent script (loadCallScripts). */
+  rowId: number;
   status: TaskStatus;
   reference: string;
   achieved: number | null;
@@ -552,6 +593,7 @@ export function buildCallsReport({ tasks, decisions, toolCalls }: RunRows): Call
       const approved = approvalOf(task, "call_start", decisions);
       return {
         taskId: task.task_id,
+        rowId: task.id,
         status: task.status,
         reference: str(r.reference) || str(obj(approved?.row.question).reference),
         achieved: task.achieved_number ?? num(r.achieved),

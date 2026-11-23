@@ -25,11 +25,13 @@ import {
 } from "@/components/brain/parts";
 import { CallerCard } from "@/components/brain/caller-card";
 import { AccountStatusCard } from "@/components/brain/account-status-card";
+import { CallScriptCard } from "@/components/brain/call-script";
+import { TestCallCard } from "@/components/brain/test-call-card";
 import { explainCallProblem } from "@/lib/brain/call-errors";
 import { loadAccountStatus } from "@/lib/brain/account-status";
 import { loadCallSyncHealth } from "@/lib/brain/call-sync";
 import { loadCaller } from "@/lib/brain/caller-store";
-import { loadCallRecords, type CallRecord } from "@/lib/brain/read";
+import { loadCallRecords, loadCallScripts, type CallRecord } from "@/lib/brain/read";
 import {
   buildCallTiles,
   buildCallsReport,
@@ -81,6 +83,7 @@ export default async function CallsPage(props: ExecutionPageProps) {
   const callsStatusCard = accountStatus.available ? (
     <AccountStatusCard projectId={project.id} status={accountStatus} only="calls" />
   ) : null;
+  const testCallCard = caller.available ? <TestCallCard projectId={project.id} /> : null;
   const callSync = await loadCallSyncHealth(project.id);
   const syncWarning =
     callSync.state === "stale" ? (
@@ -107,6 +110,7 @@ export default async function CallsPage(props: ExecutionPageProps) {
         <h2 className="text-xl font-semibold tracking-tight">Calls</h2>
         {callerCard}
         {callsStatusCard}
+        {testCallCard}
         {syncWarning}
       </div>
     );
@@ -119,6 +123,8 @@ export default async function CallsPage(props: ExecutionPageProps) {
   const records = await loadCallRecords(
     report.campaigns.map((c) => c.reference),
   );
+  // The agent's script per campaign, so the person can confirm how the agent talks (like the email samples).
+  const scripts = await loadCallScripts(report.campaigns.map((c) => c.rowId));
 
   return (
     <div className="grid gap-8">
@@ -130,6 +136,7 @@ export default async function CallsPage(props: ExecutionPageProps) {
       />
       {callerCard}
       {callsStatusCard}
+      {testCallCard}
       {syncWarning}
 
       {report.campaigns.length === 0 && (
@@ -198,6 +205,8 @@ export default async function CallsPage(props: ExecutionPageProps) {
                 <p className="text-sm text-muted-foreground">{record.name}</p>
               )}
             </div>
+
+            {scripts.get(campaign.rowId) && <CallScriptCard script={scripts.get(campaign.rowId)!} />}
 
             {problem ? (
               <div

@@ -271,10 +271,20 @@ export async function saveCallerAccount(input: unknown): Promise<RequestResult> 
  * No run, no task, no approval — a direct line check so they can set up and verify in one place.
  */
 export async function testCallerLine(input: unknown): Promise<TestResult> {
-  const parsed = z.object({ projectId: z.uuid(), target: z.string() }).safeParse(input);
+  const parsed = z
+    .object({
+      projectId: z.uuid(),
+      target: z.string(),
+      name: z.string().max(80).optional(),
+      useRealScript: z.boolean().optional(),
+    })
+    .safeParse(input);
   if (!parsed.success) return { ok: false, detail: "Enter your number in full international form, e.g. +9198XXXXXXXX." };
   await requireProject(parsed.data.projectId);
-  return placeTestCall(parsed.data.projectId, parsed.data.target.trim());
+  return placeTestCall(parsed.data.projectId, parsed.data.target.trim(), {
+    name: parsed.data.name,
+    useRealScript: parsed.data.useRealScript,
+  });
 }
 
 /** Send one test email from THIS project's sender account. (Email send path is not wired yet.) */

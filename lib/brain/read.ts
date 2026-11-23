@@ -1,7 +1,7 @@
 import "server-only";
 import { cache } from "react";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { emailPlanOf, type EmailPlan, type RunRows } from "./tools";
+import { callScriptOf, emailPlanOf, type CallScript, type EmailPlan, type RunRows } from "./tools";
 import {
   buildExecutionView,
   monthOfRunKey,
@@ -178,6 +178,34 @@ export async function loadEmailPlans(taskRowIds: number[]): Promise<Map<number, 
     }
   } catch {
     // Optional extra detail: without it the page shows what the Brain recorded on the task.
+  }
+  return result;
+}
+
+/**
+ * The calling agent's script for each call task: its latest quickhowl 'request' tool call (output.agent).
+ * The voice equivalent of loadEmailPlans — the Calls page shows it so the person can confirm how the
+ * agent talks before approving, the way they review the sample emails.
+ */
+export async function loadCallScripts(taskRowIds: number[]): Promise<Map<number, CallScript>> {
+  const result = new Map<number, CallScript>();
+  if (!taskRowIds.length) return result;
+  try {
+    const { data } = await createAdminClient()
+      .from("brain_tool_calls")
+      .select("task_row_id, output")
+      .in("task_row_id", taskRowIds)
+      .eq("tool", "quickhowl")
+      .eq("step", "request")
+      .order("id", { ascending: false })
+      .returns<{ task_row_id: number; output: unknown }[]>();
+    for (const row of data ?? []) {
+      if (result.has(row.task_row_id)) continue; // newest first: the script as it was last prepared
+      const script = callScriptOf(row.output);
+      if (script) result.set(row.task_row_id, script);
+    }
+  } catch {
+    // Optional extra detail: without it the Calls page shows the campaign without the script preview.
   }
   return result;
 }
