@@ -35,6 +35,7 @@ type AccountRow = {
   calls_vobiz_auth_id: string | null;
   calls_vobiz_auth_token: string | null;
   calls_did: string | null;
+  workspace_password: string | null;
 };
 
 /** The signed-in user's own projects, each with a short summary of its sender and call line. */
@@ -78,10 +79,22 @@ async function loadAccount(projectId: string): Promise<AccountRow | null> {
   const { data } = await createAdminClient()
     .from("revenueos_brain_accounts")
     .select(
-      "project_id, email_client_reference, calls_client_reference, calls_user_email, calls_user_password, calls_user_full_name, calls_user_company, calls_vobiz_auth_id, calls_vobiz_auth_token, calls_did"
+      "project_id, email_client_reference, calls_client_reference, calls_user_email, calls_user_password, calls_user_full_name, calls_user_company, calls_vobiz_auth_id, calls_vobiz_auth_token, calls_did, workspace_password"
     )
     .eq("project_id", projectId)
     .maybeSingle<AccountRow>();
+  return data ?? null;
+}
+
+type ProjectRow = { brain_customer_key: string | null; customer_name: string | null; customer_email: string | null };
+
+/** The project's own identity, used to stand in for a borrowed account when the line is the project's own. */
+async function loadProjectFor(projectId: string): Promise<ProjectRow | null> {
+  const { data } = await createAdminClient()
+    .from(TABLES.projects)
+    .select("brain_customer_key, customer_name, customer_email")
+    .eq("id", projectId)
+    .maybeSingle<ProjectRow>();
   return data ?? null;
 }
 
@@ -124,15 +137,31 @@ export async function placeTestCall(
   if (!E164.test(target)) return { ok: false, detail: "Enter your number in full international form, e.g. +9198XXXXXXXX." };
 
   const account = await loadAccount(projectId);
-  const clientRef = account?.calls_client_reference?.trim();
-  const email = account?.calls_user_email?.trim();
-  if (!clientRef || !email) {
-    return { ok: false, detail: "This project has no calling account set. Set it on the Calls page first." };
-  }
-
   const did = account?.calls_did?.trim();
   const authId = account?.calls_vobiz_auth_id?.trim();
   const authToken = account?.calls_vobiz_auth_token?.trim();
+  const ownLine = !!(did && authId && authToken);
+
+  // An "own" caller line clears the borrowed-account columns (client_reference / user): the per-project
+  // account is opened at run time. For the test call we stand in for that — the project's own Brain key is
+  // the client_reference, its own email/password the user, and the Vobiz line (sent below) opens the
+  // account. A borrowed account keeps its own client_reference and user and reuses its connected line.
+  const project = await loadProjectFor(projectId);
+  const borrowedRef = account?.calls_client_reference?.trim();
+  const clientRef = borrowedRef || project?.brain_customer_key?.trim() || "";
+  const email = account?.calls_user_email?.trim() || project?.customer_email?.trim() || "";
+  if (!clientRef || !email) {
+    return { ok: false, detail: "This project has no calling account or caller line set. Set it on the Calls page first." };
+  }
+  if (!borrowedRef && !ownLine) {
+    return {
+      ok: false,
+      detail: "This customer's own calling line isn't connected yet. Add the caller number and Vobiz details on the Calls page, then test.",
+    };
+  }
+  const password = account?.calls_user_password?.trim() || account?.workspace_password?.trim() || "";
+  const fullName = account?.calls_user_full_name?.trim() || project?.customer_name?.trim() || "RevenueOS";
+  const company = account?.calls_user_company?.trim() || project?.customer_name?.trim() || "RevenueOS";
 
   // The agent the test call talks with: the campaign's real script when asked (so it sounds exactly like
   // a real call), otherwise a short line test. Falls back to the line test when no script is prepared.
@@ -161,9 +190,9 @@ export async function placeTestCall(
     reference: `motm-testcall-${projectId.slice(0, 8)}-${Date.now()}`,
     user: {
       email,
-      password: account?.calls_user_password ?? "",
-      full_name: account?.calls_user_full_name ?? "RevenueOS",
-      company_name: account?.calls_user_company ?? "RevenueOS",
+      password,
+      full_name: fullName,
+      company_name: company,
     },
     agent,
     campaign: { name: "Test call" },
