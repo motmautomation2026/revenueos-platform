@@ -564,7 +564,7 @@ def preview(body: dict) -> list[dict]:
             for number, email in enumerate(body.get("emails") or [], start=1)]
 
 
-SAMPLE_PEOPLE = 4         # how many people the tool writes sample emails for (HYPER only)
+SAMPLE_PEOPLE = 3         # how many people the tool writes sample emails for (HYPER only)
 
 
 def pick_samples(recipients: list[dict], n: int = SAMPLE_PEOPLE) -> list[str]:
