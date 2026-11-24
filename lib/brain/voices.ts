@@ -10,21 +10,18 @@ export type Voice = { id: string; name: string; gender: "female" | "male" };
 export type VoiceLanguage = { language: string; label: string; voices: Voice[] };
 
 export const DEFAULT_LANGUAGE = "hinglish";
-export const DEFAULT_VOICE_ID = "simran_enhi_customer";
+// Hinglish is served by ElevenLabs (owner's choice, 24 Nov 2026); Anshika is the default voice.
+export const DEFAULT_VOICE_ID = "XO3tSLyh5E7dEilRBQJG";
 
 // Only the languages the voice platform has enabled (pipelines.py `_ON`). The first voice of each is its
 // default, matching pipelines.default_voice (first of the list).
 export const VOICE_LANGUAGES: VoiceLanguage[] = [
   {
     language: "hinglish",
+    // ElevenLabs voices (the owner switched Hinglish from Sarvam to ElevenLabs). The ids are ElevenLabs
+    // voice ids, not Sarvam personas. Add more here as the owner adds them to the Hinglish list.
     label: "Hinglish (Hindi–English mix)",
-    voices: [
-      { id: "simran_enhi_customer", name: "Simran", gender: "female" },
-      { id: "ishita_enhi_customer", name: "Ishita", gender: "female" },
-      { id: "shalini_enhi_customer", name: "Shalini", gender: "female" },
-      { id: "sunny_enhi_customer", name: "Sunny", gender: "male" },
-      { id: "shubh_enhi_companion", name: "Shubh", gender: "male" },
-    ],
+    voices: [{ id: "XO3tSLyh5E7dEilRBQJG", name: "Anshika", gender: "female" }],
   },
   {
     language: "hindi",

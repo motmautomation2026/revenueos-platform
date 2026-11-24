@@ -144,7 +144,8 @@ MAX_TEST_CALLS = 3              # never more than this many contacts in test mod
 # AGENT_LANGUAGE; "" picks that language's default. The per-language voice list is in the payload guide.
 AGENT_NAME = "Simran"
 AGENT_LANGUAGE = "hinglish"     # hinglish, hindi, english, marathi, ... (see the guide)
-AGENT_VOICE_ID = "simran_enhi_customer"   # a Sarvam hinglish voice ("" = language default)
+# Hinglish is served by ElevenLabs now (owner's choice); Anshika is the default voice ("" = language default).
+AGENT_VOICE_ID = "XO3tSLyh5E7dEilRBQJG"
 AGENT_SPEECH_PACE = 1.0         # 0.7 to 1.5
 
 # ---- Campaign goal (decided by code, not the LLM) ----

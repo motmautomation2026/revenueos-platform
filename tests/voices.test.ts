@@ -25,5 +25,5 @@ test("voices: a known voice resolves with its own language, and a label reads ni
   assert.equal(found?.voice.gender, "male");
   assert.equal(found?.language.language, "english");
   assert.equal(voiceLabel("dev_en_conversational"), "Dev · English (Indian)");
-  assert.equal(voiceLabel("simran_enhi_customer"), "Simran · Hinglish (Hindi–English mix)");
+  assert.equal(voiceLabel("XO3tSLyh5E7dEilRBQJG"), "Anshika · Hinglish (Hindi–English mix)");
 });
