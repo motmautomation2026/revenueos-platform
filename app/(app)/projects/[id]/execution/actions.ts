@@ -8,6 +8,7 @@ import { saveAccounts } from "@/lib/brain/account-store";
 import { refreshAccountStatus } from "@/lib/brain/account-status";
 import { callerSchema } from "@/lib/brain/caller";
 import { saveCaller } from "@/lib/brain/caller-store";
+import { saveVoice } from "@/lib/brain/voice-store";
 import { approvePaidStep } from "@/lib/brain/paid-steps";
 import { saveSender } from "@/lib/brain/sender-store";
 import { placeTestCall, sendTestEmail, type TestResult } from "@/lib/tools/test-tools";
@@ -41,6 +42,20 @@ export async function rerunTask(input: unknown): Promise<RerunResult> {
   if (project.owner_id !== user.id) return { ok: false, error: "Only the project owner can re-run steps." };
   const result = await rerunFrom(projectId, taskId);
   if (result.ok) revalidatePath(`/projects/${projectId}`, "layout");
+  return result;
+}
+
+/**
+ * Set the AI calling voice for this project. Owner only. Applies to the next call campaign (the voice
+ * platform makes a new agent when the voice changes; a running campaign is not affected).
+ */
+export async function saveAgentVoice(input: unknown): Promise<{ ok: true; message: string } | { ok: false; error: string }> {
+  const { projectId, voiceId } = (input ?? {}) as { projectId?: string; voiceId?: string };
+  if (typeof projectId !== "string" || typeof voiceId !== "string") return { ok: false, error: "Invalid request." };
+  const { user, project } = await requireProject(projectId);
+  if (project.owner_id !== user.id) return { ok: false, error: "Only the project owner can change the voice." };
+  const result = await saveVoice(project.id, user.id, voiceId);
+  if (result.ok) revalidatePath(`/projects/${project.id}`, "layout");
   return result;
 }
 

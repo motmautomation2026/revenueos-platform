@@ -489,6 +489,39 @@ def auto_approve_seconds(customer: str):
         return None
 
 
+def agent_voice(customer: str):
+    """
+    This project's chosen AI calling voice (revenueos_brain_accounts, set in the platform), or None when
+    it is unset / unknown. Returns {"voice_id", "language", "name", "gender"} when set; quickhowl.build_request
+    then uses it instead of the default agent voice (the name, gender and language make the agent's script
+    match the voice's persona). Fail-open: ANY error, or a selftest customer, returns None, so the default
+    voice is kept on a read problem.
+    """
+    if not customer or customer.startswith(SELFTEST_PREFIX):
+        return None
+    try:
+        projects = (db.table("revenueos_projects").select("id")
+                      .eq("brain_customer_key", customer).limit(1).execute().data) or []
+        project_id = projects[0].get("id") if projects else None
+        if not project_id:
+            return None
+        rows = (db.table("revenueos_brain_accounts")
+                  .select("calls_voice_id, calls_language, calls_voice_name, calls_voice_gender")
+                  .eq("project_id", project_id).limit(1).execute().data) or []
+        row = rows[0] if rows else {}
+        voice_id = (row.get("calls_voice_id") or "").strip()
+        if not voice_id:
+            return None
+        return {"voice_id": voice_id,
+                "language": (row.get("calls_language") or "").strip(),
+                "name": (row.get("calls_voice_name") or "").strip(),
+                "gender": (row.get("calls_voice_gender") or "").strip()}
+    except Exception as error:   # noqa: BLE001 -- optional setting; must never break a run
+        from orch import brain_log
+        brain_log.write("WARNING", f"agent voice: could not read the setting for {customer}", error=error)
+        return None
+
+
 # ================= SEPARATION TEST (selftest-* customer only) =================
 
 def expect(label: str, condition: bool) -> None:

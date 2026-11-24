@@ -1,18 +1,32 @@
 import { Bot, MessagesSquare } from "lucide-react";
 import type { CallScript } from "@/lib/brain/tools";
+import { VoiceSelect } from "@/components/brain/voice-select";
+
+/** What the card needs of the project's saved voice (lib/brain/voice-store VoiceState). */
+type VoiceState = { available: boolean; chosen: { voiceId: string } };
 
 /**
  * "How the agent talks" — the script this call campaign uses, shown so a person can confirm it before
  * approving, the way they review the sample emails. The opening line is always shown; the agent's full
- * instructions are behind a toggle because they can be long.
+ * instructions are behind a toggle because they can be long. When `voice` is given, the person can change
+ * the voice (default pre-selected); it applies to the next campaign.
  */
-export function CallScriptCard({ script }: { script: CallScript }) {
+export function CallScriptCard({
+  script,
+  projectId,
+  voice,
+}: {
+  script: CallScript;
+  projectId?: string;
+  voice?: VoiceState | null;
+}) {
   const cap = (s: string) => (s ? s[0].toUpperCase() + s.slice(1) : s);
   const meta = [
     script.name && `Agent: ${script.name}`,
     script.language && cap(script.language),
-    script.voiceId && `Voice: ${script.voiceId}`,
     script.speechPace != null && `Pace ${script.speechPace}×`,
+    // The static voice label is shown only when the voice can't be changed here.
+    !(voice?.available && projectId) && script.voiceId && `Voice: ${script.voiceId}`,
   ]
     .filter(Boolean)
     .join(" · ");
@@ -33,6 +47,14 @@ export function CallScriptCard({ script }: { script: CallScript }) {
       </div>
 
       {meta && <p className="text-xs text-muted-foreground">{meta}</p>}
+
+      {voice?.available && projectId && (
+        <div className="grid gap-1">
+          <p className="text-xs font-semibold tracking-wide text-muted-foreground uppercase">Voice</p>
+          <VoiceSelect projectId={projectId} current={voice.chosen.voiceId} />
+          <p className="text-xs text-muted-foreground">The default is selected. Changing it applies to the next call campaign.</p>
+        </div>
+      )}
 
       <div className="grid gap-1">
         <p className="text-xs font-semibold tracking-wide text-muted-foreground uppercase">Opening line</p>

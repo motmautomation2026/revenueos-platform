@@ -100,9 +100,10 @@ class RealCallTools:
         """The calling account chosen for this customer NOW (run_for.py, from the platform)."""
         return (os.getenv("QUICKHOWL_CLIENT_REFERENCE") or "").strip() or None
 
-    def build_request(self, contacts: list[dict]) -> dict:
+    def build_request(self, contacts: list[dict], voice: dict | None = None) -> dict:
         import quickhowl
-        request = quickhowl.build_request(contacts, understanding=self.understanding, work_order=self.work_order)
+        request = quickhowl.build_request(contacts, understanding=self.understanding,
+                                          work_order=self.work_order, voice=voice)
         quickhowl.assert_safe(request)
         return request
 
@@ -176,10 +177,12 @@ class FakeCallTools:
         return [{"name": p["full_name"], "phone": self.numbers[i], "company": p["company"].get("company_name")}
                 for i, p in enumerate(people)]
 
-    def build_request(self, contacts):
+    def build_request(self, contacts, voice=None):
         self.calls["build"] += 1
+        agent = voice or {"name": "Simran", "language": "hinglish"}
         return {"client_reference": "selftest", "reference": f"motm-selftest-call-{uuid.uuid4().hex[:12]}",
-                "contacts": contacts, "agent": {"name": "Simran", "language": "hinglish"}}
+                "contacts": contacts, "agent": {"name": agent.get("name", "Simran"),
+                                                "language": agent.get("language", "hinglish")}}
 
     def launch(self, request, auto_start):
         from runner_quickicp_accounts import SimulatedCrash
@@ -276,8 +279,11 @@ def run_calls(ctx: RunnerContext, tools) -> RunnerResult:
                 "skipped": skipped, "crm_skipped": crm_skipped}
     picked = ctx.free_call("contacts", pick, tool="supabase")
 
-    # 2. the request (profile by the LLM), made ONCE
-    request = ctx.free_call("request", lambda: tools.build_request(picked["contacts"]), tool="quickhowl")
+    # 2. the request (profile by the LLM), made ONCE. The project's chosen voice (platform) shapes the
+    #    agent; None keeps the default agent.
+    from supabase_store import agent_voice
+    voice = agent_voice(customer)
+    request = ctx.free_call("request", lambda: tools.build_request(picked["contacts"], voice=voice), tool="quickhowl")
     reference = request["reference"]
 
     # WHICH calling account the campaign goes to is chosen in the platform, and can still be changed

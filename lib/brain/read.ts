@@ -489,6 +489,85 @@ export async function loadCallRecords(references: string[]): Promise<Map<string,
   return result;
 }
 
+// ---------------------------------------------------------------------------
+// Live call progress (the Brain's latest poll — the only live source)
+// ---------------------------------------------------------------------------
+
+export type LiveCall = {
+  id: string;
+  name: string;
+  company: string;
+  phone: string;
+  /** The tool's status for this call, e.g. "completed", "in_progress". */
+  status: string;
+  /** The result once the call finishes, e.g. "interested", "no_answer" ("" while in progress). */
+  outcome: string;
+  durationSeconds: number | null;
+  summary: string;
+};
+
+export type CallProgress = {
+  /** The campaign status the last poll saw, e.g. "running" / "completed". */
+  campaignStatus: string;
+  calls: LiveCall[];
+};
+
+function callProgressOf(output: unknown): CallProgress | null {
+  if (!output || typeof output !== "object") return null;
+  const o = output as Record<string, unknown>;
+  const callsObj = o.calls;
+  if (!callsObj || typeof callsObj !== "object") return null;
+  const calls: LiveCall[] = Object.values(callsObj as Record<string, unknown>)
+    .filter((c): c is Record<string, unknown> => !!c && typeof c === "object")
+    .map((c) => {
+      const contact = (c.contact && typeof c.contact === "object" ? c.contact : {}) as Record<string, unknown>;
+      return {
+        id: text(c.call_id) || text(c.id),
+        name: text(contact.name),
+        company: text(contact.company),
+        phone: text(contact.phone),
+        status: text(c.status),
+        outcome: text(c.outcome),
+        durationSeconds: typeof c.duration_seconds === "number" ? c.duration_seconds : null,
+        summary: text(c.summary),
+      };
+    });
+  if (!calls.length) return null;
+  return { campaignStatus: text(o.status), calls };
+}
+
+/**
+ * Live per-call progress from the Brain's most recent `poll` of a calls task. This is the only live
+ * source while a campaign is dialing: the voice platform's own tables (loadCallRecords) stopped syncing
+ * to this database, but the Brain writes a fresh snapshot of every call into the poll step's output each
+ * minute. Reads only the latest poll per task (newest first, one per task_row_id), so the big snapshot is
+ * pulled just for the calls that are running. Empty when a task has not polled yet.
+ */
+export async function loadCallProgress(taskRowIds: number[]): Promise<Map<number, CallProgress>> {
+  const result = new Map<number, CallProgress>();
+  const wanted = [...new Set(taskRowIds.filter((id) => Number.isFinite(id)))];
+  if (!wanted.length) return result;
+  try {
+    const { data } = await createAdminClient()
+      .from("brain_tool_calls")
+      .select("task_row_id, output")
+      .in("task_row_id", wanted)
+      .eq("tool", "quickhowl")
+      .eq("step", "poll")
+      .eq("status", "done")
+      .order("id", { ascending: false })
+      .returns<{ task_row_id: number; output: unknown }[]>();
+    for (const row of data ?? []) {
+      if (result.has(row.task_row_id)) continue; // newest first: the latest poll snapshot wins
+      const progress = callProgressOf(row.output);
+      if (progress) result.set(row.task_row_id, progress);
+    }
+  } catch {
+    // Live progress is optional: without it the Calls page shows the Brain's summary once calls finish.
+  }
+  return result;
+}
+
 
 // ---------------------------------------------------------------------------
 // The email tool's own records, as counts only

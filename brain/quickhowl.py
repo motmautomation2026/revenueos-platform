@@ -374,14 +374,18 @@ def internal_words_in(profile) -> dict:
     return found
 
 
-def make_profile(understanding: dict, work_order: dict) -> dict:
+def make_profile(understanding: dict, work_order: dict, *, name: str = AGENT_NAME,
+                 language: str = AGENT_LANGUAGE, gender: str = "female") -> dict:
     """
     The agent's script for v2. The LLM writes welcome_message and system_prompt (in the agent's language,
     with {placeholders}); code appends the fixed tone and supplies placeholder defaults. There is no
     company_profile and no Prime any more: the per-contact wording comes from the placeholders the platform
     fills for each call (the contact's own fields win; `variables` are the fallbacks).
+    name / language / gender describe the chosen voice, so the script matches it (the project can pick the
+    voice in the platform; the default is Simran, Hinglish, female).
     Returns {"welcome_message", "system_prompt", "variables"}.
     """
+    pronoun = "he" if gender.strip().lower() == "male" else "she"
     company = customer_display_name(understanding)
     facts = {
         "customer": company,
@@ -391,9 +395,9 @@ def make_profile(understanding: dict, work_order: dict) -> dict:
         "calls_work_order": {k: work_order.get(k) for k in ("task", "target", "instructions") if k in work_order},
     }
     prompt = (
-        f"You write what an AI voice caller named {AGENT_NAME} says on behalf of {company}, in "
-        f"{AGENT_LANGUAGE}. Write two things:\n"
-        f"- welcome_message: the opening line. {AGENT_NAME} greets the person and says she is calling from "
+        f"You write what an AI voice caller named {name} says on behalf of {company}, in "
+        f"{language}. Write two things:\n"
+        f"- welcome_message: the opening line. {name} greets the person and says {pronoun} is calling from "
         f"{company}. Use {{name}} for the person; you may use {{time_greeting}}.\n"
         "- system_prompt: the caller's instructions — what the company offers, why a buyer should care, the "
         f"goal (find out how they handle this today, check interest, and offer a short follow-up meeting with "
@@ -434,11 +438,13 @@ def make_profile(understanding: dict, work_order: dict) -> dict:
 
 # ================= REQUEST: BUILD, SECRETS, SAFETY =================
 
-def build_request(contacts: list[dict], understanding: dict, work_order: dict) -> dict:
+def build_request(contacts: list[dict], understanding: dict, work_order: dict, voice: dict | None = None) -> dict:
     """
     The full request WITHOUT secrets (the calls runner saves it in the ledger; 'start' resends exactly this).
     contacts, understanding, work_order: given by the runner (the run's understanding, THIS task's work
     order). Never read from data/ files.
+    voice: the project's chosen voice {voice_id, language, name, gender} (supabase_store.agent_voice), or
+    None to use the default agent (AGENT_* above). The script is written to match the chosen voice.
     """
     check_settings("OPENAI_MODEL", *REQUIRED_KEYS)
     check_login()
@@ -446,7 +452,13 @@ def build_request(contacts: list[dict], understanding: dict, work_order: dict) -
     if reason:
         raise ToolError(reason)
 
-    made = make_profile(understanding, work_order)
+    voice = voice or {}
+    agent_name = (voice.get("name") or "").strip() or AGENT_NAME
+    agent_language = (voice.get("language") or "").strip() or AGENT_LANGUAGE
+    agent_voice_id = (voice.get("voice_id") or "").strip() or AGENT_VOICE_ID
+    agent_gender = (voice.get("gender") or "").strip() or "female"
+
+    made = make_profile(understanding, work_order, name=agent_name, language=agent_language, gender=agent_gender)
     company = customer_display_name(understanding)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
 
@@ -454,9 +466,9 @@ def build_request(contacts: list[dict], understanding: dict, work_order: dict) -
         "client_reference": os.getenv("QUICKHOWL_CLIENT_REFERENCE"),
         "reference": f"motm-{slug(company)}-call-{stamp}"[:120],
         "agent": {
-            "name": AGENT_NAME,
-            "language": AGENT_LANGUAGE,
-            "voice_id": AGENT_VOICE_ID,
+            "name": agent_name,
+            "language": agent_language,
+            "voice_id": agent_voice_id,
             "welcome_message": made["welcome_message"],
             "system_prompt": made["system_prompt"],
             "variables": made["variables"],

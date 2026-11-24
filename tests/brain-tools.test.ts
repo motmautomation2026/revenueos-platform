@@ -14,6 +14,7 @@ import {
   buildResearchReport,
   buildResultTiles,
   placeOf,
+  summariseLiveCalls,
   toolsInRun,
   type RunRows,
 } from "../lib/brain/tools";
@@ -322,6 +323,25 @@ test("calling campaign: stages, and tiles that explain themselves", () => {
   const unknown = buildCallTiles(campaign, null);
   assert.deepEqual([unknown[1].value, unknown[1].verdict], [null, null]);
   assert.match(unknown[1].lines[0], /no record of this campaign/);
+});
+
+test("live call progress: finished counted by status, outcomes most common first", () => {
+  const summary = summariseLiveCalls([
+    { status: "completed", outcome: "interested" },
+    { status: "no_answer", outcome: "no_answer" },
+    { status: "in_progress", outcome: "pending" }, // still dialing
+    { status: "completed", outcome: "interested" },
+    { status: "", outcome: "" }, // still dialing
+    { status: "failed", outcome: "pending" }, // finished, labelled by status not "pending"
+  ]);
+  assert.deepEqual([summary.total, summary.completed, summary.inProgress], [6, 4, 2]);
+  assert.deepEqual(summary.outcomes, [
+    { label: "interested", count: 2 },
+    { label: "failed", count: 1 },
+    { label: "no answer", count: 1 },
+  ]);
+  const empty = summariseLiveCalls([]);
+  assert.deepEqual([empty.total, empty.completed, empty.inProgress, empty.outcomes], [0, 0, 0, []]);
 });
 
 test("activity: repeated steps become one line, and filters narrow the list", () => {

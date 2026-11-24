@@ -32,12 +32,22 @@ import { explainCallProblem } from "@/lib/brain/call-errors";
 import { loadAccountStatus } from "@/lib/brain/account-status";
 import { loadCallSyncHealth } from "@/lib/brain/call-sync";
 import { loadCaller } from "@/lib/brain/caller-store";
-import { loadCallRecords, loadCallScripts, type CallRecord } from "@/lib/brain/read";
+import { loadVoice } from "@/lib/brain/voice-store";
+import {
+  loadCallProgress,
+  loadCallRecords,
+  loadCallScripts,
+  type CallProgress,
+  type CallRecord,
+} from "@/lib/brain/read";
 import {
   buildCallTiles,
   buildCallsReport,
   callHealth,
+  liveCallLabel,
+  summariseLiveCalls,
   type CallOutcome,
+  type LiveCallSummary,
 } from "@/lib/brain/tools";
 import { cn } from "@/lib/utils";
 import { loadExecutionPage, type ExecutionPageProps } from "../load";
@@ -166,6 +176,11 @@ export default async function CallsPage(props: ExecutionPageProps) {
   );
   // The agent's script per campaign, so the person can confirm how the agent talks (like the email samples).
   const scripts = await loadCallScripts(report.campaigns.map((c) => c.rowId));
+  // Live per-call progress from the Brain's latest poll (the only live source while a campaign dials;
+  // the voice platform's own tables stopped syncing to this database).
+  const progress = await loadCallProgress(report.campaigns.map((c) => c.rowId));
+  // The project's AI calling voice (default pre-selected), so the person can change it on the script card.
+  const voice = await loadVoice(project.id);
 
   return (
     <div className="grid gap-8">
@@ -212,6 +227,10 @@ export default async function CallsPage(props: ExecutionPageProps) {
             : stage,
         );
         const waitingOnPerson = campaign.status === "waiting_human";
+        // While the campaign is still dialing, show the Brain's latest poll snapshot (live), since the
+        // final outcomes are only written once every call is done.
+        const live = campaign.status === "running" ? progress.get(campaign.rowId) ?? null : null;
+        const liveSummary = live ? summariseLiveCalls(live.calls) : null;
         // Calls placed but none connected: the campaign "finished" yet every call failed to reach anyone.
         const health = callHealth(campaign.outcomes);
 
@@ -249,7 +268,9 @@ export default async function CallsPage(props: ExecutionPageProps) {
               )}
             </div>
 
-            {scripts.get(campaign.rowId) && <CallScriptCard script={scripts.get(campaign.rowId)!} />}
+            {scripts.get(campaign.rowId) && (
+              <CallScriptCard script={scripts.get(campaign.rowId)!} projectId={project.id} voice={voice} />
+            )}
 
             {health.noneConnected && !problem && (
               <div
@@ -311,6 +332,8 @@ export default async function CallsPage(props: ExecutionPageProps) {
             )}
 
             <StageTrack stages={stages} />
+
+            {live && liveSummary && <LiveProgress live={live} summary={liveSummary} />}
 
             {callCount > 0 && (
               <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
@@ -561,6 +584,53 @@ function CallCard({ call }: { call: CallRecord }) {
         )}
       </div>
     </li>
+  );
+}
+
+/**
+ * Live progress while a campaign is still dialing, from the Brain's latest poll snapshot. Server-rendered,
+ * so it shows the state as of this page load — refresh to update.
+ */
+function LiveProgress({ live, summary }: { live: CallProgress; summary: LiveCallSummary }) {
+  const recent = live.calls.slice(-8).reverse();
+  return (
+    <div className="grid gap-3 rounded-xl border border-primary/30 bg-primary/5 p-4">
+      <SectionTitle
+        aside={<span className="text-xs font-normal text-muted-foreground">as of now · refresh to update</span>}
+      >
+        Live progress
+      </SectionTitle>
+      <div className="flex flex-wrap gap-1.5 text-sm">
+        <Pill className="bg-primary/10 text-primary">{number.format(summary.total)} dialed</Pill>
+        <Pill className="bg-emerald-500/15 text-emerald-800">{number.format(summary.completed)} finished</Pill>
+        {summary.inProgress > 0 && (
+          <Pill className="bg-amber-500/20 text-amber-900">{number.format(summary.inProgress)} in progress</Pill>
+        )}
+        {summary.outcomes.map((outcome) => (
+          <Pill key={outcome.label} className={outcomeTone(outcome.label)}>
+            {number.format(outcome.count)} {outcome.label.toLowerCase()}
+          </Pill>
+        ))}
+      </div>
+      {recent.length > 0 && (
+        <ul className="grid gap-1.5">
+          {recent.map((call) => (
+            <li
+              key={call.id}
+              className="flex items-center justify-between gap-3 rounded-lg bg-background px-3 py-2 text-sm"
+            >
+              <span className="min-w-0 truncate">
+                <span className="font-medium">{call.name || "Unnamed contact"}</span>
+                {call.company && <span className="text-muted-foreground"> · {call.company}</span>}
+              </span>
+              <Pill className={outcomeTone(liveCallLabel(call))}>
+                {liveCallLabel(call)}
+              </Pill>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 

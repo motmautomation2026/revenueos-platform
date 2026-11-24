@@ -567,6 +567,50 @@ export function callHealth(outcomes: CallOutcome[]): CallHealth {
   return { attempted, connected, failed, noneConnected: attempted > 0 && connected === 0 };
 }
 
+export type LiveCallSummary = {
+  /** Calls the tool has dialed so far (the snapshot's size). */
+  total: number;
+  /** Of those, how many have finished (have an outcome). */
+  completed: number;
+  /** Dialed but not finished yet. */
+  inProgress: number;
+  /** Finished calls grouped by outcome, most common first. */
+  outcomes: { label: string; count: number }[];
+};
+
+// A call is still being worked while its status is one of these (or empty); any other status is terminal.
+const LIVE_CALL_ACTIVE = new Set([
+  "", "pending", "in_progress", "in-progress", "ringing", "queued", "dialing", "calling", "initiated", "started",
+]);
+
+/** The outcome label for one call: the conversation result when it connected, else the call status. */
+export function liveCallLabel(call: { status: string; outcome: string }): string {
+  const status = (call.status || "").trim().toLowerCase();
+  const raw = status === "completed" ? (call.outcome || "completed") : status || "dialing";
+  return (raw.trim().toLowerCase() || "dialing").replace(/_/g, " ");
+}
+
+/**
+ * A compact tally of a live poll snapshot: how many calls so far, how many finished, and the outcomes.
+ * "Finished" is decided by the call status (a call with no answer or a failure is finished even though it
+ * carries no conversation outcome). Pure, so the Calls page can show live progress while a campaign dials.
+ */
+export function summariseLiveCalls(calls: { status: string; outcome: string }[]): LiveCallSummary {
+  const counts = new Map<string, number>();
+  let completed = 0;
+  for (const call of calls) {
+    const status = (call.status || "").trim().toLowerCase();
+    if (LIVE_CALL_ACTIVE.has(status)) continue; // still dialing / ringing — not finished yet
+    completed += 1;
+    const label = liveCallLabel(call);
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+  }
+  const outcomes = [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([label, count]) => ({ label, count }));
+  return { total: calls.length, completed, inProgress: calls.length - completed, outcomes };
+}
+
 export type CallCampaign = {
   taskId: string;
   /** The Brain's row id of the task, to find its agent script (loadCallScripts). */
