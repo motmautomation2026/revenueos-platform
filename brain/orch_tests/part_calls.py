@@ -22,7 +22,9 @@ def selftest_calls() -> bool:
     print(f"\nOrchestrator CALLS selftest (fake Quickhowl): customer '{customer}'")
     real_entry = WIRED_RUNNERS["calls"]
     ok = False
-    phones = ["+919811300501", "+911126142451", "+918126409111", "+919694757222"]   # 2nd is a landline
+    # Line type is not a filter any more: the mobile, the landline (2nd) and the unknown (3rd) are all
+    # called. Only the last person, who has no phone number, is skipped.
+    phones = ["+919811300501", "+911126142451", "+918126409111", "+919694757222", ""]
     rows = [{"id": 911 + i, "customer": customer, "full_name": f"Caller {i}", "phone_number": phone,
              "company": {"company_name": f"C{i}"}} for i, phone in enumerate(phones)]
 
@@ -45,21 +47,22 @@ def selftest_calls() -> bool:
 
     saved_flags = (quickhowl.TEST_MODE, quickhowl.REAL_CALLS_ENABLED)
     try:
-        # Q1-Q3. mobile only; test numbers only; stored -> call_start -> start -> poll -> done with outcomes
+        # Q1-Q3. all line types called; test numbers only; stored -> call_start -> start -> poll -> done
         fake = FakeCallTools(rows)
         run = setup("2029-07", fake)
         cmd_run(customer, "2029-07")
         q = decision(run)["question"]
-        expect("Q1 landline skipped; TEST MODE: 2 contacts (2 test numbers), our numbers only; stored, nobody called",
+        expect("Q1 TEST MODE: 2 contacts (2 test numbers), our numbers only; stored, nobody called",
                [c["phone"] for c in q["contacts"]] == ["+919000000001", "+919000000002"]
                and fake.calls["store"] == 1 and fake.calls["start"] == 0 and t2(run)["waiting_for"] == "call_start")
         cmd_answer(customer, decision(run)["id"], "yes", "call our test phones")
         cmd_run(customer, "2029-07")
         task = t2(run)
-        expect("Q3 yes -> start -> polled until finished -> done: 2 completed, outcomes per person, landline recorded",
+        expect("Q3 yes -> start -> polled until finished -> done: 2 completed, outcomes per person; the "
+               "no-phone person is the only one skipped (line type is not a filter)",
                fake.calls["start"] == 1 and task["status"] == "done" and task["achieved_number"] == 2
-               and [o["person_id"] for o in task["result"]["outcomes"]] == [911, 913]
-               and task["result"]["skipped_landlines"][0]["phone_type"] == "landline"
+               and [o["person_id"] for o in task["result"]["outcomes"]] == [911, 912]
+               and [s["phone_type"] for s in task["result"]["skipped_landlines"]] == ["no_number"]
                and task["result"]["outcome_counts"] == {"interested": 1, "no_answer": 1})
 
         # Q2. Quickhowl's own safety checks (module flags switched for this check only)
@@ -123,7 +126,7 @@ def selftest_calls() -> bool:
         fake = FakeCallTools(rows)
         run = setup("2030-01", fake)
         result = cmd_dry(customer, "2030-01")
-        expect("Q9 --dry: 2 contacts, 1 skipped landline; nothing stored, nothing recorded",
+        expect("Q9 --dry: 2 contacts, 1 skipped (no phone number); nothing stored, nothing recorded",
                result.output["contacts"] == 2 and result.output["skipped"] == 1 and fake.calls["store"] == 0
                and t2(run)["status"] == "pending")
         # Q10. the real-call gate: REAL_CALLS_ENABLED (go-live) AND QUICKHOWL_DND_HANDLED=true (flags in-process only)

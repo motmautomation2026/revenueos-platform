@@ -362,26 +362,6 @@ export default async function CallsPage(props: ExecutionPageProps) {
               </div>
             )}
 
-            {campaign.skippedLandlines.length > 0 && (
-              <div className="grid gap-2">
-                <SectionTitle
-                  aside={`${number.format(campaign.skippedLandlines.length)} contacts`}
-                >
-                  Left out: landline only
-                </SectionTitle>
-                <ul className="flex flex-wrap gap-1.5">
-                  {campaign.skippedLandlines.map((skipped, i) => (
-                    <li
-                      key={i}
-                      className="rounded-full border px-2.5 py-1 text-sm"
-                    >
-                      {skipped.name || "Unnamed contact"}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
-
             <details className="rounded-xl border text-sm">
               <summary className="cursor-pointer px-4 py-3 font-medium">
                 Technical details

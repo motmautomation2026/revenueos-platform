@@ -175,7 +175,6 @@ export default async function ResearchPage(props: ExecutionPageProps) {
                   <tbody>
                     {records.people.map((person) => {
                       const profile = safeUrl(person.user_social);
-                      const phoneType = report.phoneTypes[String(person.id)];
                       return (
                         <tr key={person.id} className="border-t align-middle">
                           <td className="px-4 py-2.5">
@@ -211,16 +210,6 @@ export default async function ResearchPage(props: ExecutionPageProps) {
                           <td className="px-4 py-2.5 break-all">{person.email ?? "—"}</td>
                           <td className="px-4 py-2.5 whitespace-nowrap">
                             <span className="tabular-nums">{person.phone_number ? maskPhone(person.phone_number) : "—"}</span>
-                            {phoneType && (
-                              <Pill
-                                className={cn(
-                                  "ml-2 capitalize",
-                                  phoneType === "mobile" ? "bg-emerald-500/15 text-emerald-800" : "bg-amber-500/20 text-amber-900"
-                                )}
-                              >
-                                {phoneType}
-                              </Pill>
-                            )}
                           </td>
                           <td className="px-4 py-2.5">
                             {usedPeople.has(person.id) ? (

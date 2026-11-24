@@ -775,13 +775,13 @@ export function buildCallTiles(
     lines: interestLines,
   });
 
-  const landlines = campaign.skippedLandlines.length;
+  const noPhone = campaign.skippedLandlines.length;
   const doNotCall = campaign.rejectedDoNotCall ?? 0;
   const byTool = campaign.rejectedByTool ?? 0;
   const crmHandled = campaign.skippedCrmHandled;
-  const notCalled = landlines + doNotCall + byTool + crmHandled;
+  const notCalled = noPhone + doNotCall + byTool + crmHandled;
   const reasons: string[] = [];
-  if (landlines) reasons.push(`${plain.format(landlines)} ${landlines === 1 ? "has" : "have"} only a landline.`);
+  if (noPhone) reasons.push(`${plain.format(noPhone)} ${noPhone === 1 ? "has" : "have"} no phone number.`);
   if (doNotCall) reasons.push(`${plain.format(doNotCall)} ${doNotCall === 1 ? "is" : "are"} on the do-not-call list.`);
   if (byTool) reasons.push(`${plain.format(byTool)} ${byTool === 1 ? "was" : "were"} rejected by Quickhowl.`);
   if (crmHandled)
@@ -1123,21 +1123,23 @@ export function buildResultTiles(report: ResearchReport): ResultTile[] {
   }
 
   if (contacts.mobile != null) {
+    // Line type is not a filter: mobiles and landlines are both called. Only a contact with no phone
+    // number at all cannot be called.
     const landline = contacts.landline ?? 0;
-    const noPhone = total != null ? Math.max(0, total - contacts.mobile - landline) : 0;
+    const withPhone = contacts.mobile + landline;
+    const noPhone = total != null ? Math.max(0, total - withPhone) : 0;
     const lines: string[] = [];
-    if (landline > 0) lines.push(`${count.format(landline)} ${landline === 1 ? "has" : "have"} only a landline and ${landline === 1 ? "is" : "are"} not called.`);
-    if (noPhone > 0) lines.push(`${count.format(noPhone)} ${noPhone === 1 ? "has" : "have"} no phone number.`);
-    if (!lines.length) lines.push("Every contact has a mobile number.");
+    if (noPhone > 0) lines.push(`${count.format(noPhone)} ${noPhone === 1 ? "has" : "have"} no phone number and cannot be called.`);
+    if (!lines.length) lines.push("Every contact has a phone number.");
     tiles.push({
       key: "mobile",
       label: "Can be called",
-      value: contacts.mobile,
+      value: withPhone,
       of: total,
       ofLabel: "contacts",
-      percent: pct(contacts.mobile, total),
+      percent: pct(withPhone, total),
       verdict:
-        total == null ? null : contacts.mobile >= total ? { text: "All of them", tone: "good" } : { text: `${count.format(total - contacts.mobile)} cannot`, tone: "attention" },
+        total == null ? null : withPhone >= total ? { text: "All of them", tone: "good" } : { text: `${count.format(total - withPhone)} cannot`, tone: "attention" },
       lines,
     });
   }

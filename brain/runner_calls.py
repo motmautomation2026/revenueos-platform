@@ -7,8 +7,9 @@ Wraps quickhowl.py (same profile, same safety checks, same API calls) with the b
 
 FLOW (each step recorded in brain_tool_calls)
 ----
-    1. contacts  FREE  the people T4 recorded for THIS run (this customer only). Only MOBILE numbers
-                       (supabase_store.phone_type); landlines / unknown numbers are skipped and recorded.
+    1. contacts  FREE  the people T4 recorded for THIS run (this customer only). Every person with a
+                       phone number is called: mobile, landline and unknown line types alike. Only a
+                       person with no phone number at all is skipped and recorded.
                        TEST_MODE: real details, but the phone is one of TEST_CALL_NUMBERS (max 3).
                        REAL MODE needs REAL_CALLS_ENABLED = True (stays False until go-live) AND
                        QUICKHOWL_DND_HANDLED=true (DND is handled by the Quickhowl platform).
@@ -33,7 +34,7 @@ PLAN DATA
 
 DEBUGGING
 ---------
-    "STOPPED: no MOBILE number among T4's people"   -> T4 found only landlines; see the output 'skipped'
+    "STOPPED: no phone number among T4's people"    -> none of T4's people has a phone; see 'skipped'
     "STOPPED: Real calls are off"                   -> by design until go-live (REAL_CALLS_ENABLED)
     "STOPPED: QUICKHOWL_DND_HANDLED is not true"    -> add QUICKHOWL_DND_HANDLED=true to .env (DND by Quickhowl)
     contacts_rejected                               -> numbers Quickhowl refused (bad, duplicate, do-not-call);
@@ -50,7 +51,6 @@ import uuid
 from quickicp import TEST_MODE, ToolError, save_json
 from runner_kit import RunnerContext, RunnerResult, contacts_split
 from state_store import owned_rows_output, renew_run_lock
-from supabase_store import phone_type
 
 POLL_LIMIT_SECONDS = 600          # at most 10 minutes of polling per 'run'
 POLL_EVERY_SECONDS = 60
@@ -257,22 +257,22 @@ def run_calls(ctx: RunnerContext, tools) -> RunnerResult:
     """One call of the calls runner. Returns done / waiting / stopped / failed / running (or dry)."""
     task, customer = ctx.task, ctx.run["customer"]
 
-    # 1. contacts: MOBILE numbers only (FREE, done once)
+    # 1. contacts: every person who has a phone number (FREE, done once). Line type is NOT a filter:
+    #    mobile, landline and unknown are all dialled. Only a person with no phone at all is skipped.
     def pick():
         kept, crm_skipped = contacts_split(ctx)      # drop leads a human is already working in the CRM
         if not kept and crm_skipped:
             raise ToolError(f"STOPPED: all {len(crm_skipped)} of T4's contacts are already being worked in "
                             "the CRM; nothing to call.")
         people = tools.people(customer, kept)
-        mobile = [p for p in people if phone_type(p.get("phone_number")) == "mobile"]
-        skipped = [{"person_id": p["id"], "name": p.get("full_name"), "phone_type": phone_type(p.get("phone_number"))}
-                   for p in people if phone_type(p.get("phone_number")) != "mobile"]
-        if not mobile:
-            raise ToolError(f"STOPPED: no MOBILE number among T4's {len(people)} people "
-                            f"({len(skipped)} landline / unknown).")
+        callable_people = [p for p in people if (p.get("phone_number") or "").strip()]
+        skipped = [{"person_id": p["id"], "name": p.get("full_name"), "phone_type": "no_number"}
+                   for p in people if not (p.get("phone_number") or "").strip()]
+        if not callable_people:
+            raise ToolError(f"STOPPED: no phone number among T4's {len(people)} people.")
         if TEST_MODE:
-            mobile = mobile[:tools.test_cap()]           # each one gets one of OUR test numbers
-        return {"contacts": tools.contacts(mobile), "person_ids": [p["id"] for p in mobile],
+            callable_people = callable_people[:tools.test_cap()]   # each one gets one of OUR test numbers
+        return {"contacts": tools.contacts(callable_people), "person_ids": [p["id"] for p in callable_people],
                 "skipped": skipped, "crm_skipped": crm_skipped}
     picked = ctx.free_call("contacts", pick, tool="supabase")
 
@@ -295,9 +295,9 @@ def run_calls(ctx: RunnerContext, tools) -> RunnerResult:
         return {**reply, "client_reference_used": request.get("client_reference")} if isinstance(reply, dict) else reply
 
     if ctx.dry:
-        lines = [f"Contacts:               {len(request['contacts'])} (mobile only"
+        lines = [f"Contacts:               {len(request['contacts'])} (all line types"
                  + (", TEST MODE: our TEST_CALL_NUMBERS only" if TEST_MODE else "") + ")",
-                 f"Skipped:                {len(picked['skipped'])} landline / unknown number(s)",
+                 f"Skipped:                {len(picked['skipped'])} with no phone number",
                  f"Left out (CRM):         {len(picked['crm_skipped'])} already being worked in the CRM",
                  "Would do:               store the campaign (nobody called), then ask you before dialling"]
         lines += [f"  {c.get('name')} | {c.get('company')} | phone {c.get('phone')}" for c in request["contacts"]]

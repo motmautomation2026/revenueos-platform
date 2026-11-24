@@ -230,14 +230,14 @@ test("result tiles measure against the plan target and explain the test cap", ()
     ["companies", 181, 200, "planned", 91, "Test cap reached"],
     ["contacts", 15, 350, "planned", 4, "Test cap reached"],
     ["email", 15, 15, "contacts", 100, "All of them"],
-    ["mobile", 12, 15, "contacts", 80, "3 cannot"],
+    ["mobile", 15, 15, "contacts", 100, "All of them"],
   ]);
   assert.deepEqual(tiles[0].lines, [
     "Test run: capped at 40, and the cap was reached.",
     "All reused from data already held; nothing newly bought.",
   ]);
   assert.deepEqual(tiles[2].lines, ["Every contact has an email address."]);
-  assert.deepEqual(tiles[3].lines, ["3 have only a landline and are not called."]);
+  assert.deepEqual(tiles[3].lines, ["Every contact has a phone number."]);
 });
 
 test("result tiles: target met, shortfall, mixed sources, and unfinished work", () => {
@@ -258,7 +258,7 @@ test("result tiles: target met, shortfall, mixed sources, and unfinished work", 
     report({ achieved: 1, target: 1, planTarget: 1, reused: 1, bought: 0 }, { achieved: 10, target: 10, planTarget: 10, reused: 10, bought: 0, withEmail: 8, mobile: 6, landline: 1 })
   );
   assert.deepEqual(people[2].lines, ["2 contacts have no email address."]);
-  assert.deepEqual(people[3].lines, ["1 has only a landline and is not called.", "3 have no phone number."]);
+  assert.deepEqual(people[3].lines, ["3 have no phone number and cannot be called."]);
 });
 
 test("email campaign: stages in order and tiles measured against the plan", () => {
@@ -313,7 +313,7 @@ test("calling campaign: stages, and tiles that explain themselves", () => {
   ]);
   assert.deepEqual(tiles[0].lines, ["Test run: capped at 1 call.", "Calls went only to MOTM test numbers, not to prospects."]);
   assert.deepEqual(tiles[1].lines, ["Nobody showed interest on these calls.", "Total talk time 5 seconds."]);
-  assert.deepEqual(tiles[2].lines, ["1 has only a landline."]);
+  assert.deepEqual(tiles[2].lines, ["1 has no phone number."]);
 
   const good = buildCallTiles({ ...campaign, skippedLandlines: [] }, { interested: 2, completedCalls: 4, talkSeconds: 185, calls: 4 });
   assert.deepEqual([good[1].verdict?.text, good[1].lines], ["50% interested", ["2 of 4 completed calls showed interest.", "Total talk time 3 min 5 sec."]]);
