@@ -100,10 +100,10 @@ class RealCallTools:
         """The calling account chosen for this customer NOW (run_for.py, from the platform)."""
         return (os.getenv("QUICKHOWL_CLIENT_REFERENCE") or "").strip() or None
 
-    def build_request(self, contacts: list[dict], voice: dict | None = None) -> dict:
+    def build_request(self, contacts: list[dict], voice: dict | None = None, script: dict | None = None) -> dict:
         import quickhowl
         request = quickhowl.build_request(contacts, understanding=self.understanding,
-                                          work_order=self.work_order, voice=voice)
+                                          work_order=self.work_order, voice=voice, script=script)
         quickhowl.assert_safe(request)
         return request
 
@@ -177,7 +177,7 @@ class FakeCallTools:
         return [{"name": p["full_name"], "phone": self.numbers[i], "company": p["company"].get("company_name")}
                 for i, p in enumerate(people)]
 
-    def build_request(self, contacts, voice=None):
+    def build_request(self, contacts, voice=None, script=None):
         self.calls["build"] += 1
         agent = voice or {"name": "Simran", "language": "hinglish"}
         return {"client_reference": "selftest", "reference": f"motm-selftest-call-{uuid.uuid4().hex[:12]}",
@@ -281,9 +281,12 @@ def run_calls(ctx: RunnerContext, tools) -> RunnerResult:
 
     # 2. the request (profile by the LLM), made ONCE. The project's chosen voice (platform) shapes the
     #    agent; None keeps the default agent.
-    from supabase_store import agent_voice
+    from supabase_store import agent_voice, agent_script
     voice = agent_voice(customer)
-    request = ctx.free_call("request", lambda: tools.build_request(picked["contacts"], voice=voice), tool="quickhowl")
+    script_override = agent_script(customer)
+    request = ctx.free_call("request",
+                            lambda: tools.build_request(picked["contacts"], voice=voice, script=script_override),
+                            tool="quickhowl")
     reference = request["reference"]
 
     # WHICH calling account the campaign goes to is chosen in the platform, and can still be changed

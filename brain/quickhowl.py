@@ -376,7 +376,7 @@ def internal_words_in(profile) -> dict:
 
 
 def make_profile(understanding: dict, work_order: dict, *, name: str = AGENT_NAME,
-                 language: str = AGENT_LANGUAGE, gender: str = "female") -> dict:
+                 language: str = AGENT_LANGUAGE, gender: str = "female", override: dict | None = None) -> dict:
     """
     The agent's script for v2. The LLM writes welcome_message and system_prompt (in the agent's language,
     with {placeholders}); code appends the fixed tone and supplies placeholder defaults. There is no
@@ -384,10 +384,21 @@ def make_profile(understanding: dict, work_order: dict, *, name: str = AGENT_NAM
     fills for each call (the contact's own fields win; `variables` are the fallbacks).
     name / language / gender describe the chosen voice, so the script matches it (the project can pick the
     voice in the platform; the default is Simran, Hinglish, female).
+    override {welcome_message, system_prompt}: the project's EDITED script (platform). When given, it is used
+    as-is instead of asking the LLM, after the same "no internal words" check (no rewrite: the person owns
+    the text, so a leak is reported for them to fix). The caller only passes it when its language matches.
     Returns {"welcome_message", "system_prompt", "variables"}.
     """
     pronoun = "he" if gender.strip().lower() == "male" else "she"
     company = customer_display_name(understanding)
+    if override and (override.get("welcome_message") or "").strip() and (override.get("system_prompt") or "").strip():
+        script = CallScript(welcome_message=override["welcome_message"].strip(),
+                            system_prompt=override["system_prompt"].strip())
+        leaks = internal_words_in(script)
+        if leaks:
+            raise ToolError(f"The edited call script contains words the person being called must never hear "
+                            f"{leaks}. Edit the script in the platform to remove them.")
+        return _finish_profile(script)
     facts = {
         "customer": company,
         "business_summary": understanding.get("business_summary"),
@@ -426,6 +437,11 @@ def make_profile(understanding: dict, work_order: dict, *, name: str = AGENT_NAM
     if leaks:
         raise ToolError(f"Call script contains internal words {leaks}. Run 'preview' again.")
 
+    return _finish_profile(script)
+
+
+def _finish_profile(script) -> dict:
+    """Code appends the fixed tone and the placeholder fallbacks to a script (LLM-written or edited)."""
     tone = (" Always be polite, brief and consultative. Never promise prices, discounts or guarantees. If the "
             "person is not interested or asks not to be called again, thank them and end the call politely.")
     # Fallbacks so an optional placeholder is never spoken as a gap (a contact's own value always wins).
@@ -439,13 +455,17 @@ def make_profile(understanding: dict, work_order: dict, *, name: str = AGENT_NAM
 
 # ================= REQUEST: BUILD, SECRETS, SAFETY =================
 
-def build_request(contacts: list[dict], understanding: dict, work_order: dict, voice: dict | None = None) -> dict:
+def build_request(contacts: list[dict], understanding: dict, work_order: dict,
+                  voice: dict | None = None, script: dict | None = None) -> dict:
     """
     The full request WITHOUT secrets (the calls runner saves it in the ledger; 'start' resends exactly this).
     contacts, understanding, work_order: given by the runner (the run's understanding, THIS task's work
     order). Never read from data/ files.
     voice: the project's chosen voice {voice_id, language, name, gender} (supabase_store.agent_voice), or
     None to use the default agent (AGENT_* above). The script is written to match the chosen voice.
+    script: the project's EDITED script {welcome_message, system_prompt, language} (supabase_store.agent_script),
+    used instead of writing it with the LLM -- but only when its language matches the agent's, so a voice
+    language change does not leave a mismatched script (otherwise it is ignored and an auto script is written).
     """
     check_settings("OPENAI_MODEL", *REQUIRED_KEYS)
     check_login()
@@ -459,7 +479,10 @@ def build_request(contacts: list[dict], understanding: dict, work_order: dict, v
     agent_voice_id = (voice.get("voice_id") or "").strip() or AGENT_VOICE_ID
     agent_gender = (voice.get("gender") or "").strip() or "female"
 
-    made = make_profile(understanding, work_order, name=agent_name, language=agent_language, gender=agent_gender)
+    # Use the edited script only when it was written for the language the agent now speaks.
+    override = script if (script and ((script.get("language") or "").strip() or agent_language) == agent_language) else None
+    made = make_profile(understanding, work_order, name=agent_name, language=agent_language,
+                        gender=agent_gender, override=override)
     company = customer_display_name(understanding)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
 

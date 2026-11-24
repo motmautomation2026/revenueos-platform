@@ -33,6 +33,7 @@ import { loadAccountStatus } from "@/lib/brain/account-status";
 import { loadCallSyncHealth } from "@/lib/brain/call-sync";
 import { loadCaller } from "@/lib/brain/caller-store";
 import { loadVoice } from "@/lib/brain/voice-store";
+import { loadScript } from "@/lib/brain/script-store";
 import {
   loadCallProgress,
   loadCallRecords,
@@ -181,6 +182,8 @@ export default async function CallsPage(props: ExecutionPageProps) {
   const progress = await loadCallProgress(report.campaigns.map((c) => c.rowId));
   // The project's AI calling voice (default pre-selected), so the person can change it on the script card.
   const voice = await loadVoice(project.id);
+  // The project's edited call script (if any), so the person can edit the opening line + instructions.
+  const scriptEdit = await loadScript(project.id);
 
   return (
     <div className="grid gap-8">
@@ -269,7 +272,12 @@ export default async function CallsPage(props: ExecutionPageProps) {
             </div>
 
             {scripts.get(campaign.rowId) && (
-              <CallScriptCard script={scripts.get(campaign.rowId)!} projectId={project.id} voice={voice} />
+              <CallScriptCard
+                script={scripts.get(campaign.rowId)!}
+                projectId={project.id}
+                voice={voice}
+                scriptEdit={scriptEdit}
+              />
             )}
 
             {health.noneConnected && !problem && (

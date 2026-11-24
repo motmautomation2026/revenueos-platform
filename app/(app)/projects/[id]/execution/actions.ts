@@ -8,7 +8,8 @@ import { saveAccounts } from "@/lib/brain/account-store";
 import { refreshAccountStatus } from "@/lib/brain/account-status";
 import { callerSchema } from "@/lib/brain/caller";
 import { saveCaller } from "@/lib/brain/caller-store";
-import { saveVoice } from "@/lib/brain/voice-store";
+import { loadVoice, saveVoice } from "@/lib/brain/voice-store";
+import { resetScript, saveScript } from "@/lib/brain/script-store";
 import { approvePaidStep } from "@/lib/brain/paid-steps";
 import { saveSender } from "@/lib/brain/sender-store";
 import { placeTestCall, sendTestEmail, type TestResult } from "@/lib/tools/test-tools";
@@ -55,6 +56,37 @@ export async function saveAgentVoice(input: unknown): Promise<{ ok: true; messag
   const { user, project } = await requireProject(projectId);
   if (project.owner_id !== user.id) return { ok: false, error: "Only the project owner can change the voice." };
   const result = await saveVoice(project.id, user.id, voiceId);
+  if (result.ok) revalidatePath(`/projects/${project.id}`, "layout");
+  return result;
+}
+
+/**
+ * Save an edited AI calling script (opening line + what the agent says). Owner only. Stored with the
+ * project's current voice language, so the Brain uses it only while that language matches. Applies to the
+ * next campaign. The Brain still runs its "no internal words" safety check before any call.
+ */
+export async function saveAgentScript(input: unknown): Promise<{ ok: true; message: string } | { ok: false; error: string }> {
+  const { projectId, welcomeMessage, systemPrompt } = (input ?? {}) as {
+    projectId?: string; welcomeMessage?: string; systemPrompt?: string;
+  };
+  if (typeof projectId !== "string" || typeof welcomeMessage !== "string" || typeof systemPrompt !== "string") {
+    return { ok: false, error: "Invalid request." };
+  }
+  const { user, project } = await requireProject(projectId);
+  if (project.owner_id !== user.id) return { ok: false, error: "Only the project owner can edit the script." };
+  const voice = await loadVoice(project.id);
+  const result = await saveScript(project.id, user.id, welcomeMessage, systemPrompt, voice.chosen.language);
+  if (result.ok) revalidatePath(`/projects/${project.id}`, "layout");
+  return result;
+}
+
+/** Clear the edited script so the agent writes its own again. Owner only. */
+export async function resetAgentScript(input: unknown): Promise<{ ok: true; message: string } | { ok: false; error: string }> {
+  const { projectId } = (input ?? {}) as { projectId?: string };
+  if (typeof projectId !== "string") return { ok: false, error: "Invalid request." };
+  const { user, project } = await requireProject(projectId);
+  if (project.owner_id !== user.id) return { ok: false, error: "Only the project owner can reset the script." };
+  const result = await resetScript(project.id, user.id);
   if (result.ok) revalidatePath(`/projects/${project.id}`, "layout");
   return result;
 }

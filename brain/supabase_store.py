@@ -522,6 +522,39 @@ def agent_voice(customer: str):
         return None
 
 
+def agent_script(customer: str):
+    """
+    This project's EDITED call script (revenueos_brain_accounts.calls_welcome_message / calls_system_prompt,
+    set in the platform), or None when it is unset / unknown. Returns {"welcome_message", "system_prompt",
+    "language"} when both texts are set; quickhowl.build_request then uses them instead of writing the script
+    with the LLM (after the same "no internal words" safety check). "language" is the language the edit was
+    written for, so the caller can ignore it if the project's voice language has since changed. Fail-open:
+    ANY error, or a selftest customer, returns None, so the auto-written script is kept on a read problem.
+    """
+    if not customer or customer.startswith(SELFTEST_PREFIX):
+        return None
+    try:
+        projects = (db.table("revenueos_projects").select("id")
+                      .eq("brain_customer_key", customer).limit(1).execute().data) or []
+        project_id = projects[0].get("id") if projects else None
+        if not project_id:
+            return None
+        rows = (db.table("revenueos_brain_accounts")
+                  .select("calls_welcome_message, calls_system_prompt, calls_script_language")
+                  .eq("project_id", project_id).limit(1).execute().data) or []
+        row = rows[0] if rows else {}
+        welcome = (row.get("calls_welcome_message") or "").strip()
+        system = (row.get("calls_system_prompt") or "").strip()
+        if not welcome or not system:
+            return None
+        return {"welcome_message": welcome, "system_prompt": system,
+                "language": (row.get("calls_script_language") or "").strip()}
+    except Exception as error:   # noqa: BLE001 -- optional setting; must never break a run
+        from orch import brain_log
+        brain_log.write("WARNING", f"agent script: could not read the setting for {customer}", error=error)
+        return None
+
+
 # ================= SEPARATION TEST (selftest-* customer only) =================
 
 def expect(label: str, condition: bool) -> None:
