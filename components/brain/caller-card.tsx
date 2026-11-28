@@ -68,7 +68,9 @@ export function CallerCard({ projectId, view }: { projectId: string; view: Calle
     }
   };
 
-  const source = view.options.find((option) => option.projectId === view.sourceProjectId);
+  // The label for a calling account is the account's own data — its reference and login email —
+  // not the project it happens to belong to (several projects share one account).
+  const accountLabel = (reference: string, email: string) => (email ? `${reference} · ${email}` : reference);
 
   return (
     <section aria-label="Calling account" className="grid gap-4 rounded-xl border p-5">
@@ -87,8 +89,8 @@ export function CallerCard({ projectId, view }: { projectId: string; view: Calle
           ) : view.mode === "existing" ? (
             <p className="flex flex-wrap items-center gap-x-2 text-sm">
               <CheckCircle2 className="size-4 text-emerald-700" aria-hidden />
-              <span className="font-medium">{source ? `${source.name}'s calling account` : "An existing calling account"}</span>
-              <span className="text-muted-foreground">· {view.existingReference}</span>
+              <span className="font-medium">{view.existingReference || "An existing calling account"}</span>
+              {view.existingEmail && <span className="text-muted-foreground">· {view.existingEmail}</span>}
             </p>
           ) : (
             <p className="flex flex-wrap items-center gap-x-2 text-sm text-amber-900">
@@ -172,7 +174,7 @@ export function CallerCard({ projectId, view }: { projectId: string; view: Calle
               >
                 {view.options.map((option) => (
                   <option key={option.projectId} value={option.projectId}>
-                    {option.name}
+                    {accountLabel(option.reference, option.email)}
                   </option>
                 ))}
               </select>

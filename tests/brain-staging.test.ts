@@ -89,7 +89,7 @@ test("both calling-account options are checked, and the app and the worker agree
   assert.match(callerSchema.safeParse({ ...own, mode: "existing" }).error!.issues[0].message, /Choose which calling account/);
   assert.ok(callerSchema.safeParse({ ...own, mode: "existing", sourceProjectId: "22222222-2222-4222-8222-222222222222" }).success);
 
-  const options = [{ projectId: "p-1", name: "Anvika Ai", reference: "motm-tech" }];
+  const options = [{ projectId: "p-1", name: "Anvika Ai", reference: "motm-tech", email: "revenueosplatform@gmail.com" }];
   assert.deepEqual(
     (({ mode, ready }) => ({ mode, ready }))(buildCallerView(null, true, options)),
     { mode: "none", ready: false },
@@ -103,7 +103,18 @@ test("both calling-account options are checked, and the app and the worker agree
   assert.equal(buildCallerView(line, false).ready, false, "its own account also needs the customer email");
   const existing = buildCallerView({ calls_client_reference: "motm-tech", calls_user_password: "pw-secret" }, false, options);
   assert.deepEqual([existing.mode, existing.ready, existing.sourceProjectId], ["existing", true, "p-1"]);
+  assert.equal(existing.existingEmail, "revenueosplatform@gmail.com", "the account's login email is exposed, not the project name");
   assert.ok(!JSON.stringify(existing).includes("pw-secret"));
+
+  // Many projects share one calling account: the dropdown lists the account once, by its own data.
+  const shared = [
+    { projectId: "p-1", name: "Anvika Ai", reference: "motm-tech", email: "revenueosplatform@gmail.com" },
+    { projectId: "p-2", name: "Durel Company", reference: "motm-tech", email: "revenueosplatform@gmail.com" },
+    { projectId: "p-3", name: "Quickhowl", reference: "motm-tech", email: "revenueosplatform@gmail.com" },
+  ];
+  const deduped = buildCallerView(null, true, shared).options;
+  assert.equal(deduped.length, 1, "projects sharing one account collapse to a single option");
+  assert.deepEqual([deduped[0].reference, deduped[0].email], ["motm-tech", "revenueosplatform@gmail.com"]);
 });
 
 test("a stopped call campaign is explained in plain words", async () => {

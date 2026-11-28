@@ -77,9 +77,14 @@ export type CallerView = {
   tokenSaved: boolean;
   /** In "existing" mode: the account's reference, and the project it was taken from when known. */
   existingReference: string;
+  /** In "existing" mode: the account's login email, when known. */
+  existingEmail: string;
   sourceProjectId: string;
-  /** Other projects of this user whose calling account can be used. */
-  options: { projectId: string; name: string }[];
+  /**
+   * The distinct calling accounts this user already has, one per account (not per project): many
+   * projects share one account, so each account is listed once, by its own reference + login email.
+   */
+  options: { projectId: string; name: string; reference: string; email: string }[];
   /** True when calls can go out: an existing account, or an own account with a complete line. */
   ready: boolean;
 };
@@ -90,7 +95,7 @@ type Row = Partial<Record<string, string | null>>;
 export function buildCallerView(
   row: Row | null,
   hasCustomerEmail: boolean,
-  options: { projectId: string; name: string; reference: string }[] = []
+  options: { projectId: string; name: string; reference: string; email: string }[] = []
 ): CallerView {
   const text = (column: string) => (row?.[column] ?? "").trim();
   const reference = text("calls_client_reference");
@@ -99,14 +104,25 @@ export function buildCallerView(
   const tokenSaved = !!text("calls_vobiz_auth_token");
   const lineComplete = !!(authId && did && tokenSaved);
   const mode = reference ? "existing" : lineComplete ? "own" : "none";
+  // One row per distinct calling account (its reference), not per project: many projects share the
+  // same account, so listing every project made one account look like several. Keep the first project
+  // seen for each account as the one to copy from — any project on the same reference is identical.
+  const distinct: CallerView["options"] = [];
+  const seen = new Set<string>();
+  for (const option of options) {
+    if (seen.has(option.reference)) continue;
+    seen.add(option.reference);
+    distinct.push(option);
+  }
   return {
     mode,
     authId,
     did,
     tokenSaved,
     existingReference: reference,
-    sourceProjectId: options.find((option) => option.reference === reference)?.projectId ?? "",
-    options: options.map(({ projectId, name }) => ({ projectId, name })),
+    existingEmail: options.find((option) => option.reference === reference)?.email ?? "",
+    sourceProjectId: distinct.find((option) => option.reference === reference)?.projectId ?? "",
+    options: distinct,
     ready: mode === "existing" || (mode === "own" && hasCustomerEmail),
   };
 }

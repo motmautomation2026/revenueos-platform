@@ -40,9 +40,9 @@ export const loadCaller = cache(async (projectId: string, ownerId: string): Prom
     const { data: accounts } = others.length
       ? await admin
           .from(TABLE)
-          .select("project_id, calls_client_reference")
+          .select("project_id, calls_client_reference, calls_user_email")
           .in("project_id", others.map((project) => project.id))
-          .returns<{ project_id: string; calls_client_reference: string | null }[]>()
+          .returns<{ project_id: string; calls_client_reference: string | null; calls_user_email: string | null }[]>()
       : { data: [] };
     const options = (accounts ?? [])
       .filter((account) => account.calls_client_reference?.trim())
@@ -50,6 +50,7 @@ export const loadCaller = cache(async (projectId: string, ownerId: string): Prom
         projectId: account.project_id,
         name: others.find((project) => project.id === account.project_id)?.customer_name ?? "Another project",
         reference: account.calls_client_reference!.trim(),
+        email: (account.calls_user_email ?? "").trim(),
       }));
 
     const own = (projects ?? []).find((project) => project.id === projectId);
