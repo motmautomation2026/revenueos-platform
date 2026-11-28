@@ -26,10 +26,11 @@ import { loadSetupGaps } from "@/lib/brain/setup";
 import { readStaging } from "@/lib/brain/staging";
 import { readAutoApprove } from "@/lib/brain/auto-approve";
 import { loadPaidStep } from "@/lib/brain/paid-steps";
-import { loadCallRecords } from "@/lib/brain/read";
+import { loadCallRecords, loadEmailStats } from "@/lib/brain/read";
 import { loadRequest, planChangedSince } from "@/lib/brain/request-store";
 import {
   buildCallsReport,
+  buildEmailReport,
   buildFunnel,
   toolsInRun,
 } from "@/lib/brain/tools";
@@ -145,6 +146,25 @@ export default async function ExecutionPage(props: ExecutionPageProps) {
       planTarget: null,
     });
   }
+  // "Emails sent" must show emails actually delivered, not recipients enrolled: the Brain marks the task
+  // done the moment the campaign is RUNNING (achieved = recipients it launched for), but the email tool
+  // then sends them gradually (paced). Use the email tool's real sent count, measured against the enrolled
+  // total, so a running campaign reads "21 / 242" instead of a misleading "242 / 242".
+  const emailStage = funnel.findIndex((stage) => stage.key === "emails");
+  if (emailStage !== -1) {
+    const emailStats = await loadEmailStats(
+      buildEmailReport(rows).campaigns.map((c) => c.campaignId),
+    );
+    if (emailStats.size > 0) {
+      const sent = [...emailStats.values()].reduce((sum, s) => sum + s.sent, 0);
+      const enrolled =
+        funnel[emailStage].achieved ??
+        [...emailStats.values()].reduce((sum, s) => sum + s.recipients, 0);
+      funnel[emailStage].achieved = sent; // actually sent so far
+      funnel[emailStage].target = enrolled; // of the recipients the campaign is sending to
+    }
+  }
+
   const percentDone = view.counts.total
     ? Math.round((view.counts.done / view.counts.total) * 100)
     : 0;
