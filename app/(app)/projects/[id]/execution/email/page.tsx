@@ -47,7 +47,7 @@ const WEEKDAYS = ["", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
 export default async function EmailPage(props: ExecutionPageProps) {
   const { project, data, base, query } = await loadExecutionPage(props);
-  const sender = await loadSender(project.id);
+  const sender = await loadSender(project.id, project.owner_id);
   const senderCard = sender.available ? <SenderCard projectId={project.id} view={sender.view} /> : null;
   const accountStatus = await loadAccountStatus(project.id);
   const emailStatusCard = accountStatus.available ? (

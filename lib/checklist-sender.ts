@@ -166,6 +166,9 @@ export function makeSenderSchema(passwordRequired: boolean) {
 export const senderSchema = makeSenderSchema(false);
 export type SenderInput = z.infer<typeof senderSchema>;
 
+/** An email account this user already has, which another project can reuse (one row per account). */
+export type SenderAccountOption = { projectId: string; name: string; reference: string; email: string };
+
 export type SenderView = {
   /** The customer's email: the login of their email-tool account. */
   loginEmail: string;
@@ -173,15 +176,21 @@ export type SenderView = {
   passwordSaved: boolean;
   /** Labels of what is still needed before the first campaign can go out. */
   missing: string[];
-  /** A different account already exists for this customer (set under Tool accounts). */
+  /** This project reuses another account (email_client_reference is set), rather than its own. */
   existingAccount: boolean;
+  /** When existingAccount: the shared account's reference and login email, for display. */
+  existingReference: string;
+  existingEmail: string;
+  /** The user's other email accounts this project could reuse, one entry per account. */
+  options: SenderAccountOption[];
 };
 
 /** Sender answers by code -> what the page shows. The password itself never leaves the server. */
 export function buildSenderView(
   answers: Record<string, string | null | undefined>,
   loginEmail: string | null | undefined,
-  existingAccount = false
+  existingAccount = false,
+  extra: { reference?: string | null; email?: string | null; options?: SenderAccountOption[] } = {}
 ): SenderView {
   const values = {} as Record<SenderKey, string>;
   const missing: string[] = [];
@@ -198,12 +207,24 @@ export function buildSenderView(
   if (!(values.style in SENDER_STYLE)) values.style = DEFAULT_STYLE;
   const login = (loginEmail ?? "").trim();
   if (!login) missing.unshift("Customer email");
+  // One entry per distinct account (its reference): many projects can point at the same account, so
+  // the chooser lists each account once, by its own reference + login email.
+  const options: SenderAccountOption[] = [];
+  const seen = new Set<string>();
+  for (const option of extra.options ?? []) {
+    if (!option.reference || seen.has(option.reference)) continue;
+    seen.add(option.reference);
+    options.push(option);
+  }
   return {
     loginEmail: login,
     values,
     passwordSaved: !!(answers["SENDER-SMTP-PASSWORD"] ?? "").trim(),
     missing: existingAccount ? [] : [...new Set(missing)],
     existingAccount,
+    existingReference: (extra.reference ?? "").trim(),
+    existingEmail: (extra.email ?? "").trim(),
+    options,
   };
 }
 

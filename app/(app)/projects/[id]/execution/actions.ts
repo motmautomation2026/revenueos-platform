@@ -11,7 +11,7 @@ import { saveCaller } from "@/lib/brain/caller-store";
 import { loadVoice, saveVoice } from "@/lib/brain/voice-store";
 import { resetScript, saveScript } from "@/lib/brain/script-store";
 import { approvePaidStep } from "@/lib/brain/paid-steps";
-import { saveSender } from "@/lib/brain/sender-store";
+import { saveSender, reuseEmailAccount, ownEmailAccount } from "@/lib/brain/sender-store";
 import { placeTestCall, sendTestEmail, type TestResult } from "@/lib/tools/test-tools";
 import { brainCustomerFor } from "@/lib/brain/read";
 import { contactColumns, contactSchema, stagingColumns, stagingSchema } from "@/lib/brain/staging";
@@ -221,6 +221,26 @@ export async function saveSenderAccount(input: unknown): Promise<{ ok: true } | 
   if (!parsed.success) return { ok: false, error: parsed.error.issues[0]?.message ?? "Check the form and try again." };
   const { user, project } = await requireProject(parsed.data.projectId);
   const result = await saveSender(project.id, user.id, parsed.data.sender);
+  if (result.ok) revalidatePath(`/projects/${project.id}`, "layout");
+  return result;
+}
+
+/** Reuse another of the owner's email accounts for this project (its account + connected mailbox). Owner only. */
+export async function chooseEmailAccount(
+  input: unknown
+): Promise<{ ok: true; message: string } | { ok: false; error: string }> {
+  const parsed = z
+    .object({ projectId: z.uuid(), mode: z.enum(["own", "existing"]), sourceProjectId: z.uuid().optional() })
+    .safeParse(input);
+  if (!parsed.success) return { ok: false, error: "Invalid request." };
+  const { user, project } = await requireProject(parsed.data.projectId);
+  if (project.owner_id !== user.id) return { ok: false, error: "Only the project owner can change the email account." };
+  const result =
+    parsed.data.mode === "existing"
+      ? parsed.data.sourceProjectId
+        ? await reuseEmailAccount(project.id, user.id, parsed.data.sourceProjectId)
+        : ({ ok: false, error: "Choose which email account to use." } as const)
+      : await ownEmailAccount(project.id, user.id);
   if (result.ok) revalidatePath(`/projects/${project.id}`, "layout");
   return result;
 }

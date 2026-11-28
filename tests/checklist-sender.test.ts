@@ -77,6 +77,20 @@ test("the page is told what is missing, and never the password", () => {
   assert.deepEqual(old.missing, ["SMTP security"], "an old answer the tool would refuse must be chosen again");
 
   assert.deepEqual(buildSenderView({}, null, true).missing, [], "an existing email account needs no sender details");
+
+  // Reuse options: many projects can share one account, so each account is listed once, with its own data.
+  const reused = buildSenderView({}, "owner@durel.com", true, {
+    reference: "durel-mail",
+    email: "sales@durel.com",
+    options: [
+      { projectId: "p-1", name: "Durel", reference: "durel-mail", email: "sales@durel.com" },
+      { projectId: "p-2", name: "Durel Trial", reference: "durel-mail", email: "sales@durel.com" },
+      { projectId: "p-3", name: "Anvika", reference: "anvika-mail", email: "hi@anvika.com" },
+    ],
+  });
+  assert.deepEqual([reused.existingReference, reused.existingEmail], ["durel-mail", "sales@durel.com"]);
+  assert.equal(reused.options.length, 2, "projects sharing one account collapse to a single option");
+  assert.deepEqual(reused.options.map((o) => o.reference), ["durel-mail", "anvika-mail"]);
 });
 
 test("saving keeps the stored password when the field is left empty", () => {
